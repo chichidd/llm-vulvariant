@@ -681,7 +681,7 @@ class VulnerabilityProfiler:
 
 ## 输出格式
 
-**必须**严格按照以下JSON格式输出，不要包含任何其他内容：
+**必须**严格按照以下格式输出，JSON主体包含在"```json"和"```"之间，不要包含任何其他内容：
 
 ```json
 {{
@@ -698,7 +698,7 @@ class VulnerabilityProfiler:
 
         # 5. 查询LLM
         conversations = [
-            {"role": "system", "content": "你是一个污点分析和漏洞分析领域的资深专家，擅长识别代码中的安全漏洞和数据流分析。请严格按照JSON格式输出，不要包含其他内容。"},
+            {"role": "system", "content": "你是一个污点分析和漏洞分析领域的资深专家，擅长识别代码中的安全漏洞和数据流分析。"},
             {"role": "user", "content": prompt}
         ]
         
@@ -909,7 +909,7 @@ class VulnerabilityProfiler:
 
 ## 输出格式
 
-**必须**严格按照以下JSON格式输出，不要包含任何其他内容：
+**必须**严格按照以下格式输出，JSON主体包含在"```json"和"```"之间，不要包含任何其他内容：
 
 ```json
 {{
@@ -1157,7 +1157,7 @@ class VulnerabilityProfiler:
 
 ## 输出格式
 
-**必须**严格按照以下JSON格式输出，不要包含任何其他内容：
+**必须**严格按照以下格式输出，JSON主体包含在"```json"和"```"之间，不要包含任何其他内容：
 
 ```json
 {{

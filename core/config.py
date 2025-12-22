@@ -15,18 +15,20 @@ REPO_BASE_PATH = DATA_BASE_PATH / "repos"
 
 CODEQL_DB_PATH = PROJECT_ROOT / "codeql_dbs"
 
+DS_THINK_TOKENS = ('<think>', '</think>')
+
 
 
 @dataclass
 class LLMConfig:
     """LLM配置"""
     provider: str = "hku"  # openai, anthropic, hku, deepseek, mock
-    model: str = "Qwen3-Coder-480B-A35B-Instruct-FP8"
+    model: str = "DeepSeek-V3.2"
     api_key: Optional[str] = None
     base_url: Optional[str] = None
-    temperature: float = 0
+    temperature: float = 1.0
     top_p: float = 0.9
-    max_tokens: int = 8192 * 8
+    max_tokens: int = 0
     timeout: int = 120
 
     # 重试配置
@@ -35,7 +37,8 @@ class LLMConfig:
     max_delay: float = 60.0  # 最大延迟（秒）
     backoff_factor: float = 2.0  # 指数退避因子
     
-    # enable_thinking: bool = False  # Qwen3特有参数
+
+    enable_thinking: bool = True  # LAB LLM DS参数
     
     def __post_init__(self):
         """根据provider自动设置API key和base_url"""
@@ -43,12 +46,12 @@ class LLMConfig:
             # HKU LLM API
             self.api_key = os.getenv("HKU_LLM_API_KEY")
             self.base_url = "https://hkucvm.dynv6.net/v1"
-            self.model = "Qwen3-Coder-480B-A35B-Instruct-FP8"
+            self.model = "DeepSeek-V3.2"
         elif self.provider == "deepseek":
             # DeepSeek API
             self.api_key = os.getenv("DEEPSEEK_API_KEY")
             self.base_url = "https://api.deepseek.com/v1"
-            self.model = "deepseek-reasoner"
+            self.model = "deepseek-chat"
             self.max_tokens = 65536
         elif self.provider == "openai":
             self.api_key = os.getenv("OPENAI_API_KEY")

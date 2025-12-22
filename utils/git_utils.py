@@ -76,6 +76,37 @@ def checkout_commit(repo_path: str, target_commit: str) -> bool:
         return False
 
 
+def restore_to_latest_commit(repo_path: str) -> bool:
+    """
+    将仓库恢复到最新commit（切回之前的分支/commit位置）。
+    
+    使用 git checkout - 命令切换回上一次所在的分支或commit。
+    
+    Args:
+        repo_path: Git 仓库路径
+    
+    Returns:
+        True 表示成功，False 表示失败
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'checkout', '-'],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        current_commit = get_git_commit(repo_path)
+        print(f"已恢复到之前的位置，当前 commit: {current_commit}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"恢复失败: {e.stderr}")
+        return False
+    except Exception as e:
+        print(f"恢复时发生错误: {e}")
+        return False
+
+
 def get_changed_files(repo_path: str, commit1: str, commit2: str = "HEAD") -> List[str]:
     """
     Get list of changed files between two commits

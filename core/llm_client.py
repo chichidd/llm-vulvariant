@@ -8,10 +8,20 @@ import re
 import time
 import logging
 
-from .config import LLMConfig
+from .config import LLMConfig, DS_THINK_TOKENS
 
 # 设置日志
 logger = logging.getLogger(__name__)
+
+def concat_ds_think_content(reasoning: str, output: str) -> str:
+    """将DeepSeek的reasoning内容和输出内容合并"""
+    think_start, think_end = DS_THINK_TOKENS
+    # 处理 output 为 None 的情况（例如只有 tool_calls 没有 content）
+    output = output or ''
+    # 处理 reasoning 为 None 的情况
+    reasoning = reasoning or ''
+    return ''.join([think_start, reasoning, think_end, output])
+
 
 
 class LLMAPIError(Exception):
@@ -162,8 +172,17 @@ class BaseLLMClient(ABC):
         )
     
     @abstractmethod
-    def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        """发送聊天请求"""
+    def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> str:
+        """发送聊天请求
+        
+        Args:
+            messages: 消息列表
+            tools: 可选的工具定义列表（OpenAI format）
+            **kwargs: 其他参数
+            
+        Returns:
+            响应内容字符串（或包含tool_calls的字典）
+        """
         pass
     
     @abstractmethod
@@ -206,7 +225,7 @@ class OpenAIClient(BaseLLMClient):
 
 
 class HKULLMClient(BaseLLMClient):
-    """HKU LLM客户端 - 支持Qwen3-Coder等模型"""
+    """HKU LLM客户端 - DeepSeek-V3.2 - 带自动重试机制"""
     
     def __init__(self, config: LLMConfig):
         super().__init__(config)
@@ -219,7 +238,16 @@ class HKULLMClient(BaseLLMClient):
         except ImportError:
             raise ImportError("Please install openai: pip install openai")
     
-    def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
+    def _make_chat_request(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
+        """实际执行聊天请求（内部方法）
+        
+        Args:
+            messages: 消息列表
+            tools: 工具定义列表（可选）
+            **kwargs: 其他参数
+                - clear_reasoning: 是否清除历史消息中的 reasoning_content（节省带宽）
+                - separate_reasoning: 是否分离 reasoning 和 content
+        """
         # 添加系统消息如果不存在
         if not any(m.get("role") == "system" for m in messages):
             messages = [
@@ -227,27 +255,110 @@ class HKULLMClient(BaseLLMClient):
                 *messages
             ]
         
-        response = self.client.chat.completions.create(
-            model=self.config.model,
-            messages=messages,
-            temperature=kwargs.get("temperature", self.config.temperature),
-            top_p=kwargs.get("top_p", self.config.top_p),
-            timeout=kwargs.get("timeout", self.config.timeout),
-            max_tokens=0,  # kwargs.get("max_tokens", self.config.max_tokens),
-            # extra_body={
-            #     "chat_template_kwargs": {
-            #         "enable_thinking": kwargs.get("enable_thinking", self.config.enable_thinking)
-            #     },
-            # }
-        )
-        return response.choices[0].message.content
+        # 如果请求清除 reasoning_content（新轮次开始时），创建消息副本并清除
+        if kwargs.get("clear_reasoning", False):
+            messages = [
+                {k: v for k, v in msg.items() if k != 'reasoning_content'} if isinstance(msg, dict) else msg
+                for msg in messages
+            ]
+        
+        # 构建请求参数
+        request_params = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": kwargs.get("temperature", self.config.temperature),
+            "top_p": kwargs.get("top_p", self.config.top_p),
+            "timeout": kwargs.get("timeout", self.config.timeout),
+            "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+            "stream": False,
+            "extra_body": {
+                "chat_template_kwargs": {"thinking": self.config.enable_thinking}
+            }
+        }
+        
+        # SGLang 特性：支持 separate_reasoning 参数
+        if kwargs.get("separate_reasoning"):
+            request_params["extra_body"]["separate_reasoning"] = True
+
+        # 添加tools参数
+        if tools is not None:
+            request_params["tools"] = tools
+            request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
+        
+        response = self.client.chat.completions.create(**request_params)
+        
+        # 处理响应
+        message = response.choices[0].message
+        
+        # 如果有tool_calls，返回包含tool_calls的字典
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            result = {
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    }
+                    for tc in message.tool_calls
+                ]
+            }
+            # Tool+Thinking 模式：如果启用 thinking，添加 reasoning_content
+            if self.config.enable_thinking and hasattr(message, 'reasoning_content'):
+                result["reasoning"] = message.reasoning_content
+            return result
+
+        # 常规响应处理
+        if self.config.enable_thinking and hasattr(message, 'reasoning_content'):
+            # 如果不需要合并，可以返回分离的格式
+            if kwargs.get("separate_reasoning", False):
+                return {
+                    "reasoning": message.reasoning_content,
+                    "content": message.content
+                }
+            return concat_ds_think_content(message.reasoning_content, message.content)
+        return message.content
     
+    def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
+        """发送聊天请求（带重试机制）
+        
+        Args:
+            messages: 消息列表
+            tools: 可选的工具定义列表
+            **kwargs: 其他参数
+                - tool_choice: "none", "auto", "required" (当提供tools时)
+                - clear_reasoning: bool，是否清除历史消息中的 reasoning_content（新轮次开始时使用）
+                - separate_reasoning: bool，是否返回分离的 reasoning 和 content（无 tool_calls 时）
+                
+        Returns:
+            根据响应类型返回不同格式：
+            - 有 tool_calls: {"content": str, "tool_calls": [...], "reasoning": str (if thinking enabled)}
+            - 无 tool_calls 且 separate_reasoning=True: {"reasoning": str, "content": str}
+            - 其他: str (合并后的内容)
+            
+        Note:
+            在 Tool+Thinking 模式下的多轮对话（SGLang/HKU）：
+            1. 在同一个问题的多个子轮次中，需要将 reasoning_content 传回 API
+            2. 开始新问题时，可使用 clear_reasoning=True 清除历史 reasoning_content
+            3. Assistant 消息应包含 content, tool_calls (如有), reasoning_content (如有)
+            4. 使用 extra_body={"separate_reasoning": True} 分离推理内容
+        """
+        return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
+
     def complete(self, prompt: str, **kwargs) -> str:
         return self.chat([{"role": "user", "content": prompt}], **kwargs)
 
 
 class DeepSeekClient(BaseLLMClient):
-    """DeepSeek客户端 - 带自动重试机制"""
+    """DeepSeek客户端 - 带自动重试机制
+    
+    支持功能：
+    1. 思考模式（reasoner模型）
+    2. Tool调用（tools参数）
+    """
     
     def __init__(self, config: LLMConfig):
         super().__init__(config)
@@ -257,11 +368,21 @@ class DeepSeekClient(BaseLLMClient):
                 api_key=config.api_key,
                 base_url=config.base_url or "https://api.deepseek.com/v1"
             )
+            
         except ImportError:
             raise ImportError("Please install openai: pip install openai")
     
-    def _make_chat_request(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        """实际执行聊天请求（内部方法）"""
+    def _make_chat_request(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
+        """实际执行聊天请求（内部方法）
+        
+        Args:
+            messages: 消息列表
+            tools: 工具定义列表（可选）
+            **kwargs: 其他参数
+                - tool_choice: 工具选择策略 "none"/"auto"/"required"
+                - clear_reasoning: 是否清除历史消息中的 reasoning_content（节省带宽）
+
+        """
         # 添加系统消息如果不存在
         if not any(m.get("role") == "system" for m in messages):
             messages = [
@@ -269,41 +390,99 @@ class DeepSeekClient(BaseLLMClient):
                 *messages
             ]
         
-        response = self.client.chat.completions.create(
-            model=self.config.model,
-            messages=messages,
-            temperature=kwargs.get("temperature", self.config.temperature),
-            max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
-        )
-        return response.choices[0].message.content
-    
-    def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        """发送聊天请求（带重试机制）"""
-        return self._execute_with_retry(self._make_chat_request, messages, **kwargs)
-    
-    def complete(self, prompt: str, **kwargs) -> str:
-        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+        # 如果请求清除 reasoning_content（新轮次开始时），创建消息副本并清除
+        if kwargs.get("clear_reasoning", False):
+            messages = [
+                {k: v for k, v in msg.items() if k != 'reasoning_content'} if isinstance(msg, dict) else msg
+                for msg in messages
+            ]
+        
+        # 构建基础请求参数
+        request_params = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": kwargs.get("temperature", self.config.temperature),
+            "top_p": kwargs.get("top_p", self.config.top_p),
+            "timeout": kwargs.get("timeout", self.config.timeout),
+            "stream": False,
+        }
+        
+        # 处理 thinking 模式（reasoner 模型或显式启用）
+        if self.config.enable_thinking:
+            request_params["top_p"] = kwargs.get("top_p", self.config.top_p)
+            request_params["max_tokens"] = kwargs.get("max_tokens", self.config.max_tokens)
+            # 使用 thinking 参数启用思考模式（适用于 tool calling）
+            request_params["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            request_params["max_tokens"] = min(kwargs.get("max_tokens", self.config.max_tokens), 8192)
+        
 
-
-class AnthropicClient(BaseLLMClient):
-    """Anthropic客户端"""
+        # 添加tools参数
+        if tools is not None:
+            request_params["tools"] = tools
+            request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
+        
+        # 发送请求
+        response = self.client.chat.completions.create(**request_params)
+        message = response.choices[0].message
+        
+        # 处理tool_calls响应
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            result = {
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    }
+                    for tc in message.tool_calls
+                ]
+            }
+            # Tool+Thinking 模式：如果启用 thinking，添加 reasoning_content
+            if self.config.enable_thinking and hasattr(message, 'reasoning_content'):
+                result["reasoning"] = message.reasoning_content
+            return result
+        
+        # 处理常规响应
+        if self.config.enable_thinking and hasattr(message, 'reasoning_content'):
+            # 如果不需要合并，可以返回分离的格式
+            if kwargs.get("separate_reasoning", False):
+                return {
+                    "reasoning": message.reasoning_content,
+                    "content": message.content
+                }
+            return concat_ds_think_content(message.reasoning_content, message.content)
+        
+        return message.content
     
-    def __init__(self, config: LLMConfig):
-        super().__init__(config)
-        try:
-            from anthropic import Anthropic
-            self.client = Anthropic(api_key=config.api_key)
-        except ImportError:
-            raise ImportError("Please install anthropic: pip install anthropic")
-    
-    def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
-        response = self.client.messages.create(
-            model=self.config.model,
-            messages=messages,
-            temperature=kwargs.get("temperature", self.config.temperature),
-            max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
-        )
-        return response.content[0].text
+    def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
+        """发送聊天请求（带重试机制）
+        
+        Args:
+            messages: 消息列表
+            tools: 工具定义列表（可选）
+            **kwargs: 其他参数
+                - tool_choice: 工具选择 "none"/"auto"/"required"（当提供tools时）
+                - clear_reasoning: bool，是否清除历史消息中的 reasoning_content（新轮次开始时使用）
+                - separate_reasoning: bool，是否返回分离的 reasoning 和 content（无 tool_calls 时）
+                
+        Returns:
+            根据响应类型返回不同格式：
+            - 有 tool_calls: {"content": str, "tool_calls": [...], "reasoning": str (if thinking enabled)}
+            - 无 tool_calls 且 separate_reasoning=True: {"reasoning": str, "content": str}
+            - 其他: str (合并后的内容)
+            
+        Note:
+            在 Tool+Thinking 模式下的多轮对话：
+            1. 在同一个问题的多个子轮次中，需要将 reasoning_content 传回 API
+            2. 开始新问题时，应使用 clear_reasoning=True 清除历史 reasoning_content
+            3. Assistant 消息应包含 content, tool_calls (如有), reasoning_content (如有)
+        """
+        return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
     
     def complete(self, prompt: str, **kwargs) -> str:
         return self.chat([{"role": "user", "content": prompt}], **kwargs)
@@ -312,7 +491,9 @@ class AnthropicClient(BaseLLMClient):
 class MockLLMClient(BaseLLMClient):
     """Mock LLM客户端，用于测试"""
     
-    def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
+    def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> str:
+        if tools is not None:
+            return '{"content": "mock response", "tool_calls": [{"id": "mock_1", "type": "function", "function": {"name": "mock_tool", "arguments": "{}"}}]}'
         return '{"status": "mock_response", "message": "This is a mock response for testing"}'
     
     def complete(self, prompt: str, **kwargs) -> str:
@@ -323,7 +504,6 @@ def create_llm_client(config: LLMConfig) -> BaseLLMClient:
     """创建LLM客户端"""
     providers = {
         "openai": OpenAIClient,
-        "anthropic": AnthropicClient,
         "hku": HKULLMClient,
         "deepseek": DeepSeekClient,
         "mock": MockLLMClient,

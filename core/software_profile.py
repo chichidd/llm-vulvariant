@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 from core.llm_client import BaseLLMClient
 from core.config import SoftwareProfilerConfig, EXTENSION_MAPPING
@@ -379,10 +381,10 @@ class SoftwareProfiler:
         
         print(f"[INFO] Reused {reused_count} file summaries, need to analyze {new_analysis_count} new/changed files")
         
-        # 只分析变更的文件
+        # 只分析变更的文件（使用并发版本）
         if new_analysis_count > 0:
             changed_file_paths = [f for f in repo_info['files'] if f in changed_files_set]
-            changed_summaries = self._summarize_each_file(changed_file_paths, repo_name=repo_name, version=version, repo_path=repo_path)
+            changed_summaries = self._summarize_each_file_concurrent(changed_file_paths, repo_name=repo_name, version=version, repo_path=repo_path)
             new_file_summaries.update(changed_summaries)
         
         repo_info['file_summaries'] = new_file_summaries
@@ -496,8 +498,8 @@ class SoftwareProfiler:
                     pass
         info["dependencies"] = list(dependencies)
         
-        # 获取每个文件的摘要（支持断点续传）
-        info['file_summaries'] = self._summarize_each_file(info['files'], repo_name=repo_name, version=version, repo_path=repo_path)
+        # 获取每个文件的摘要（支持断点续传，使用并发版本）
+        info['file_summaries'] = self._summarize_each_file_concurrent(info['files'], repo_name=repo_name, version=version, repo_path=repo_path)
 
         return info
 
@@ -902,6 +904,240 @@ class SoftwareProfiler:
         
         return file_summaries
 
+    def _summarize_each_file_concurrent(self, file_path_list: List, max_files=None, repo_name: str = None, 
+                                         version: str = None, repo_path: Path = None, 
+                                         max_workers: int = 5) -> Dict[str, str]:
+        """
+        并发版本：通过query llm，生成每个文件的简要描述，用于分析business logic。
+        
+        使用线程池并发处理多个文件，大幅提高分析速度。
+        支持断点续传：已分析的文件会被跳过，每分析一批文件后自动保存。
+        
+        Args:
+            file_path_list: 文件路径列表（相对路径）
+            max_files: 最大文件数限制
+            repo_name: 仓库名称（用于保存检查点）
+            version: 版本号（commit hash）
+            repo_path: 仓库根目录路径（用于将相对路径转换为绝对路径读取文件）
+            max_workers: 最大并发线程数（默认5，避免API限流）
+            
+        Returns:
+            {
+                "path/to/file1.py": {"functionality": "...", "key_functions": [...]},
+                ...
+            }
+        """
+        # 尝试加载已有的文件摘要检查点
+        file_summaries = {}
+        if repo_name and self.storage_manager:
+            path_parts = (repo_name, version) if version else (repo_name,)
+            existing_summaries = self.storage_manager.load_checkpoint("file_summaries", *path_parts)
+            if existing_summaries:
+                file_summaries = existing_summaries
+                print(f"[INFO] Loaded {len(file_summaries)} existing file summaries from checkpoint")
+
+        CODE_SNIPPET_PROMPT = """请分析以下代码文件，提取其功能特征和技术要素。
+
+# 代码文件
+
+**文件路径**: `{file_path}`
+
+**代码内容**:
+```
+{file_content}
+```
+
+---
+
+# 分析任务
+
+## 1. main_purpose (主要目的)
+- 用一句话概括这个文件在整个项目中的作用
+- 例如："提供用户认证和授权功能"、"实现HTTP请求处理"、"定义数据模型和数据库映射"
+
+## 2. key_functions (关键函数/类)
+- 列出文件中**最重要的**函数名或类名（3-10个）
+- 优先包括：
+  * 公共API（被其他模块调用的函数）
+  * 核心业务逻辑函数
+  * 重要的类定义
+- 格式：使用实际的函数/类名称，不要添加括号或参数
+- 例如：["UserController", "authenticate", "validate_token", "get_user_profile"]
+
+## 3. dependencies (主要依赖)
+- 列出文件导入的**关键外部库或模块**（3-8个）
+- 优先包括：
+  * 核心功能依赖的第三方库
+  * 项目内部的重要模块引用
+- 忽略：标准库的常见导入（如os, sys, json等，除非是核心功能）
+- 格式：使用库/模块的实际名称
+- 例如：["flask", "sqlalchemy", "jwt", "bcrypt"]
+
+## 4. functionality (核心功能描述)
+- 用2-4句话详细描述文件实现的功能
+- 说明文件做什么、如何做、与什么交互
+- 包括：主要的业务逻辑、数据处理流程、对外接口
+- 例如："该文件实现了用户认证系统的核心逻辑。通过JWT令牌验证用户身份，提供登录、注销和令牌刷新接口。使用bcrypt对密码进行加密存储，并与数据库交互管理用户会话。"
+
+---
+
+# 分析指导
+
+**代码理解**:
+- 快速浏览导入语句，了解依赖关系
+- 识别主要的类和函数定义
+- 理解函数间的调用关系和数据流
+
+**准确性优先**:
+- 使用代码中实际出现的名称
+- 不要猜测或添加不存在的内容
+- 如果代码很短或功能单一，列表可以较短
+
+**避免**:
+- 不要包含辅助函数（如_private_helper）除非它很重要
+- 不要列出所有函数，只选择最关键的
+- 不要在functionality中重复列举函数名
+
+---
+
+# JSON格式
+
+```json
+{{
+    "main_purpose": "一句话描述文件作用",
+    "key_functions": ["function1", "ClassName1", "method2"],
+    "dependencies": ["library1", "module2"],
+    "functionality": "2-4句话的详细功能描述"
+}}
+```
+
+请开始分析："""
+
+        # 遍历所有文件（限制数量避免token过多）
+        files_to_analyze = file_path_list
+        if max_files is not None:
+            files_to_analyze = files_to_analyze[:max_files]
+        
+        # 过滤掉已分析的文件
+        files_remaining = [f for f in files_to_analyze if f not in file_summaries]
+        total_files = len(files_to_analyze)
+        already_done = total_files - len(files_remaining)
+        
+        if already_done > 0:
+            print(f"[INFO] Skipping {already_done} already analyzed files, {len(files_remaining)} remaining")
+        
+        if not files_remaining:
+            return file_summaries
+        
+        print(f"[INFO] Starting concurrent analysis with {max_workers} workers for {len(files_remaining)} files")
+        
+        # 线程安全的计数器和锁
+        lock = threading.Lock()
+        completed_count = [0]  # 使用列表以便在闭包中修改
+        save_batch_size = 10
+        
+        def analyze_single_file(file_path: str) -> tuple:
+            """分析单个文件（在线程中执行）"""
+            try:
+                # 读取文件内容
+                if repo_path:
+                    absolute_path = repo_path / file_path
+                else:
+                    absolute_path = Path(file_path)
+                
+                content = absolute_path.read_text(encoding="utf-8")
+                
+                prompt = CODE_SNIPPET_PROMPT.format(
+                    file_path=file_path,
+                    file_content=content
+                )
+                
+                # 调用LLM（LLM client有内置重试机制）
+                result = self.llm_client.complete(prompt)
+                summary = parse_llm_json(result)
+                
+                # 保存对话历史（线程安全）
+                if repo_name and self.storage_manager:
+                    conversation_data = {
+                        "step": "file_summary",
+                        "timestamp": datetime.now().isoformat(),
+                        "file_path": file_path,
+                        "prompt": prompt,
+                        "response": result,
+                        "parsed_result": summary
+                    }
+                    file_id = Path(file_path).name
+                    path_parts = (repo_name, version) if version else (repo_name,)
+                    with lock:
+                        self.storage_manager.save_conversation("file_summary", conversation_data, *path_parts, file_identifier=file_id)
+                
+                if summary is None:
+                    return (file_path, {
+                        "main_purpose": "Failed to parse LLM response",
+                        "key_functions": [],
+                        "dependencies": [],
+                        "functionality": "Failed to parse LLM response",
+                    }, False)
+                else:
+                    return (file_path, {
+                        "main_purpose": summary.get("main_purpose", ""),
+                        "key_functions": summary.get("key_functions", []),
+                        "dependencies": summary.get("dependencies", []),
+                        "functionality": summary.get("functionality", "No description available"),
+                    }, True)
+                    
+            except Exception as e:
+                return (file_path, {
+                    "main_purpose": f"Error: {str(e)}",
+                    "key_functions": [],
+                    "dependencies": [],
+                    "functionality": f"Error analyzing file: {str(e)}",
+                }, False)
+        
+        # 使用线程池并发处理
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_file = {executor.submit(analyze_single_file, fp): fp for fp in files_remaining}
+            
+            # 收集结果
+            for future in as_completed(future_to_file):
+                file_path = future_to_file[future]
+                try:
+                    fp, summary_data, success = future.result()
+                    
+                    with lock:
+                        file_summaries[fp] = summary_data
+                        completed_count[0] += 1
+                        current_count = completed_count[0]
+                    
+                    status = "✓" if success else "✗"
+                    print(f"[INFO] [{status}] Analyzed {already_done + current_count}/{total_files}: {Path(fp).name}")
+                    
+                    # 增量保存检查点（线程安全）
+                    if repo_name and self.storage_manager and current_count % save_batch_size == 0:
+                        with lock:
+                            path_parts = (repo_name, version) if version else (repo_name,)
+                            self.storage_manager.save_checkpoint("file_summaries", file_summaries, *path_parts)
+                            print(f"[INFO] Checkpoint saved ({current_count} files)")
+                            
+                except Exception as e:
+                    print(f"[ERROR] Unexpected error processing {file_path}: {e}")
+                    with lock:
+                        file_summaries[file_path] = {
+                            "main_purpose": f"Error: {str(e)}",
+                            "key_functions": [],
+                            "dependencies": [],
+                            "functionality": f"Unexpected error: {str(e)}",
+                        }
+                        completed_count[0] += 1
+        
+        # 最终保存
+        if repo_name and self.storage_manager:
+            path_parts = (repo_name, version) if version else (repo_name,)
+            self.storage_manager.save_checkpoint("file_summaries", file_summaries, *path_parts)
+            print(f"[INFO] Final checkpoint saved ({len(file_summaries)} total files)")
+        
+        return file_summaries
 
 
     def _analyze_modules(self, repo_info: Dict, repo_name: str = None, version: str = None, repo_path: Path = None) -> Dict[str, Any]:
