@@ -149,7 +149,7 @@ class BaseLLMClient(ABC):
                 
                 # 判断是否应该重试
                 if not self._should_retry(e):
-                    logger.error(f"Non-retriable error occurred: {type(e).__name__}: {e}")
+                    logger.error(f"!!!!\n\n\nNon-retriable error occurred: {type(e).__name__}: {e}\n\n\n!!!!\n\n\n")
                     raise
                 
                 # 检查是否还有重试次数
@@ -244,9 +244,6 @@ class HKULLMClient(BaseLLMClient):
         Args:
             messages: 消息列表
             tools: 工具定义列表（可选）
-            **kwargs: 其他参数
-                - clear_reasoning: 是否清除历史消息中的 reasoning_content（节省带宽）
-                - separate_reasoning: 是否分离 reasoning 和 content
         """
         # 添加系统消息如果不存在
         if not any(m.get("role") == "system" for m in messages):
@@ -255,12 +252,6 @@ class HKULLMClient(BaseLLMClient):
                 *messages
             ]
         
-        # 如果请求清除 reasoning_content（新轮次开始时），创建消息副本并清除
-        if kwargs.get("clear_reasoning", False):
-            messages = [
-                {k: v for k, v in msg.items() if k != 'reasoning_content'} if isinstance(msg, dict) else msg
-                for msg in messages
-            ]
         
         # 构建请求参数
         request_params = {
@@ -272,13 +263,11 @@ class HKULLMClient(BaseLLMClient):
             "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
             "stream": False,
             "extra_body": {
+                "seperate_tool_calls": True,
                 "chat_template_kwargs": {"thinking": self.config.enable_thinking}
             }
         }
         
-        # SGLang 特性：支持 separate_reasoning 参数
-        if kwargs.get("separate_reasoning"):
-            request_params["extra_body"]["separate_reasoning"] = True
 
         # 添加tools参数
         if tools is not None:
@@ -287,40 +276,8 @@ class HKULLMClient(BaseLLMClient):
         
         response = self.client.chat.completions.create(**request_params)
         
-        # 处理响应
-        message = response.choices[0].message
-        
-        # 如果有tool_calls，返回包含tool_calls的字典
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            result = {
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    }
-                    for tc in message.tool_calls
-                ]
-            }
-            # Tool+Thinking 模式：如果启用 thinking，添加 reasoning_content
-            if self.config.enable_thinking and hasattr(message, 'reasoning_content'):
-                result["reasoning"] = message.reasoning_content
-            return result
+        return response.choices[0].message
 
-        # 常规响应处理
-        if self.config.enable_thinking and hasattr(message, 'reasoning_content'):
-            # 如果不需要合并，可以返回分离的格式
-            if kwargs.get("separate_reasoning", False):
-                return {
-                    "reasoning": message.reasoning_content,
-                    "content": message.content
-                }
-            return concat_ds_think_content(message.reasoning_content, message.content)
-        return message.content
     
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
         """发送聊天请求（带重试机制）
@@ -380,7 +337,6 @@ class DeepSeekClient(BaseLLMClient):
             tools: 工具定义列表（可选）
             **kwargs: 其他参数
                 - tool_choice: 工具选择策略 "none"/"auto"/"required"
-                - clear_reasoning: 是否清除历史消息中的 reasoning_content（节省带宽）
 
         """
         # 添加系统消息如果不存在
@@ -390,12 +346,7 @@ class DeepSeekClient(BaseLLMClient):
                 *messages
             ]
         
-        # 如果请求清除 reasoning_content（新轮次开始时），创建消息副本并清除
-        if kwargs.get("clear_reasoning", False):
-            messages = [
-                {k: v for k, v in msg.items() if k != 'reasoning_content'} if isinstance(msg, dict) else msg
-                for msg in messages
-            ]
+        
         
         # 构建基础请求参数
         request_params = {
@@ -424,41 +375,9 @@ class DeepSeekClient(BaseLLMClient):
         
         # 发送请求
         response = self.client.chat.completions.create(**request_params)
-        message = response.choices[0].message
-        
-        # 处理tool_calls响应
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            result = {
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    }
-                    for tc in message.tool_calls
-                ]
-            }
-            # Tool+Thinking 模式：如果启用 thinking，添加 reasoning_content
-            if self.config.enable_thinking and hasattr(message, 'reasoning_content'):
-                result["reasoning"] = message.reasoning_content
-            return result
-        
-        # 处理常规响应
-        if self.config.enable_thinking and hasattr(message, 'reasoning_content'):
-            # 如果不需要合并，可以返回分离的格式
-            if kwargs.get("separate_reasoning", False):
-                return {
-                    "reasoning": message.reasoning_content,
-                    "content": message.content
-                }
-            return concat_ds_think_content(message.reasoning_content, message.content)
-        
-        return message.content
-    
+
+        return response.choices[0].message
+
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
         """发送聊天请求（带重试机制）
         

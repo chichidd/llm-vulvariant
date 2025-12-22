@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 import argparse
+import copy
 import time
 
 # Project imports
@@ -48,6 +49,57 @@ from core.llm_client import create_llm_client, BaseLLMClient
 from core.vuln_profile import VulnerabilityProfile
 from core.software_profile import SoftwareProfile
 
+
+def clear_reasoning_content(messages):
+    return [
+        {k: v for k, v in msg.items() if k != 'reasoning_content'} if isinstance(msg, dict) else msg
+        for msg in messages
+    ]
+
+
+def make_serializable(obj):
+    """
+    递归地将对象转换为JSON可序列化的格式
+    处理ChatCompletionMessage、FunctionToolCall等复杂对象
+    """
+    if obj is None:
+        return None
+    
+    # 如果已经是基本类型，直接返回
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    
+    # 处理字典
+    if isinstance(obj, dict):
+        return {k: make_serializable(v) for k, v in obj.items()}
+    
+    # 处理列表
+    if isinstance(obj, (list, tuple)):
+        return [make_serializable(item) for item in obj]
+    
+    # 处理有__dict__的对象（如ChatCompletionMessage、FunctionToolCall）
+    if hasattr(obj, '__dict__'):
+        return make_serializable(obj.__dict__)
+    
+    # 处理有model_dump的对象（Pydantic模型）
+    if hasattr(obj, 'model_dump'):
+        try:
+            return obj.model_dump()
+        except:
+            pass
+    
+    # 处理有dict()方法的对象
+    if hasattr(obj, 'dict') and callable(getattr(obj, 'dict')):
+        try:
+            return make_serializable(obj.dict())
+        except:
+            pass
+    
+    # 尝试转换为字符串
+    try:
+        return str(obj)
+    except:
+        return f"<non-serializable: {type(obj).__name__}>"
 
 # ==================== Tool Definitions ====================
 
@@ -233,7 +285,7 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "analyze_data_flow",
-                    "description": "分析函数中潜在的数据流路径，识别来源（输入）与汇点（危险操作）。",
+                    "description": "深度分析函数的代码结构，提供详细信息：参数、变量使用、函数调用（含参数）、属性访问、字符串操作、赋值、返回值等。返回完整的代码结构分析，便于识别数据流和潜在风险。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -569,7 +621,7 @@ class AgenticToolkit:
             return ToolResult(success=False, content="", error=str(e))
     
     def _analyze_data_flow(self, file_path: str, function_name: str) -> ToolResult:
-        """Analyze data flow in a function"""
+        """Analyze data flow in a function - provides comprehensive code structure analysis"""
         full_path = self.repo_path / file_path
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"File not found: {file_path}")
@@ -577,6 +629,7 @@ class AgenticToolkit:
         try:
             content = full_path.read_text(encoding='utf-8', errors='ignore')
             tree = ast.parse(content)
+            lines = content.split('\n')
             
             # Find the function
             target_func = None
@@ -589,47 +642,121 @@ class AgenticToolkit:
             if not target_func:
                 return ToolResult(success=False, content="", error=f"Function not found: {function_name}")
             
-            # Analyze function
+            # Comprehensive analysis
             analysis = {
                 "function_name": function_name,
                 "parameters": [arg.arg for arg in target_func.args.args],
-                "potential_sources": [],
-                "potential_sinks": [],
-                "external_calls": []
+                "variables_used": [],
+                "function_calls": [],
+                "attribute_accesses": [],
+                "string_operations": [],
+                "assignments": [],
+                "returns": [],
+                "code_with_line_numbers": []
             }
             
-            source_patterns = ["input", "read", "request", "args", "params", "config", "cfg", "data"]
-            sink_patterns = ["subprocess", "os.system", "eval", "exec", "pickle", "yaml.load", "run", "call", "Popen"]
+            # Get function code with line numbers
+            start_line = target_func.lineno - 1
+            end_line = target_func.end_lineno if hasattr(target_func, 'end_lineno') else start_line + 50
+            func_lines = lines[start_line:end_line]
+            analysis["code_with_line_numbers"] = [
+                f"{start_line + i + 1}: {line}" 
+                for i, line in enumerate(func_lines)
+            ]
             
+            # Analyze AST nodes
             for node in ast.walk(target_func):
-                # Check for potential sources
+                # Collect all variable names
                 if isinstance(node, ast.Name):
-                    for pattern in source_patterns:
-                        if pattern in node.id.lower():
-                            analysis["potential_sources"].append(node.id)
+                    analysis["variables_used"].append({
+                        "name": node.id,
+                        "context": type(node.ctx).__name__,
+                        "line": node.lineno
+                    })
                 
-                # Check for calls
+                # Collect function calls with details
                 if isinstance(node, ast.Call):
+                    call_info = {"line": node.lineno}
+                    
                     if isinstance(node.func, ast.Attribute):
-                        call_name = f"{ast.unparse(node.func.value)}.{node.func.attr}"
-                        for pattern in sink_patterns:
-                            if pattern in call_name.lower():
-                                analysis["potential_sinks"].append({
-                                    "call": call_name,
-                                    "line": node.lineno
-                                })
-                        analysis["external_calls"].append(call_name)
+                        call_info["type"] = "method_call"
+                        call_info["object"] = ast.unparse(node.func.value)
+                        call_info["method"] = node.func.attr
+                        call_info["full_call"] = f"{call_info['object']}.{call_info['method']}"
                     elif isinstance(node.func, ast.Name):
-                        for pattern in sink_patterns:
-                            if pattern in node.func.id.lower():
-                                analysis["potential_sinks"].append({
-                                    "call": node.func.id,
-                                    "line": node.lineno
-                                })
+                        call_info["type"] = "function_call"
+                        call_info["function"] = node.func.id
+                        call_info["full_call"] = node.func.id
+                    else:
+                        call_info["type"] = "complex_call"
+                        call_info["full_call"] = ast.unparse(node.func)
+                    
+                    # Get arguments
+                    call_info["args"] = [ast.unparse(arg) for arg in node.args]
+                    call_info["kwargs"] = {kw.arg: ast.unparse(kw.value) for kw in node.keywords}
+                    
+                    analysis["function_calls"].append(call_info)
+                
+                # Collect attribute accesses
+                if isinstance(node, ast.Attribute):
+                    analysis["attribute_accesses"].append({
+                        "object": ast.unparse(node.value),
+                        "attribute": node.attr,
+                        "full": ast.unparse(node),
+                        "line": node.lineno
+                    })
+                
+                # Collect string operations (concat, format, f-strings)
+                if isinstance(node, ast.JoinedStr):  # f-strings
+                    analysis["string_operations"].append({
+                        "type": "f-string",
+                        "expression": ast.unparse(node),
+                        "line": node.lineno
+                    })
+                elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                    # String concatenation (potential)
+                    analysis["string_operations"].append({
+                        "type": "binary_op_add",
+                        "expression": ast.unparse(node),
+                        "line": node.lineno
+                    })
+                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr in ["format", "join"]:
+                        analysis["string_operations"].append({
+                            "type": node.func.attr,
+                            "expression": ast.unparse(node),
+                            "line": node.lineno
+                        })
+                
+                # Collect assignments
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        analysis["assignments"].append({
+                            "target": ast.unparse(target),
+                            "value": ast.unparse(node.value),
+                            "line": node.lineno
+                        })
+                
+                # Collect return statements
+                if isinstance(node, ast.Return) and node.value:
+                    analysis["returns"].append({
+                        "value": ast.unparse(node.value),
+                        "line": node.lineno
+                    })
             
-            # Remove duplicates
-            analysis["potential_sources"] = list(set(analysis["potential_sources"]))
-            analysis["external_calls"] = list(set(analysis["external_calls"]))[:20]
+            # Remove duplicates from variables
+            seen_vars = set()
+            unique_vars = []
+            for var in analysis["variables_used"]:
+                var_key = (var["name"], var["line"])
+                if var_key not in seen_vars:
+                    seen_vars.add(var_key)
+                    unique_vars.append(var)
+            analysis["variables_used"] = unique_vars[:50]  # Limit to 50
+            
+            # Limit other collections
+            analysis["function_calls"] = analysis["function_calls"][:50]
+            analysis["attribute_accesses"] = analysis["attribute_accesses"][:50]
             
             return ToolResult(success=True, content=json.dumps(analysis, indent=2, ensure_ascii=False))
         except Exception as e:
@@ -657,8 +784,8 @@ class AgenticVulnFinder:
         repo_path: Path,
         software_profile: SoftwareProfile,
         vulnerability_profile: VulnerabilityProfile,
-        max_iterations: int = 30,
-        temperature: float = 0.0,
+        max_iterations: int = 300,
+        temperature: float = 1.0,
         max_tokens: int = 8192,
         verbose: bool = True
     ):
@@ -787,32 +914,29 @@ class AgenticVulnFinder:
 
 现在开始你的自主分析。请先使用工具探索项目结构，然后系统地寻找潜在漏洞。"""
     
-    def run(self) -> Dict[str, Any]:
-        """Run the agentic analysis using native tool calling"""
-        if self.verbose:
-            print(f"[INFO] Starting agentic vulnerability analysis with native tool calling...")
+    def _clear_reasoning_content(self, messages):
+        messages = copy.deepcopy(self.conversation_history)
+        for message in messages:
+            if hasattr(message, 'reasoning_content'):
+                message.reasoning_content = None
+        return messages
+    def _run_turn(self, iteration: int):
+        """
+        _run_turn 的 Docstring
+        adapt from https://api-docs.deepseek.com/guides/thinking_mode
         
-        system_prompt = self._build_system_prompt()
-        initial_message = self._build_initial_user_message()
-        
-        self.conversation_history = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": initial_message}
-        ]
-        
-        # 获取工具定义
-        tools = self.toolkit.get_available_tools()
-        
-        iteration = 0
-        for iteration in range(self.max_iterations):
-            if self.verbose:
-                print(f"\n[ITERATION {iteration + 1}/{self.max_iterations}]")
-            
+        :param self: 说明
+        """
+        sub_turn = 1
+        messages = self._clear_reasoning_content(self.conversation_history)
+        while True:
             try:
                 # 使用原生 tool calling API
-                response = self.llm_client.chat(
-                    self.conversation_history,
-                    tools=tools,
+                # 注意：不使用 clear_reasoning，因为所有迭代都是同一任务的延续
+                # reasoning_content 应该在整个分析过程中保留，帮助模型理解上下文
+                message = self.llm_client.chat(
+                    messages,
+                    tools=self.toolkit.get_available_tools(),
                     tool_choice="auto",  # 让模型自动决定是否调用工具
                     temperature=self.temperature,
                     max_tokens=self.max_tokens
@@ -822,95 +946,117 @@ class AgenticVulnFinder:
                 import traceback
                 traceback.print_exc()
                 break
-            
-            # 处理响应 - 检查是否是 tool calling 响应
-            if isinstance(response, dict) and "tool_calls" in response:
-                # LLM 决定调用工具
-                tool_calls = response["tool_calls"]
-                assistant_content = response.get("content") or ""
+            messages.append(message)
+            reasoning_content = message.reasoning_content
+            content = message.content
+            tool_calls = message.tool_calls
+            if self.verbose:
+                print(f"[Iteration {iteration + 1}.{sub_turn}]\n{reasoning_content=}\n{content=}\n{tool_calls=}")
+            # If there is no tool calls, then the model should get a final answer and we need to stop the loop
+            if tool_calls is None:
+                self.conversation_history += messages[len(self.conversation_history):]
+                return sub_turn
+
+            for tool in tool_calls:
+                tool_name = tool.function.name
                 
-                # 添加 assistant 消息（包含 tool_calls）
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": assistant_content,
-                    "tool_calls": tool_calls
-                })
-                
-                if self.verbose:
-                    print(f"  [LLM] Calling {len(tool_calls)} tool(s)")
-                    if assistant_content:
-                        snippet = assistant_content[:200] + "..." if len(assistant_content) > 200 else assistant_content
-                        print(f"  [THINKING] {snippet}")
-                
-                # 执行每个工具调用
-                for tool_call in tool_calls:
-                    tool_name = tool_call["function"]["name"]
-                    
-                    # 解析参数
-                    try:
-                        parameters = json.loads(tool_call["function"]["arguments"])
-                    except json.JSONDecodeError as e:
-                        parameters = {}
-                        print(f"  [ERROR] Failed to parse tool arguments: {e}")
-                    
-                    if self.verbose:
-                        print(f"  [TOOL] {tool_name}: {json.dumps(parameters, ensure_ascii=False)[:80]}...")
-                    
-                    # 执行工具
-                    result = self.toolkit.execute_tool(tool_name, parameters)
-                    
-                    # 处理 report_vulnerability
-                    if tool_name == "report_vulnerability" and result.success:
-                        vuln_report = json.loads(result.content)
-                        self.found_vulnerabilities.append(vuln_report)
-                        if self.verbose:
-                            print(f"  [VULN FOUND] {vuln_report.get('file_path', 'unknown')} - {vuln_report.get('vulnerability_type', 'unknown')}")
-                    
-                    # 添加工具结果到对话历史
-                    tool_result_content = result.content if result.success else f"Error: {result.error}"
-                    if len(tool_result_content) > 10000:
-                        tool_result_content = tool_result_content[:10000] + "\n... [truncated]"
-                    
-                    self.conversation_history.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": tool_name,
-                        "content": tool_result_content
-                    })
-            
-            elif isinstance(response, str):
-                # LLM 返回最终答案（不调用工具）
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": response
-                })
+                # 解析参数
+                try:
+                    parameters = json.loads(tool.function.arguments)
+                except json.JSONDecodeError as e:
+                    parameters = {}
+                    print(f"  [ERROR] Failed to parse tool arguments: {e}")
                 
                 if self.verbose:
-                    snippet = response[:400] + "..." if len(response) > 400 else response
-                    print(f"  [LLM] {snippet}")
+                    print(f"  [TOOL] {tool_name}: {json.dumps(parameters, ensure_ascii=False)[:500]}...")
                 
-                # 检查是否表示完成
-                completion_keywords = ["分析完成", "analysis complete", "没有发现", "no more", "finished", "无法找到", "cannot find"]
-                if any(keyword in response.lower() for keyword in completion_keywords):
+                # 执行工具
+                result = self.toolkit.execute_tool(tool_name, parameters)
+                if self.verbose:
+                    print(f"  [TOOL RESULT] {result}...")
+                
+                # 处理 report_vulnerability
+                if tool_name == "report_vulnerability" and result.success:
+                    vuln_report = json.loads(result.content)
+                    self.found_vulnerabilities.append(vuln_report)
                     if self.verbose:
-                        print(f"\n[COMPLETE] LLM indicates analysis is complete")
-                    break
+                        print(f"  [VULN FOUND] {vuln_report.get('file_path', 'unknown')} - {vuln_report.get('vulnerability_type', 'unknown')}")
                 
-                # 如果连续3轮都不调用工具，提醒 LLM
-                recent_msgs = self.conversation_history[-7:]  # 最近3轮(每轮约2条消息)
-                tool_msg_count = sum(1 for msg in recent_msgs if msg.get("role") == "tool")
-                if tool_msg_count == 0 and len(recent_msgs) >= 6:
-                    self.conversation_history.append({
-                        "role": "user",
-                        "content": "请使用可用的工具来分析代码。如果你已经完成分析，请明确说明完成原因。"
-                    })
+                # 添加工具结果到对话历史
+                tool_result_content = result.content if result.success else f"Error: {result.error}"
+                if len(tool_result_content) > 10000:
+                    tool_result_content = tool_result_content[:10000] + "\n... [truncated]"
+                
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool.id,
+                    "content": tool_result_content
+                })
+
+            sub_turn += 1
+    
+    def _build_intermediate_user_message(self, iteration: int) -> str:
+        """
+        Build intermediate user message for the next iteration
+        TODO: varied by iteration?
+        """
+        return "请继续你的分析，使用可用的工具来深入挖掘代码中的潜在漏洞。"
+    
+    def _get_user_message(self, iteration: int) -> str:
+        """Get user message for the current iteration"""
+        if iteration == 0:
+            return self._build_initial_user_message()
+        else:
+            return self._build_intermediate_user_message(iteration)
+    
+    def run(self) -> Dict[str, Any]:
+        """Run the agentic analysis using native tool calling"""
+        if self.verbose:
+            print(f"[INFO] Starting agentic vulnerability analysis with native tool calling...")
+        
+
+        self.conversation_history = [
+            {"role": "system", "content": self._build_system_prompt()},
+        ]
+        
+        
+        iteration = 0
+        while True:
+        
+            if self.verbose:
+                print(f"\n[ITERATION {iteration + 1}/{self.max_iterations}]")
             
-            else:
-                # 未知响应格式
-                print(f"[WARNING] Unexpected response format: {type(response)}")
-                print(f"Response: {str(response)[:200]}")
+            self.conversation_history.append({"role": "user", "content": self._get_user_message(iteration)})
+            
+            _sub_turn_num = self._run_turn(iteration)
+            
+            response = self.conversation_history[-1].content
+            
+            
+            # 检查是否表示完成
+            completion_keywords = ["分析完成", "analysis complete", "没有发现", "no more", "finished", "无法找到", "cannot find"]
+            if any(keyword in response.lower() for keyword in completion_keywords):
+                if self.verbose:
+                    print(f"\n[COMPLETE] LLM indicates analysis is complete")
+                break
+            
+            # 如果连续3轮都不调用工具，提醒 LLM
+            recent_msgs = self.conversation_history[-7:]  # 最近3轮(每轮约2条消息)
+            tool_msg_count = sum(1 for msg in recent_msgs if isinstance(msg, dict) and msg['role'] == 'tool')
+            if tool_msg_count == 0 and len(recent_msgs) >= 6:
+                self.conversation_history.append({
+                    "role": "user",
+                    "content": "请使用可用的工具来分析代码。如果你已经完成分析，请明确说明完成原因。"
+                })
+            
+            
+            iteration += 1
+            if iteration >= self.max_iterations:
+                if self.verbose:
+                    print(f"\n[STOP] Reached maximum iterations ({self.max_iterations})")
                 break
         
+
         return {
             "vulnerabilities": self.found_vulnerabilities,
             "iterations": iteration + 1,
@@ -1033,13 +1179,13 @@ def main():
         output_dir = output_path.parent
     elif vuln_commit != target_commit:
         output_dir = Path(f"scan-results/{args.repo}_{target_commit}_{args.cve}_from_{vuln_commit[:12]}")
-        output_path = output_dir / "agentic_vuln_findings_litellm.json"
     else:
         output_dir = Path(f"scan-results/{args.repo}_{vuln_commit}_{args.cve}")
-        output_path = output_dir / "agentic_vuln_findings_litellm.json"
+        
     
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+    output_path = output_dir / "agentic_vuln_findings.json"
+
     # Save vulnerability findings
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
@@ -1047,7 +1193,7 @@ def main():
     # Save conversation history
     conversation_path = output_dir / "conversation_history.json"
     with open(conversation_path, 'w', encoding='utf-8') as f:
-        json.dump(finder.conversation_history, f, indent=2, ensure_ascii=False)
+        json.dump(make_serializable(finder.conversation_history), f, indent=2, ensure_ascii=False)
     
     print(f"\n[COMPLETE] Found {len(results['vulnerabilities'])} potential vulnerabilities")
     print(f"[INFO] Results saved to: {output_path}")
