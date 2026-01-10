@@ -1,0 +1,236 @@
+# 代码检测规则配置
+# 用于静态分析中的模式匹配
+
+# 数据来源检测规则
+data_sources:
+  file:
+    - "open("
+    - "read"
+    - "load"
+    - "Path("
+    - "file"
+    - ".read_text"
+    - ".read_bytes"
+  
+  network:
+    - "requests."
+    - "urllib"
+    - "http"
+    - "socket"
+    - "fetch"
+    - "download"
+  
+  database:
+    - "sql"
+    - "query"
+    - "cursor"
+    - "connect"
+    - "session"
+    - "execute"
+  
+  user_input:
+    - "input("
+    - "argv"
+    - "args."
+    - "click."
+    - "argparse"
+    - "stdin"
+  
+  environment:
+    - "environ"
+    - "getenv"
+    - "os.env"
+    - "ENV"
+
+# 数据格式检测规则
+data_formats:
+  json:
+    - "json."
+    - ".json"
+    - "JSON"
+    - "json.load"
+    - "json.dumps"
+  
+  yaml:
+    - "yaml."
+    - ".yaml"
+    - ".yml"
+    - "YAML"
+    - "yaml.load"
+  
+  pickle:
+    - "pickle."
+    - ".pkl"
+    - ".pickle"
+    - "pickle.load"
+  
+  csv:
+    - "csv."
+    - ".csv"
+    - "pandas.read_csv"
+    - "DictReader"
+  
+  xml:
+    - "xml."
+    - ".xml"
+    - "ElementTree"
+    - "parseString"
+  
+  protobuf:
+    - ".proto"
+    - "protobuf"
+    - "pb2"
+    - "ParseFromString"
+  
+  binary:
+    - ".bin"
+    - "struct.pack"
+    - "struct.unpack"
+    - "bytes"
+  
+  parquet:
+    - ".parquet"
+    - "read_parquet"
+    - "to_parquet"
+  
+  hdf5:
+    - ".h5"
+    - ".hdf5"
+    - "h5py"
+
+# 数据处理操作检测规则
+processing_operations:
+  parse:
+    - "parse"
+    - "parser"
+    - "parsing"
+  
+  validate:
+    - "validate"
+    - "validator"
+    - "validation"
+    - "check"
+  
+  transform:
+    - "transform"
+    - "convert"
+    - "map"
+    - "filter"
+  
+  serialize:
+    - "serialize"
+    - "dump"
+    - "dumps"
+    - "to_json"
+    - "to_dict"
+  
+  deserialize:
+    - "deserialize"
+    - "load"
+    - "loads"
+    - "from_json"
+    - "from_dict"
+  
+  encode:
+    - "encode"
+    - "encoding"
+  
+  decode:
+    - "decode"
+    - "decoding"
+  
+  compress:
+    - "compress"
+    - "zip"
+    - "gzip"
+  
+  encrypt:
+    - "encrypt"
+    - "cipher"
+    - "crypto"
+
+
+# 软件画像分析器配置
+analyzer_config:
+  # 文件扫描配置
+  file_extensions:
+    - .py
+    - .js
+    - .ts
+    - .java
+    - .go
+    - .rb
+    - .php
+    - .c
+    - .cpp
+    - .rs
+  
+  # 排除目录
+  exclude_dirs:
+    - __pycache__
+    - node_modules
+    - .git
+    - .venv
+    - venv
+    - env
+    - build
+    - dist
+    - .eggs
+    - "*.egg-info"
+  
+  # 分析配置
+  max_module_analysis_iterations: 100
+  
+  # 是否启用LLM对每个文件进行摘要分析
+  # 设为 false 可大幅减少LLM调用次数和分析时间，但会降低模块分析的准确性
+  enable_llm_file_summary: false
+  
+  # 文件摘要分析使用的LLM配置（可选）
+  # 如果不配置，则使用主 LLM 客户端
+  # 可以配置为更便宜/更快的模型来降低成本
+  file_summary_llm:
+    # 是否启用单独的LLM（设为 false 则使用主 LLM）
+    enabled: false
+    # LLM 提供商：deepseek, openai, lab, anthropic 等
+    provider: deepseek
+    # 模型名称（可选，不填则使用提供商默认模型）
+    model: ""
+    # 温度参数
+    temperature: 0.7
+    # 最大token数
+    max_tokens: 2048
+
+# RepoAnalyzer 深度静态分析配置
+repo_analyzer_config:
+  # 编程语言（"auto" 为自动检测，或指定 "python", "javascript" 等）
+  language: auto
+  
+  # 数据流切片最大深度
+  max_slice_depth: 3
+  
+  # 每个切片最多包含的文件数
+  max_slice_files: 10
+  
+  # 是否强制重建缓存（设为 true 会忽略已有缓存）
+  rebuild_cache: false
+
+# 仓库文件检测配置
+repo_files:
+  # README 文件名列表（按优先级排序）
+  readme_files:
+    - README.md
+    - README.rst
+    - README.txt
+    - README
+  
+  # 依赖配置文件列表
+  dependency_files:
+    - pyproject.toml
+    - setup.py
+    - setup.cfg
+    - package.json
+    - requirements.txt
+    - Pipfile
+    - Cargo.toml
+    - go.mod
+    - pom.xml

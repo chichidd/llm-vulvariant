@@ -1,0 +1,14 @@
+# 项目路径配置
+paths:
+  # 项目根目录
+  project_root: "~/vuln"
+  
+  # 数据目录
+  data_base_path: "~/vuln/data"
+  vuln_data_path: "~/vuln/data/vuln.json"
+  repo_base_path: "~/vuln/data/repos"
+  
+  # CodeQL 数据库目录
+  codeql_db_path: "~/vuln/codeql_dbs"
+
+  embedding_model_path: "~/vuln/models"

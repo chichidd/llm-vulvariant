@@ -1,0 +1,23 @@
+# CodeQL 分析器配置
+# 用于仓库静态分析的 CodeQL 设置
+
+# CodeQL CLI 配置
+codeql_cli:
+  # CodeQL CLI 路径（空则使用 PATH 中的）
+  cli_path: ""
+  
+  # 自定义查询路径
+  queries_path: ""
+  
+  # 数据库存储目录（将从 src/config.py 的 _path_config['codeql_db_path'] 自动加载）
+  # 留空则使用项目配置的路径
+  database_dir: ""
+  
+  # 线程数（0 表示自动检测）
+  threads: 0
+  
+  # 内存限制（MB，0 表示自动）
+  memory: 0
+  
+  # 查询超时时间（秒）
+  timeout: 600

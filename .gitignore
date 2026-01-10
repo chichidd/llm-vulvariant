@@ -148,3 +148,5 @@ scan-results/
 vuln-profiles/
 docs/
 codeql_dbs/
+
+**/*.bak

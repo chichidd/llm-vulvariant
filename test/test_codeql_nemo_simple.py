@@ -12,7 +12,7 @@ from pathlib import Path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from core.codeql_native import CodeQLAnalyzer, CodeQLConfig
+from src.utils.codeql_native import CodeQLAnalyzer, load_codeql_config
 
 
 def main():
@@ -32,10 +32,9 @@ def main():
     
     # 初始化分析器
     print("初始化 CodeQL 分析器...")
-    config = CodeQLConfig(
-        database_dir="/tmp/codeql-test-dbs",
-        timeout=1200
-    )
+    config = load_codeql_config()
+    config['database_dir'] = "/tmp/codeql-test-dbs"
+    config['timeout'] = 1200
     analyzer = CodeQLAnalyzer(config)
     
     # 检查 CodeQL 是否可用

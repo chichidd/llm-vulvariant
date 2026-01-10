@@ -1,0 +1,35 @@
+# RepoAnalyzer 配置规则
+# 用于仓库静态分析的检测规则
+
+# 入口点检测模式
+# 用于识别程序的入口点函数（main, HTTP endpoints, CLI commands 等）
+entry_point_patterns:
+  python:
+    - main
+    - __main__
+    - app.run
+    - serve
+    - start_server
+    - route          # Flask/FastAPI routes
+    - endpoint       # FastAPI endpoints
+    - cli            # Click CLI
+    - command        # Click/Typer commands
+    - handler        # Event handlers
+    - process        # Data processors
+  
+  cpp:
+    - main
+    - WinMain
+    - wmain
+  
+  javascript:
+    - main
+    - app.listen
+    - express
+    - server.listen
+  
+  java:
+    - main
+    - service
+    - controller
+    - endpoint

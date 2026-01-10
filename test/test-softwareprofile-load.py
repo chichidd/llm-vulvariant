@@ -1,6 +1,6 @@
-from utils.vuln_utils import read_vuln_data
+from src.utils.vuln_utils import read_vuln_data
 import json
-from core.software_profile import SoftwareProfile
+from src.profiler import SoftwareProfile
 
 if __name__ == "__main__":
    

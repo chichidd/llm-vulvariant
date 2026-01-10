@@ -1,0 +1,38 @@
+# LLM 配置
+llm:
+  # 默认配置
+  default:
+    temperature: 1.0
+    top_p: 0.9
+    max_tokens: 0
+    timeout: 120
+    enable_thinking: true
+    
+    # 重试配置
+    max_retries: 10
+    initial_delay: 1.0
+    max_delay: 60.0
+    backoff_factor: 2.0
+  
+  # Provider 特定配置
+  providers:
+    lab:
+      base_url: "https://hkucvm.dynv6.net/v1"
+      model: "DeepSeek-V3.2"
+      api_key_env: "HKU_LLM_API_KEY"
+    
+    deepseek:
+      base_url: "https://api.deepseek.com/v1"
+      model: "deepseek-chat"
+      api_key_env: "DEEPSEEK_API_KEY"
+      max_tokens: 65536
+    
+    openai:
+      base_url: "https://ai.nengyongai.cn/v1"
+      model: "glm-4.6"
+      api_key_env: "NY_API_KEY"
+      max_tokens: 65536
+    
+    mock:
+      # Mock provider 用于测试
+      model: "mock"

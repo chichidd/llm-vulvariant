@@ -9,14 +9,11 @@ import json
 import sys
 from pathlib import Path
 
-# 添加项目路径
-sys.path.insert(0, str(Path(__file__).parent))
-
-from core.vuln_profile import VulnerabilityProfiler, VulnEntry
-from core.software_profile import SoftwareProfile
-from core.llm_client import MockLLMClient, HKULLMClient
-from core.config import REPO_BASE_PATH, LLMConfig
-from utils.vuln_utils import read_vuln_data
+from src.profiler import VulnerabilityProfiler, VulnEntry
+from src.profiler import SoftwareProfile
+from src.llm import MockLLMClient, LLMConfig
+from src.config import _path_config
+from src.utils.vuln_utils import read_vuln_data
 
 def load_first_vuln_entry():
     """从 data/vuln.json 加载第一个漏洞条目"""

@@ -1,5 +1,5 @@
-from core.llm_client import create_llm_client
-from core.config import LLMConfig
+from src.llm import create_llm_client, LLMConfig
+
 import json
 
 
@@ -49,7 +49,7 @@ def test_basic_chat():
     print("Testing basic chat functionality")
     print("=" * 60)
     
-    llm_config = LLMConfig(provider='hku')
+    llm_config = LLMConfig(provider='lab')
     print(llm_config)
     llm_client = create_llm_client(llm_config)
     
@@ -62,7 +62,7 @@ def test_basic_chat():
     print()
 
     print('' + '=' * 60)
-    llm_config = LLMConfig(provider='hku')
+    llm_config = LLMConfig(provider='lab')
     llm_config.enable_thinking = False
     print(llm_config)
     llm_client = create_llm_client(llm_config)
@@ -104,7 +104,7 @@ def test_basic_chat():
 
 
 def test_multi_turn_tool_calling_with_thinking():
-    """测试多轮工具调用和thinking功能 (HKU/SGLang部署的DeepSeek)
+    """测试多轮工具调用和thinking功能 (LAB/SGLang部署的DeepSeek)
     
     这个测试展示了：
     1. 使用 separate_reasoning=True 分离思考内容
@@ -118,7 +118,7 @@ def test_multi_turn_tool_calling_with_thinking():
     print("=" * 60)
     
     # 创建HKU LLM客户端 (SGLang部署的 DeepSeek 模型)
-    llm_config = LLMConfig(provider='hku')
+    llm_config = LLMConfig(provider='lab')
     llm_config.enable_thinking = True  # 启用 thinking 模式
     print(f"\n[CONFIG] {llm_config}\n")
     llm_client = create_llm_client(llm_config)
@@ -755,7 +755,7 @@ if __name__ == "__main__":
         test_name = sys.argv[1]
         if test_name == "basic":
             test_basic_chat()
-        elif test_name == "tool_hku" or test_name == "tool":
+        elif test_name == "tool_lab" or test_name == "tool":
             test_multi_turn_tool_calling_with_thinking()
         elif test_name == "tool_deepseek":
             test_deepseek_tool_calling()
@@ -763,7 +763,7 @@ if __name__ == "__main__":
             test_deepseek_tool_calling_with_thinking()
         else:
             print(f"Unknown test: {test_name}")
-            print("Available tests: basic, tool (or tool_hku), tool_deepseek, thinking (or tool_deepseek_thinking)")
+            print("Available tests: basic, tool (or tool_lab), tool_deepseek, thinking (or tool_deepseek_thinking)")
     else:
         # Run all tests
         print("\n" + "="*70)

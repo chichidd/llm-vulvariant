@@ -1,7 +1,7 @@
-from utils.vuln_utils import read_vuln_data
+from src.utils.vuln_utils import read_vuln_data
 import json
-from core.software_profile import SoftwareProfile
-from core.vuln_profile import VulnEntry
+from src.profiler import SoftwareProfile
+from src.profiler import VulnEntry
 if __name__ == "__main__":
     """Test reading and displaying vulnerability data"""
     repos = read_vuln_data()
