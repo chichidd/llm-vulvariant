@@ -210,7 +210,7 @@ class ModuleAnalyzer:
                     except json.JSONDecodeError:
                         logger.error("Failed to parse finalize result")
                 
-                # Add tool result to messages
+                # Add tool result to messages: TOIMPROVE: dynamic context size management
                 tool_result_content = result.content if result.success else f"Error: {result.error}"
                 if len(tool_result_content) > 10000:
                     tool_result_content = tool_result_content[:10000] + "\n... [truncated]"
@@ -230,7 +230,10 @@ class ModuleAnalyzer:
         prev_length: int,
         iteration: int
     ) -> List[Dict[str, Any]]:
-        """Compress the latest iteration to keep context size manageable.
+        """
+        NOT CALLED IN MOST CASES: TO IMPROVE FOR CONTEXT MANAGEMENT IN THE FUTURE.
+
+        Compress the latest iteration to keep context size manageable.
         
         This function ensures proper message alternation by adding a user message
         after the compressed assistant summary to avoid consecutive assistant messages.
@@ -279,3 +282,5 @@ class ModuleAnalyzer:
         })
         
         return truncated_history
+
+

@@ -179,7 +179,7 @@ analyzer_config:
     - "*.egg-info"
   
   # 分析配置
-  max_module_analysis_iterations: 100
+  max_module_analysis_iterations: 2
   
   # 是否启用LLM对每个文件进行摘要分析
   # 设为 false 可大幅减少LLM调用次数和分析时间，但会降低模块分析的准确性

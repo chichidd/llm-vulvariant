@@ -362,7 +362,8 @@ class SoftwareProfiler:
             # 深度分析
             if self.deep_analyzer:
                 logger.info("Performing deep static analysis...")
-                deep_analysis = self.deep_analyzer.analyze(repo_path)
+                cache_dir = self.output_dir / repo_name / ".cache" / "repo_analyzer" if self.output_dir else None
+                deep_analysis = self.deep_analyzer.analyze(repo_path, cache_dir=cache_dir)
                 repo_info['deep_analysis'] = deep_analysis
             
             if self.storage_manager:
@@ -497,7 +498,8 @@ class SoftwareProfiler:
         # 深度分析（如果启用）
         if self.deep_analyzer:
             logger.info("Performing deep static analysis (incremental)...")
-            deep_analysis = self.deep_analyzer.analyze(repo_path)
+            cache_dir = self.output_dir / repo_name / ".cache" / "repo_analyzer" if self.output_dir else None
+            deep_analysis = self.deep_analyzer.analyze(repo_path, cache_dir=cache_dir)
             repo_info['deep_analysis'] = deep_analysis
         
         # 保存当前版本的repo_info

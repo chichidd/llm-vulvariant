@@ -21,10 +21,10 @@ def setup_logging(verbose: bool = False):
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate software profile using LLM')
     parser.add_argument('--repo-name', required=True, help='Repository name under vuln/data/repos/')
-    parser.add_argument('--llm-provider', default='deepseek-chat', help='LLM provider name (e.g., openai, deepseek)')
-    parser.add_argument('--llm-name', default='openai', help='LLM model name (e.g., gpt-5.1, deepseek-chat)')
+    parser.add_argument('--llm-provider', default='deepseek', help='LLM provider name (e.g., openai, deepseek)')
+    parser.add_argument('--llm-name', default=None, help='LLM model name (e.g., gpt-5.1, deepseek-chat). If not specified, use default model for the provider.')
     parser.add_argument('--output-dir', default=None, help='Output directory for profiles')
-    parser.add_argument('--target-version', required=True, help='Target commit hash/version')
+    parser.add_argument('--target-version', default=None, help='Target commit hash/version. Default is the current version.')
     parser.add_argument('--enable-deep-analysis', action='store_true', help='Enable deep analysis mode')
     parser.add_argument('--force-full-analysis', action='store_true', help='Force full analysis')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')

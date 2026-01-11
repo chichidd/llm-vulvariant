@@ -143,10 +143,9 @@ yarn-debug.log*
 yarn-error.log*
 *.iml# CodeQL查询包缓存
 .codeql/
-repo-profiles/
-scan-results/
-vuln-profiles/
+repo-profiles*/
+scan-results*/
+vuln-profiles*/
 docs/
-codeql_dbs/
 
 **/*.bak
