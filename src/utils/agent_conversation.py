@@ -52,59 +52,59 @@ def make_serializable(obj: Any):
         return f"<non-serializable: {type(obj).__name__}>"
 
 
-DEFAULT_COMPRESSION_PROMPT = """你是一个专业的对话分析和压缩专家。请分析并压缩以下漏洞扫描过程中assistant的扫描记录，提取所有关键信息。
+DEFAULT_COMPRESSION_PROMPT = """You are a professional conversation analysis and compression expert. Please analyze and compress the assistant's scan logs from the following vulnerability scanning process, extracting all key information.
 
-**压缩要求（信息必须完整）：**
+**Compression requirements (information must be complete):**
 
-1. **推理过程**：总结分析思路和推理链条
-   - 为什么检查这些文件/模块
-   - 发现了什么线索
-   - 得出了什么结论
-   - 排除了哪些可能性及原因
+1. **Reasoning process**: Summarize the analysis approach and reasoning chain
+     - Why these files/modules were checked
+     - What clues were found
+     - What conclusions were reached
+     - Which possibilities were ruled out and why
 
-2. **漏洞报告**：如果报告了漏洞，保留完整信息
-   - 文件路径、函数名、行号
-   - 漏洞类型、描述、证据
-   - 相似性分析、置信度、攻击场景
+2. **Vulnerability report**: If vulnerabilities were reported, preserve complete information
+     - File path, function name, line numbers
+     - Vulnerability type, description, evidence
+     - Similarity analysis, confidence, attack scenario
 
-3. **失败尝试**：记录未成功的探索
-   - 检查了哪些路径但未发现问题
-   - 遇到的错误或限制
+3. **Failed attempts**: Record explorations that did not succeed
+     - Which paths were checked but no issues were found
+     - Errors or limitations encountered
 
-4. **下一步计划**：如果有提到后续分析方向
-   - 还需要检查的模块
-   - 待验证的假设
+4. **Next-step plan**: If future analysis directions were mentioned
+     - Modules that still need to be checked
+     - Hypotheses to be validated
 
-**关键原则：**
-- 不要丢失任何可能影响后续分析的信息
-- 保留足够的上下文，让后续iteration能理解之前做了什么
+**Key principles:**
+- Do not lose any information that could affect follow-up analysis
+- Preserve enough context so later iterations can understand what was done
 
-**输出格式（JSON格式，确保大括号用```json和```包裹）：**
+**Output format (JSON; ensure the object is wrapped by ```json and ```):**
 ```json
 {
-  "iteration_number": <iteration编号>,
-  "summary": "<一句话总结这个iteration做了什么>",
-  "reasoning": {
-    "motivation": "<为什么进行这些检查>",
-    "analysis": "<分析思路和逻辑>",
-    "conclusions": ["<结论1>", "<结论2>"]
-  },
-  "vulnerabilities_reported": [
-    {<完整的漏洞报告信息>}
-  ],
-  "failed_attempts": [
-    {
-      "what": "<尝试了什么>",
-      "why_failed": "<为什么失败或未发现问题>"
-    }
-  ],
-  "next_steps": ["<计划1>", "<计划2>"],
-  "modules_checked": ["<已检查的模块/文件列表>"],
-  "modules_pending": ["<待检查的模块列表>"]
+    "iteration_number": <iteration_number>,
+    "summary": "<one-sentence summary of what this iteration did>",
+    "reasoning": {
+        "motivation": "<why these checks were performed>",
+        "analysis": "<analysis approach and logic>",
+        "conclusions": ["<conclusion_1>", "<conclusion_2>"]
+    },
+    "vulnerabilities_reported": [
+        {<full vulnerability report details>}
+    ],
+    "failed_attempts": [
+        {
+            "what": "<what was tried>",
+            "why_failed": "<why it failed or why no issue was found>"
+        }
+    ],
+    "next_steps": ["<plan_1>", "<plan_2>"],
+    "modules_checked": ["<list_of_checked_modules_or_files>"],
+    "modules_pending": ["<list_of_pending_modules>" ]
 }
 ```
 
-现在请压缩以下对话记录：
+Now please compress the following conversation log:
 """
 
 

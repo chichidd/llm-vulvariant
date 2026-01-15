@@ -130,7 +130,7 @@ class AgenticVulnFinder:
             prev_conv_length = len(self.conversation_history)
             _ = self._run_turn(iteration)
             response = self.conversation_history[-1].content if hasattr(self.conversation_history[-1], "content") else self.conversation_history[-1].get("content")
-            completion_keywords = ["分析完成", "analysis complete", "没有发现", "no more", "finished", "无法找到", "cannot find"]
+            completion_keywords = ["analysis complete", "no findings", "no more", "finished", "cannot find"]
             if response and any(keyword in response.lower() for keyword in completion_keywords):
                 if self.verbose:
                     logger.info("LLM indicates analysis is complete")

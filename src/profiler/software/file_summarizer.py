@@ -1,4 +1,4 @@
-"""文件摘要生成器 - 使用 LLM 分析文件"""
+"""File summarizer - use an LLM to analyze files."""
 
 from pathlib import Path
 from typing import Dict, List, Any, Optional
@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 
 class FileSummarizer:
-    """并发地为文件生成摘要"""
+    """Generate file summaries concurrently."""
     
     def __init__(
         self,
@@ -33,17 +33,16 @@ class FileSummarizer:
         repo_name: Optional[str] = None,
         version: Optional[str] = None,
     ) -> Dict[str, Dict]:
-        """
-        并发地为文件生成摘要
-        
+        """Generate summaries for files concurrently.
+
         Args:
-            file_path_list: 文件路径列表（相对路径）
-            repo_path: 仓库根路径
-            repo_name: 仓库名称
-            version: 版本号
-            
+            file_path_list: List of file paths (relative paths).
+            repo_path: Repository root path.
+            repo_name: Repository name.
+            version: Version identifier.
+
         Returns:
-            {file_path: {summary_dict}}
+            Mapping of {file_path: summary_dict}.
         """
         if not file_path_list:
             return {}
@@ -54,7 +53,7 @@ class FileSummarizer:
                    f"(max_workers={self.max_workers})...")
         
         def analyze_single_file(file_path: str) -> tuple:
-            """分析单个文件"""
+            """Analyze a single file."""
             try:
                 full_path = repo_path / file_path
                 if not full_path.exists():
@@ -63,7 +62,7 @@ class FileSummarizer:
                 with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
                 
-                # 调用 LLM 生成摘要
+                # Call the LLM to generate a summary
                 prompt = CODE_SNIPPET_PROMPT.format(
                     file_path=file_path,
                     file_content=content
@@ -95,7 +94,7 @@ class FileSummarizer:
                 logger.debug(f"Failed to summarize {file_path}: {e}")
                 return file_path, None
         
-        # 并发处理
+        # Concurrent processing
         summaries = {}
         completed = 0
         

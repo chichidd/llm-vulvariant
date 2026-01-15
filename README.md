@@ -2,6 +2,145 @@
 
 ## 项目简介
 
+LLM-VulVariant 利用大语言模型（LLM）、原生工具调用以及 CodeQL，将“已知漏洞画像”迁移到新版本或相似代码中，自动发现潜在的漏洞变种。系统围绕“画像生成→智能体推理→静态验证”三步构建，支持深度静态分析、模块级推理、以及可重复的 CLI 工作流。
+
+## 最近更新（2026-01-14）
+
+- 🌀 模块分析新增 **HybridModuleAnalyzer**：文件夹分割 + Agent 原生工具调用双轨并行，细粒度结果落盘 `module_tree.json`
+- 🔁 软件画像支持 **增量分析**：复用基线 commit 的文件摘要，基于 diff 只重新分析变更文件
+- 🧩 文件摘要可独立配置专用 LLM（`config/llm_config.yaml`），长文本自动截断
+- 🧠 深度静态分析集成 **RepoAnalyzer**：生成调用图、依赖列表、入口点并反哺模块画像的数据流特征
+- 🤖 Agentic 漏洞扫描器（`scanner/agentic_vuln_scanner.py`）扩展工具集：AST 函数提取、正则搜索、危险模式搜索、数据流快速分析
+- 🪝 CodeQL 原生封装（`utils/codeql_native.py`）完善：支持数据库创建、查询套件调用、调用图构建
+
+---
+
+## 目录结构（核心）
+
+```
+llm-vulvariant/
+├── config/                  # 配置：路径、LLM、CodeQL、RepoAnalyzer 规则
+├── src/
+│   ├── cli/                 # CLI 入口（软件画像、漏洞画像）
+│   ├── llm/                 # LLM 客户端（工具调用、重试、DeepSeek 思考模式）
+│   ├── profiler/
+│   │   ├── software/        # 软件画像：RepoCollector、模块分析（agent/folder/hybrid）、文件摘要、深度分析
+│   │   └── vulnerability/   # 漏洞画像：Source/Flow/Sink 特征提取
+│   ├── scanner/             # Agentic 漏洞扫描（native tool calling）
+│   ├── similarity/          # 模块/文本相似度工具
+│   └── utils/               # CodeQL 封装、日志、路径、仓库/文本工具
+├── repo-profiles/           # 软件画像输出（按 repo/commit）
+├── vuln-profiles/           # 漏洞画像输出（按 repo/commit/CVE）
+└── scan-results/            # 漏洞扫描结果
+```
+
+## 配置
+
+- `config/paths.yaml`：项目根路径、仓库根目录、vuln.json 路径、CodeQL DB 目录
+- `config/llm_config.yaml`：默认温度、max_tokens、provider 参数（支持 DeepSeek/LAB/OpenAI）；可为文件摘要指定单独模型
+- `config/codeql_config.yaml`：CodeQL CLI 路径、查询仓库、数据库输出目录
+- `config/software_profile_rule.yaml` / `config/repo_analyzer_rules.yaml`：数据流检测规则、文件/目录忽略、模块分析参数
+
+## 快速开始
+
+1) 安装依赖（Python ≥ 3.8）：
+
+```bash
+pip install -e .
+```
+
+2) 准备代码仓库与 vuln.json（默认路径见 `config/paths.yaml`）。
+
+3) 生成软件画像（支持深度分析、增量分析）：
+
+```bash
+python -m cli.software \
+  --repo-name NeMo \
+  --llm-provider deepseek \
+  --enable-deep-analysis \
+  --force-full-analysis
+# 输出：repo-profiles/NeMo/<commit>/software_profile.json
+```
+
+4) 生成漏洞画像（基于 vuln.json 条目或 CVE 查询）：
+
+```bash
+python -m cli.vulnerability \
+  --cve-id CVE-2025-23361 \
+  --llm-provider deepseek \
+  --repo-profile-dir ./repo-profiles \
+  --output-dir ./vuln-profiles
+# 输出：vuln-profiles/<repo>/<commit>/<cve>/vulnerability_profile.json
+```
+
+5) 运行 Agentic 漏洞扫描（在目标 commit 上迁移已知漏洞画像）：
+
+```bash
+python -m scanner.agentic_vuln_scanner \
+  --repo NeMo \
+  --vuln-commit 2919fedf26012076... \
+  --target-commit 8ab42c5... \
+  --cve CVE-2025-23361 \
+  --provider deepseek
+# 输出：scan-results/<repo>_<commit>_<cve>/agentic_vuln_findings.json
+```
+
+---
+
+## 软件画像流水线（`profiler/software`）
+
+1. **RepoInfoCollector**：遍历文件、识别语言/依赖、收集 README 与依赖文件；可生成文件级摘要（LLM，可配置独立模型）。
+2. **模块分析**（三选一，可配置 `analyzer_type`）：
+   - `HybridModuleAnalyzer`：先做文件夹拆分，随后 agent 式深挖，细粒度结果写入 module_tree/fine_grained_results。
+   - `FolderModuleAnalyzer`：按目录切分模块，保存树状结构 `module_tree.json`。
+   - `ModuleAnalyzer`：纯 agent，原生工具 `list_folder` / `read_file` / `finalize`。
+3. **DeepAnalyzer（可选）**：调用 RepoAnalyzer 输出调用图、函数列表、依赖、入口点；在 `_enhance_modules_with_deep_analysis` 中为每个模块补充数据源/格式/处理操作、外部依赖、模块间调用关系，并提取项目级数据流模式。
+4. **增量分析**：基于基线 commit 比对 changed files，复用未变更文件摘要，只重新分析差异；diff 统计与 changed 文件写入 repo_info。
+5. **存储**：分阶段 checkpoint（repo_info/basic_info/modules/module_tree），最终结果落盘 `software_profile.json`；可多次运行复用缓存。
+
+## 漏洞画像流水线（`profiler/vulnerability`）
+
+- 输入：`VulnEntry(repo_name, commit, call_chain, payload, cve_id)` 与对应软件画像。
+- 步骤：
+  1. 按 call_chain 提取 Source 函数代码片段、文件摘要、模块信息。
+  2. 通过 LLM 提取 **SourceFeature / SinkFeature / FlowFeature**（包含路径条件、别名、数据操作、校验/净化）。
+  3. 生成整体描述（严重性、攻击向量、利用条件、根因、利用场景），推断受影响模块。
+- 输出：`vulnerability_profile.json`（含特征字典、文本描述、受影响模块），并保存中间 checkpoint（source/sink/flow/vuln_description）。
+
+## Agentic 漏洞扫描（`scanner/agent`）
+
+- 核心类 `AgenticVulnFinder`：多轮原生工具调用，使用软件画像与漏洞画像作为上下文。
+- 工具集 `AgenticToolkit`：
+  - 文件读取/正则搜索/目录列举/函数 AST 提取/导入列表
+  - 危险模式快速检索（subprocess/eval/exec/pickle/yaml.load 等）
+  - 简易数据流分析（参数、赋值、调用、返回值）
+  - `report_vulnerability` 将发现写入结果
+- 对话管理：自动截断推理内容、按迭代压缩历史，可将每轮对话与摘要保存到 `scan-results/.../conversations/`。
+
+## CodeQL 支持
+
+- `utils/codeql_native.py` 封装 CodeQL CLI：
+  - 数据库创建：语言归一、线程/内存/超时配置
+  - 查询执行：支持 query suite、SARIF/CSV/JSON 输出
+  - 调用图与 taint 结果解析，转换为统一结构 `CodeQLAnalysisResult`
+- 配置可在 `config/codeql_config.yaml` 中设置 CLI 路径、查询库、DB 目录。
+
+## 结果产物位置
+
+- 软件画像：`repo-profiles/<repo>/<commit>/software_profile.json`（可附 `module_tree.json`）
+- 漏洞画像：`vuln-profiles/<repo>/<commit>/<cve>/vulnerability_profile.json`
+- 扫描结果：`scan-results/<repo>_<commit>_<cve>/agentic_vuln_findings.json`
+- 对话/中间产物：`repo-profiles/.../checkpoints/`、`vuln-profiles/.../checkpoints/`、`scan-results/.../conversations/`
+
+## 开发提示
+
+- API Key 与自定义模型优先读取 `config/llm_config.yaml` 和环境变量。
+- 运行深度分析或 CodeQL 前确保二进制可用并已设置路径。
+- 若切换仓库或分支，注意 `config/paths.yaml` 中的 repo_base_path 是否匹配。
+# LLM-VulVariant：基于 LLM 的漏洞变种检测系统
+
+## 项目简介
+
 LLM-VulVariant 是一个利用大语言模型（LLM）和代码查询（CodeQL）技术，自动检测软件项目中潜在漏洞变种的智能系统。该系统通过构建软件画像和漏洞画像，使用 LLM **智能体（Agent）** 模式进行自主推理和探索，识别代码库中可能存在相似漏洞的模块。
 
 ### ✨ 核心特性

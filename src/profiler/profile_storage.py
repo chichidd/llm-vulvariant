@@ -1,11 +1,10 @@
-"""
-通用的Profile存储管理器
+"""Generic profile storage manager.
 
-提供统一的接口用于保存和加载各种profile数据，包括：
-- 元数据 (profile_info.json)
-- 检查点数据 (checkpoints/)
-- LLM对话历史 (conversations/)
-- 最终结果
+Provides a unified interface for saving and loading different kinds of profile data, including:
+- Metadata (profile_info.json)
+- Checkpoint data (checkpoints/)
+- LLM conversation history (conversations/)
+- Final results
 """
 
 import json
@@ -19,71 +18,71 @@ logger = get_logger(__name__)
 
 class ProfileStorageManager:
     """
-    通用的Profile存储管理器
-    
-    用于管理profile相关数据的保存和加载，支持：
-    - 多级目录结构 (如 repo/version/cve_id)
-    - 检查点保存与加载
-    - LLM对话历史保存
-    - 元数据管理
+    Generic profile storage manager.
+
+    Manages saving and loading profile-related data. Supports:
+    - Multi-level directory layout (e.g., repo/version/cve_id)
+    - Saving and loading checkpoints
+    - Saving LLM conversation history
+    - Metadata management
     """
     
     def __init__(self, base_dir: Path, profile_type: str = "profile"):
         """
-        初始化存储管理器
-        
+        Initialize the storage manager.
+
         Args:
-            base_dir: 基础存储目录 (如 repo-profiles/ 或 vuln-profiles/)
-            profile_type: profile类型标识，用于日志输出
+            base_dir: Base storage directory (e.g., repo-profiles/ or vuln-profiles/)
+            profile_type: Profile type label used in log messages.
         """
         self.base_dir = Path(base_dir) if base_dir else None
         self.profile_type = profile_type
     
     def _get_profile_dir(self, *path_parts: str) -> Optional[Path]:
         """
-        获取profile目录路径
-        
+        Get the profile directory path.
+
         Args:
-            *path_parts: 路径组成部分 (如 repo_name, commit, cve_id)
-            
+            *path_parts: Path components (e.g., repo_name, commit, cve_id)
+
         Returns:
-            完整的目录路径
+            The full directory path.
         """
         if not self.base_dir:
             return None
         
         profile_dir = self.base_dir
         for part in path_parts:
-            if part:  # 跳过空字符串
+            if part:  # Skip empty strings
                 profile_dir = profile_dir / part
         
         return profile_dir
     
     def _ensure_dir(self, dir_path: Path) -> None:
-        """确保目录存在"""
+        """Ensure the directory exists."""
         if dir_path:
             dir_path.mkdir(parents=True, exist_ok=True)
     
-    # ==================== 元数据管理 ====================
+    # ==================== Metadata management ====================
     
     def get_profile_info_path(self, *path_parts: str, info_filename: str = "profile_info.json") -> Optional[Path]:
         """
-        获取profile_info.json的路径
-        
+        Get the path to profile_info.json.
+
         Args:
-            *path_parts: 路径组成部分
-            info_filename: 元数据文件名
+            *path_parts: Path components.
+            info_filename: Metadata file name.
         """
         profile_dir = self._get_profile_dir(*path_parts)
         return profile_dir / info_filename if profile_dir else None
     
     def load_profile_info(self, *path_parts: str, info_filename: str = "profile_info.json") -> Optional[Dict[str, Any]]:
         """
-        加载profile元数据
-        
+        Load profile metadata.
+
         Args:
-            *path_parts: 路径组成部分
-            info_filename: 元数据文件名
+            *path_parts: Path components.
+            info_filename: Metadata file name.
         """
         info_path = self.get_profile_info_path(*path_parts, info_filename=info_filename)
         if info_path and info_path.exists():
@@ -96,12 +95,12 @@ class ProfileStorageManager:
     
     def save_profile_info(self, profile_info: Dict[str, Any], *path_parts: str, info_filename: str = "profile_info.json") -> None:
         """
-        保存profile元数据
-        
+        Save profile metadata.
+
         Args:
-            profile_info: 要保存的元数据
-            *path_parts: 路径组成部分
-            info_filename: 元数据文件名
+            profile_info: Metadata to save.
+            *path_parts: Path components.
+            info_filename: Metadata file name.
         """
         info_path = self.get_profile_info_path(*path_parts, info_filename=info_filename)
         if not info_path:
@@ -115,10 +114,10 @@ class ProfileStorageManager:
         except Exception as e:
             logger.warning(f"Failed to save {info_filename}: {e}")
     
-    # ==================== 检查点管理 ====================
+    # ==================== Checkpoint management ====================
     
     def get_checkpoint_dir(self, *path_parts: str) -> Optional[Path]:
-        """获取检查点目录"""
+        """Get the checkpoint directory."""
         profile_dir = self._get_profile_dir(*path_parts)
         if not profile_dir:
             return None
@@ -129,12 +128,12 @@ class ProfileStorageManager:
     
     def save_checkpoint(self, checkpoint_name: str, data: Dict[str, Any], *path_parts: str) -> None:
         """
-        保存检查点数据
-        
+        Save checkpoint data.
+
         Args:
-            checkpoint_name: 检查点名称 (如 'source_features', 'repo_info')
-            data: 要保存的数据
-            *path_parts: 路径组成部分
+            checkpoint_name: Checkpoint name (e.g., 'source_features', 'repo_info').
+            data: Data to save.
+            *path_parts: Path components.
         """
         checkpoint_dir = self.get_checkpoint_dir(*path_parts)
         if not checkpoint_dir:
@@ -150,11 +149,11 @@ class ProfileStorageManager:
     
     def load_checkpoint(self, checkpoint_name: str, *path_parts: str) -> Optional[Dict[str, Any]]:
         """
-        加载检查点数据
-        
+        Load checkpoint data.
+
         Args:
-            checkpoint_name: 检查点名称
-            *path_parts: 路径组成部分
+            checkpoint_name: Checkpoint name.
+            *path_parts: Path components.
         """
         checkpoint_dir = self.get_checkpoint_dir(*path_parts)
         if not checkpoint_dir:
@@ -171,15 +170,15 @@ class ProfileStorageManager:
                 logger.warning(f"Failed to load checkpoint {checkpoint_name}: {e}")
         return None
     
-    # ==================== LLM对话管理 ====================
+    # ==================== LLM conversation management ====================
     
     def get_conversation_dir(self, conversation_type: str, *path_parts: str) -> Optional[Path]:
         """
-        获取对话历史目录
-        
+        Get the conversation history directory.
+
         Args:
-            conversation_type: 对话类型 (如 'source_features', 'basic_info')
-            *path_parts: 路径组成部分
+            conversation_type: Conversation type (e.g., 'source_features', 'basic_info').
+            *path_parts: Path components.
         """
         profile_dir = self._get_profile_dir(*path_parts)
         if not profile_dir:
@@ -197,28 +196,25 @@ class ProfileStorageManager:
         file_identifier: str = None
     ) -> None:
         """
-        保存LLM对话历史
-        
+        Save LLM conversation history.
+
         Args:
-            conversation_type: 对话类型 (如 'source_features')
-            conversation_data: 对话数据，包含prompt、response等
-            *path_parts: 路径组成部分
-            file_identifier: 文件标识符 (可选，用于区分同类型的不同对话)
+            conversation_type: Conversation type (e.g., 'source_features').
+            conversation_data: Conversation data containing prompt/response, etc.
+            *path_parts: Path components.
+            file_identifier: Optional file identifier used to distinguish multiple conversations of the same type.
         """
         conversation_dir = self.get_conversation_dir(conversation_type, *path_parts)
         if not conversation_dir:
             return
         
-        # 生成时间戳
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 精确到毫秒
-        
-        # 构建文件名
+        # Build filename (no longer includes a timestamp).
         if file_identifier:
-            # 清理文件标识符
+            # Sanitize file identifier.
             safe_identifier = file_identifier.replace('/', '_').replace('\\', '_').replace(':', '_')
-            filename = f"{timestamp}_{conversation_type}_{safe_identifier}.json"
+            filename = f"{safe_identifier}.json"
         else:
-            filename = f"{timestamp}_{conversation_type}.json"
+            filename = f"{conversation_type}.json"
         
         conversation_path = conversation_dir / filename
         
@@ -229,10 +225,46 @@ class ProfileStorageManager:
         except Exception as e:
             logger.warning(f"Failed to save conversation: {e}")
     
-    # ==================== 最终结果管理 ====================
+    def load_conversation(self, conversation_type: str, *path_parts: str) -> Optional[Dict[str, Any]]:
+        """
+        Load the latest conversation history (used to resume from checkpoints).
+
+        Args:
+            conversation_type: Conversation type (e.g., 'module_analysis').
+            *path_parts: Path components.
+
+        Returns:
+            Conversation data dict, or None if it does not exist.
+        """
+        conversation_dir = self.get_conversation_dir(conversation_type, *path_parts)
+        if not conversation_dir or not conversation_dir.exists():
+            return None
+        
+        # Find all conversation files of this type (filenames no longer include a timestamp prefix).
+        conversation_files = sorted(
+            conversation_dir.glob(f"*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True  # Newest first.
+        )
+        
+        if not conversation_files:
+            return None
+        
+        # Load the latest conversation.
+        latest_conversation = conversation_files[0]
+        try:
+            with open(latest_conversation, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            logger.info(f"Loaded conversation: {latest_conversation}")
+            return data
+        except Exception as e:
+            logger.warning(f"Failed to load conversation from {latest_conversation}: {e}")
+            return None
+    
+    # ==================== Final result management ====================
     
     def get_result_dir(self, *path_parts: str) -> Optional[Path]:
-        """获取结果目录"""
+        """Get the result directory."""
         profile_dir = self._get_profile_dir(*path_parts)
         if profile_dir:
             self._ensure_dir(profile_dir)
@@ -240,12 +272,12 @@ class ProfileStorageManager:
     
     def save_final_result(self, filename: str, content: str, *path_parts: str) -> None:
         """
-        保存最终结果
-        
+        Save the final result.
+
         Args:
-            filename: 文件名 (如 'software_profile.json')
-            content: 文件内容
-            *path_parts: 路径组成部分
+            filename: File name (e.g., 'software_profile.json').
+            content: File contents.
+            *path_parts: Path components.
         """
         result_dir = self.get_result_dir(*path_parts)
         if not result_dir:
@@ -261,11 +293,11 @@ class ProfileStorageManager:
     
     def load_final_result(self, filename: str, *path_parts: str) -> Optional[str]:
         """
-        加载最终结果
-        
+        Load the final result.
+
         Args:
-            filename: 文件名
-            *path_parts: 路径组成部分
+            filename: File name.
+            *path_parts: Path components.
         """
         result_dir = self.get_result_dir(*path_parts)
         if not result_dir:

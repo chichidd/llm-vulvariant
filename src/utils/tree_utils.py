@@ -1,4 +1,4 @@
-"""目录树构建和渲染工具"""
+"""Directory tree building and rendering utilities."""
 
 from typing import Dict, List, Tuple, Any, Optional, Callable
 from pathlib import Path
@@ -6,13 +6,13 @@ from pathlib import Path
 
 def build_path_tree(paths_with_values: List[Tuple[str, Any]]) -> Dict:
     """
-    从路径列表构建树形结构（去重）
-    
+    Build a tree structure from a list of paths (deduplicated).
+
     Args:
-        paths_with_values: [(path, value), ...] 其中 value 可以是 size、None 等
-        
+        paths_with_values: [(path, value), ...] where value can be size, None, etc.
+
     Returns:
-        嵌套字典，叶子节点存储 value
+        A nested dict; leaf nodes store the provided value.
         
     Example:
         >>> paths = [("src/main.py", 100), ("src/utils/helper.py", 50)]
@@ -27,7 +27,7 @@ def build_path_tree(paths_with_values: List[Tuple[str, Any]]) -> Dict:
             if part not in current:
                 current[part] = {}
             current = current[part]
-        # 最后一个部分（文件名或最后的目录）
+        # The last component (file name or final directory name).
         filename = parts[-1]
         current[filename] = value
     return tree
@@ -41,21 +41,21 @@ def render_tree(
     current_depth: int = 0
 ) -> List[str]:
     """
-    递归渲染树形结构
-    
+    Recursively render a tree structure.
+
     Args:
-        node: 树形字典
-        prefix: 当前行前缀
-        value_formatter: 值格式化函数，接收 value 返回字符串，None 表示不显示
-        max_depth: 最大深度限制，None 表示无限制
-        current_depth: 当前深度（内部使用）
-        
+        node: Tree dict.
+        prefix: Prefix for the current line.
+        value_formatter: Formats values; returns a string. None means do not display.
+        max_depth: Maximum depth limit; None means unlimited.
+        current_depth: Current depth (internal).
+
     Returns:
-        格式化的行列表
+        A list of formatted lines.
     """
     lines = []
     
-    # 检查深度限制
+    # Check depth limit.
     if max_depth is not None and current_depth >= max_depth:
         return lines
     
@@ -65,7 +65,7 @@ def render_tree(
         connector = "└── " if is_last_item else "├── "
         
         if isinstance(value, dict):
-            # 目录
+            # Directory
             lines.append(prefix + connector + name + "/")
             extension = "    " if is_last_item else "│   "
             lines.extend(
@@ -78,7 +78,7 @@ def render_tree(
                 )
             )
         else:
-            # 文件或叶子节点
+            # File or leaf node
             display_name = name
             if value_formatter and value is not None:
                 display_name += f" ({value_formatter(value)})"
@@ -89,26 +89,26 @@ def render_tree(
 
 def build_directory_structure_tree(file_list: List[str], max_depth: Optional[int] = None) -> str:
     """
-    根据文件列表构建压缩的目录结构树（去重复路径）
-    
+    Build a compact directory tree from a file list (deduplicated).
+
     Args:
-        file_list: 文件路径列表
-        max_depth: 最大显示深度，None 表示无限制
-        
+        file_list: List of file paths.
+        max_depth: Maximum display depth; None means unlimited.
+
     Returns:
-        格式化的树形结构字符串
+        A formatted tree string.
     """
     if not file_list:
         return "Empty directory"
     
-    # 构建路径树（value 设为 None）
+    # Build a path tree (values set to None).
     paths_with_none = [(path, None) for path in file_list]
     tree = build_path_tree(paths_with_none)
     
-    # 渲染树形结构
+    # Render the tree.
     lines = render_tree(tree, max_depth=max_depth)
     
-    # 添加统计信息
+    # Add stats.
     header = f"Total files: {len(file_list)}\n"
     if max_depth:
         header += f"(Showing depth: {max_depth})\n"
@@ -117,7 +117,7 @@ def build_directory_structure_tree(file_list: List[str], max_depth: Optional[int
 
 
 def format_file_size(size_bytes: int) -> str:
-    """格式化文件大小"""
+    """Format a file size."""
     if size_bytes < 1024:
         return f"{size_bytes}B"
     elif size_bytes < 1024 * 1024:
@@ -131,25 +131,25 @@ def build_directory_structure_with_sizes(
     max_depth: Optional[int] = None
 ) -> str:
     """
-    根据文件路径和大小构建目录结构树
-    
+    Build a directory tree from file paths and sizes.
+
     Args:
         paths_with_sizes: [(path, size_in_bytes), ...]
-        max_depth: 最大显示深度
-        
+        max_depth: Maximum display depth.
+
     Returns:
-        格式化的树形结构字符串（带文件大小）
+        A formatted tree string (with file sizes).
     """
     if not paths_with_sizes:
         return "Empty directory"
     
-    # 构建路径树
+    # Build the path tree.
     tree = build_path_tree(paths_with_sizes)
     
-    # 渲染树形结构（带文件大小格式化）
+    # Render the tree (format file sizes).
     lines = render_tree(tree, value_formatter=format_file_size, max_depth=max_depth)
     
-    # 添加统计信息
+    # Add stats.
     total_size = sum(size for _, size in paths_with_sizes)
     header = f"Total files: {len(paths_with_sizes)} ({format_file_size(total_size)})\n"
     if max_depth:

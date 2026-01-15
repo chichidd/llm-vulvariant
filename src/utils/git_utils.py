@@ -81,15 +81,15 @@ def checkout_commit(repo_path: str, target_commit: str) -> bool:
 
 def restore_to_latest_commit(repo_path: str) -> bool:
     """
-    将仓库恢复到最新commit（切回之前的分支/commit位置）。
-    
-    使用 git checkout - 命令切换回上一次所在的分支或commit。
-    
+    Restore the repository to the previous position (branch/commit).
+
+    Uses `git checkout -` to switch back to the previously checked-out branch/commit.
+
     Args:
-        repo_path: Git 仓库路径
+        repo_path: Path to the git repository.
     
     Returns:
-        True 表示成功，False 表示失败
+        True on success, False otherwise.
     """
     try:
         result = subprocess.run(
@@ -100,13 +100,13 @@ def restore_to_latest_commit(repo_path: str) -> bool:
             check=True
         )
         current_commit = get_git_commit(repo_path)
-        logger.info(f"已恢复到之前的位置，当前 commit: {current_commit}")
+        logger.info(f"Restored to previous position; current commit: {current_commit}")
         return True
     except subprocess.CalledProcessError as e:
-        logger.info(f"恢复失败: {e.stderr}")
+        logger.info(f"Restore failed: {e.stderr}")
         return False
     except Exception as e:
-        logger.info(f"恢复时发生错误: {e}")
+        logger.info(f"Error while restoring: {e}")
         return False
 
 

@@ -16,12 +16,13 @@ from profiler.profile_storage import ProfileStorageManager
 from utils.git_utils import get_git_commit, checkout_commit, get_diff_stats, get_changed_files_with_status
 from utils.logger import get_logger
 from utils.path_utils import to_relative_path
-from utils.agent_conversation import make_serializable
+# from utils.agent_conversation import make_serializable
 
-from .models import SoftwareProfile, EnhancedModuleInfo
+from .models import SoftwareProfile, ModuleInfo, ModuleTree, DataFlowPattern
 from .repo_collector import RepoInfoCollector
 from .basic_info_analyzer import BasicInfoAnalyzer
-from .module_analyzer import ModuleAnalyzer
+from .module_analyzer import ModuleAnalyzer, FolderModuleAnalyzer, HybridModuleAnalyzer
+
 from .file_summarizer import FileSummarizer
 from .deep_analyzer import DeepAnalyzer
 
@@ -81,31 +82,9 @@ class SoftwareProfiler:
         
         try:
             config_save_path = self.output_dir / "software_profile_rule.yaml"
-            config_to_save = {
-                'data_sources': self.detection_rules.get('data_sources', {}),
-                'data_formats': self.detection_rules.get('data_formats', {}),
-                'processing_operations': self.detection_rules.get('processing_operations', {}),
-                'analyzer_config': {
-                    'file_extensions': self.file_extensions,
-                    'exclude_dirs': self.exclude_dirs,
-                    'max_module_analysis_iterations': self.max_module_analysis_iterations,
-                    'enable_llm_file_summary': self.enable_llm_file_summary,
-                    'file_summary_llm': self.file_summary_llm_config,
-                },
-                'repo_analyzer_config': {
-                    'language': self.repo_analyzer_language,
-                    'max_slice_depth': self.repo_analyzer_max_slice_depth,
-                    'max_slice_files': self.repo_analyzer_max_slice_files,
-                    'rebuild_cache': self.repo_analyzer_rebuild_cache,
-                },
-                'repo_files': {
-                    'readme_files': self.readme_files,
-                    'dependency_files': self.dependency_files,
-                }
-            }
-            
+            # 直接保存完整的配置，确保所有内容都被保存
             with open(config_save_path, 'w', encoding='utf-8') as f:
-                yaml.dump(config_to_save, f, allow_unicode=True, default_flow_style=False)
+                yaml.dump(self._detection_rules, f, allow_unicode=True, default_flow_style=False)
             
             logger.info(f"Saved configuration to: {config_save_path}")
         except Exception as e:
@@ -118,8 +97,7 @@ class SoftwareProfiler:
         enable_deep_analysis: bool = False,
         rules_path: Path = None,
         file_extensions: List[str] = None,
-        exclude_dirs: List[str] = None,
-        max_module_analysis_iterations: int = None
+        exclude_dirs: List[str] = None
     ):
         """初始化软件画像生成器"""
         self.llm_client = llm_client
@@ -150,10 +128,6 @@ class SoftwareProfiler:
             "__pycache__", "node_modules", ".git", ".venv", "venv", "env",
             "build", "dist", ".eggs", "*.egg-info"
         ])
-        self.max_module_analysis_iterations = (
-            max_module_analysis_iterations or 
-            analyzer_config.get('max_module_analysis_iterations', 10)
-        )
         
         # 文件摘要配置
         self.enable_llm_file_summary = analyzer_config.get('enable_llm_file_summary', True)
@@ -175,11 +149,10 @@ class SoftwareProfiler:
                 self.file_summary_llm_client = None
         
         # RepoAnalyzer配置
-        repo_analyzer_config = all_config.get('repo_analyzer_config', {})
-        self.repo_analyzer_language = repo_analyzer_config.get('language', 'auto')
-        self.repo_analyzer_max_slice_depth = repo_analyzer_config.get('max_slice_depth', 3)
-        self.repo_analyzer_max_slice_files = repo_analyzer_config.get('max_slice_files', 10)
-        self.repo_analyzer_rebuild_cache = repo_analyzer_config.get('rebuild_cache', False)
+        self.repo_analyzer_config = all_config.get('repo_analyzer_config', {})
+
+        # 模块分析器配置
+        self.module_analyzer_config = all_config.get('module_analyzer_config', {})
         
         # 仓库文件配置
         repo_files_config = all_config.get('repo_files', {})
@@ -206,14 +179,46 @@ class SoftwareProfiler:
         # 基本信息分析器
         self.basic_info_analyzer = BasicInfoAnalyzer(
             llm_client=self.llm_client,
-            detection_rules=self.detection_rules
         )
         
-        # 模块分析器
-        self.module_analyzer = ModuleAnalyzer(
-            llm_client=self.llm_client,
-            max_iterations=self.max_module_analysis_iterations
-        )
+        # 模块分析器 - 根据配置选择类型: 'folder', 'agent', 或 'hybrid'
+        analyzer_type = self.module_analyzer_config.get('analyzer_type', 'hybrid')
+        
+        # 初始化所有分析器引用为 None
+        self.module_analyzer = None
+        self.folder_module_analyzer = None
+        self.hybrid_module_analyzer = None
+        
+        if analyzer_type == 'hybrid':
+            logger.info("Using hybrid module analyzer (agent + folder-based)")
+            self.hybrid_module_analyzer = HybridModuleAnalyzer(
+                llm_client=self.llm_client,
+                max_agent_iterations=self.module_analyzer_config.get('max_agent_iterations', 100),
+                max_folder_iterations=self.module_analyzer_config.get('max_folder_iterations', 100),
+                max_file_content_length=self.module_analyzer_config.get('max_file_content_length', 8000),
+                excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,
+                code_extensions=self.module_analyzer_config.get('code_extensions') or None,
+                skip_empty_folders=self.module_analyzer_config.get('skip_empty_folders', True),
+                min_files_for_module=self.module_analyzer_config.get('min_files_for_module', 1),
+            )
+        elif analyzer_type == 'folder':
+            logger.info("Using folder-based module analyzer")
+            self.folder_module_analyzer = FolderModuleAnalyzer(
+                llm_client=self.llm_client,
+                excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,
+                code_extensions=self.module_analyzer_config.get('code_extensions') or None,
+                max_agent_iterations=self.module_analyzer_config.get('max_agent_iterations', 10),
+                max_file_content_length=self.module_analyzer_config.get('max_file_content_length', 8000),
+                skip_empty_folders=self.module_analyzer_config.get('skip_empty_folders', True),
+                min_files_for_module=self.module_analyzer_config.get('min_files_for_module', 1),
+            )
+        else:  # 'agent' or default
+            logger.info("Using agent-based module analyzer")
+            max_agent_iterations = self.module_analyzer_config.get('max_agent_iterations', 100)
+            self.module_analyzer = ModuleAnalyzer(
+                llm_client=self.llm_client,
+                max_iterations=max_agent_iterations
+            )
         
         # 文件摘要器
         summary_llm = self.file_summary_llm_client or self.llm_client
@@ -222,10 +227,10 @@ class SoftwareProfiler:
         # 深度分析器
         if self.enable_deep_analysis:
             self.deep_analyzer = DeepAnalyzer(
-                language=self.repo_analyzer_language,
-                max_slice_depth=self.repo_analyzer_max_slice_depth,
-                max_slice_files=self.repo_analyzer_max_slice_files,
-                rebuild_cache=self.repo_analyzer_rebuild_cache
+                language=self.repo_analyzer_config.get('language'),
+                max_slice_depth=self.repo_analyzer_config.get('max_slice_depth'),
+                max_slice_files=self.repo_analyzer_config.get('max_slice_files'),
+                rebuild_cache=self.repo_analyzer_config.get('rebuild_cache')
             )
         else:
             self.deep_analyzer = None
@@ -384,14 +389,66 @@ class SoftwareProfiler:
         # Step 3: 分析模块
         logger.info("Step 3/4: Analyzing modules...")
         modules_result = self.storage_manager.load_checkpoint("modules", *path_parts) if self.storage_manager else None
+        module_tree = None  # 用于存储树状模块结构
+        fine_grained_results = None  # 用于存储细粒度结果（hybrid 模式）
+        
         if modules_result:
             logger.info("Loaded modules from checkpoint")
+            # 如果有 module_tree，加载它
+            if self.folder_module_analyzer or self.hybrid_module_analyzer:
+                module_tree_data = self.storage_manager.load_checkpoint("module_tree", *path_parts)
+                if module_tree_data:
+                    module_tree = ModuleTree.from_dict(module_tree_data)
         else:
-            modules_result = self.module_analyzer.analyze(repo_info, repo_path)
-            if self.storage_manager:
-                self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
-                self._save_module_conversation(repo_name, version)
-        
+            if self.hybrid_module_analyzer:
+                # 使用混合模块分析器（agent + folder-based）
+                logger.info("Using hybrid module analyzer...")
+                hybrid_result = self.hybrid_module_analyzer.analyze(
+                    repo_info=repo_info,
+                    repo_path=repo_path,
+                    storage_manager=self.storage_manager,
+                    repo_name=repo_name,
+                    version=version,
+                )
+                
+                modules_result = {
+                    "modules": hybrid_result.get("modules", []),
+                    "llm_calls": hybrid_result.get("llm_calls", 0),
+                    "fine_grained_results": hybrid_result.get("fine_grained_results", {})
+                }
+
+                # 保存 modules checkpoint
+                if self.storage_manager:
+                    self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
+                    
+            elif self.folder_module_analyzer:
+                # 使用基于文件夹的模块分析器
+                logger.info("Using folder-based module analyzer...")
+                module_tree = self.folder_module_analyzer.analyze(
+                    repo_path=repo_path,
+                    repo_name=repo_name,
+                    file_list=repo_info.get('files', []),
+                    storage_manager=self.storage_manager,
+                    version=version,
+                )
+
+
+                # 保存 module_tree
+                if self.storage_manager:
+                    self.storage_manager.save_checkpoint("module_tree", module_tree.to_dict(), *path_parts)
+            else:
+                # 使用原有的 agent 模块分析器
+                modules_result = self.module_analyzer.analyze(
+                    repo_info, 
+                    repo_path,
+                    storage_manager=self.storage_manager,
+                    repo_name=repo_name,
+                    version=version
+                )
+                
+                if self.storage_manager:
+                    self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
+            
         # Step 4: 构建软件画像
         logger.info("Step 4/4: Building software profile...")
         profile = SoftwareProfile(
@@ -410,10 +467,19 @@ class SoftwareProfiler:
             deep_analysis = repo_info['deep_analysis']
             
             base_modules = modules_result.get('modules', []) if modules_result else []
-            enhanced_modules = self._enhance_modules_with_deep_analysis(base_modules, deep_analysis, repo_path)
-            profile.enhanced_modules = enhanced_modules
+            logger.debug(f"[DEBUG] Base modules: {len(base_modules)}, first type: {type(base_modules[0]).__name__ if base_modules else 'N/A'}")
+            modules = self._enhance_modules_with_deep_analysis(base_modules, deep_analysis)
+            logger.debug(f"[DEBUG] Enhanced modules: {len(modules)}, first type: {type(modules[0]).__name__ if modules else 'N/A'}")
+            if modules:
+                logger.debug(f"[DEBUG] First module enhanced data - external_deps: {len(modules[0].external_dependencies)}, called_by: {len(modules[0].called_by_modules)}, calls: {len(modules[0].calls_modules)}")
+            profile.modules = modules
+            logger.debug(f"[DEBUG] Profile.modules after assignment: {len(profile.modules)}, type: {type(profile.modules[0]).__name__ if profile.modules else 'N/A'}")
             
-            project_features = self._extract_project_level_features(enhanced_modules, deep_analysis)
+            # 提取数据流模式
+            data_flow_patterns = self._extract_data_flow_patterns(modules, deep_analysis)
+            profile.data_flow_patterns = data_flow_patterns
+            
+            project_features = self._extract_project_level_features(modules, deep_analysis)
             profile.common_data_sources = project_features.get('common_data_sources', [])
             profile.common_data_formats = project_features.get('common_data_formats', [])
             profile.third_party_libraries = project_features.get('third_party_libraries', [])
@@ -424,7 +490,13 @@ class SoftwareProfiler:
         
         # 保存最终画像
         if self.storage_manager:
+            logger.debug(f"[DEBUG] Before saving (_generate_profile_full) - profile.modules: {len(profile.modules)}, type: {type(profile.modules[0]).__name__ if profile.modules else 'N/A'}")
+            if profile.modules and hasattr(profile.modules[0], 'external_dependencies'):
+                logger.debug(f"[DEBUG] First module before save - external_deps: {len(profile.modules[0].external_dependencies)}, called_by: {len(profile.modules[0].called_by_modules)}")
             self.storage_manager.save_final_result("software_profile.json", profile.to_json(), *path_parts)
+            # 如果使用了 folder-based analyzer，也保存 module_tree
+            if module_tree:
+                self.storage_manager.save_final_result("module_tree.json", module_tree.to_json(), *path_parts)
         
         return profile
     
@@ -435,7 +507,7 @@ class SoftwareProfiler:
         version: str,
         profile_info: Dict
     ) -> SoftwareProfile:
-        """执行增量profile分析"""
+        """执行增量profile分析: TODO"""
         base_commit = profile_info.get("base_commit")
         logger.info(f"Analyzing changes from {base_commit[:8]}... to {version[:8]}...")
         
@@ -516,10 +588,15 @@ class SoftwareProfiler:
             self.storage_manager.save_checkpoint("basic_info", basic_info, *path_parts)
         
         logger.info("Step 3/4: Analyzing modules...")
-        modules_result = self.module_analyzer.analyze(repo_info, repo_path)
+        modules_result = self.module_analyzer.analyze(
+            repo_info, 
+            repo_path,
+            storage_manager=self.storage_manager,
+            repo_name=repo_name,
+            version=version
+        )
         if self.storage_manager:
             self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
-            self._save_module_conversation(repo_name, version)
         
         logger.info("Step 4/4: Building software profile...")
         profile = SoftwareProfile(
@@ -538,10 +615,14 @@ class SoftwareProfiler:
             deep_analysis = repo_info['deep_analysis']
             
             base_modules = modules_result.get('modules', []) if modules_result else []
-            enhanced_modules = self._enhance_modules_with_deep_analysis(base_modules, deep_analysis, repo_path)
-            profile.enhanced_modules = enhanced_modules
+            modules = self._enhance_modules_with_deep_analysis(base_modules, deep_analysis)
+            profile.modules = modules
             
-            project_features = self._extract_project_level_features(enhanced_modules, deep_analysis)
+            # 提取数据流模式
+            data_flow_patterns = self._extract_data_flow_patterns(modules, deep_analysis)
+            profile.data_flow_patterns = data_flow_patterns
+            
+            project_features = self._extract_project_level_features(modules, deep_analysis)
             profile.common_data_sources = project_features.get('common_data_sources', [])
             profile.common_data_formats = project_features.get('common_data_formats', [])
             profile.third_party_libraries = project_features.get('third_party_libraries', [])
@@ -555,32 +636,69 @@ class SoftwareProfiler:
             self.storage_manager.save_final_result("software_profile.json", profile.to_json(), *path_parts)
         
         return profile
-
-    def _save_module_conversation(self, repo_name: str, version: str) -> None:
-        """持久化模块分析的对话历史，便于回溯。"""
-        if not self.storage_manager:
-            return
-        conversation_data = {
-            "step": "module_analysis",
-            "timestamp": datetime.now().isoformat(),
-            "conversation_history": make_serializable(self.module_analyzer.conversation_history),
-        }
-        path_parts = (repo_name, version) if version else (repo_name,)
-        self.storage_manager.save_conversation("module_analysis", conversation_data, *path_parts)
     
     def _enhance_modules_with_deep_analysis(
         self,
         base_modules: List[Dict],
         deep_analysis: Dict,
-        repo_path: Path
-    ) -> List[EnhancedModuleInfo]:
+    ) -> List[ModuleInfo]:
         """用深度分析数据增强模块信息"""
-        enhanced_modules = []
+        modules = []
         functions_map = {f['file']: f for f in deep_analysis.get('functions', [])}
         call_graph_edges = deep_analysis.get('call_graph_edges', [])
+        dependencies = deep_analysis.get('dependencies', [])
+        all_files = list(functions_map.keys())
+        
+        # 构建模块名到文件的映射
+        module_name_to_files = {}
+        for module in base_modules:
+            module_paths = module.get('paths', [])
+            module_files = []
+            for path in module_paths:
+                path = path.replace('\\', '/').rstrip('/')
+                if '.' in path.split('/')[-1]:
+                    if path in all_files:
+                        module_files.append(path)
+                else:
+                    folder_prefix = path + '/' if path else ''
+                    for file_path in all_files:
+                        if file_path.startswith(folder_prefix):
+                            module_files.append(file_path)
+            module_name_to_files[module.get('name', '')] = module_files
+        
+        # 构建文件到模块的映射
+        file_to_module = {}
+        for module_name, files in module_name_to_files.items():
+            for file in files:
+                file_to_module[file] = module_name
+        
+        # 构建依赖关系图（外部依赖）
+        dependencies_by_file = {}
+        for dep in dependencies:
+            dep_name = dep.get('name', '')
+            is_third_party = dep.get('is_third_party', False)
+            is_builtin = dep.get('is_builtin', False)
+            import_files = dep.get('import_files', [])
+            
+            if is_third_party or is_builtin:
+                # 如果有import_files信息，使用精确匹配
+                if import_files:
+                    for file in import_files:
+                        if file not in dependencies_by_file:
+                            dependencies_by_file[file] = []
+                        if dep_name not in dependencies_by_file[file]:
+                            dependencies_by_file[file].append(dep_name)
+                else:
+                    # 如果没有import_files信息，假设所有文件都可能使用（保持向后兼容）
+                    for file in all_files:
+                        if file not in dependencies_by_file:
+                            dependencies_by_file[file] = []
+                        if dep_name not in dependencies_by_file[file]:
+                            dependencies_by_file[file].append(dep_name)
         
         for module in base_modules:
-            module_files = module.get('files', [])
+            module_name = module.get('name', '')
+            module_files = module_name_to_files.get(module_name, [])
             
             # 提取模块级别的函数和调用图
             module_functions = []
@@ -602,18 +720,51 @@ class SoftwareProfiler:
             data_formats = self._detect_patterns(module_functions, module_call_graph, 'data_formats')
             processing_operations = self._detect_patterns(module_functions, module_call_graph, 'processing_operations')
             
-            enhanced_module = EnhancedModuleInfo(
-                name=module.get('name', ''),
+            # 提取外部依赖
+            external_dependencies = set()
+            for file in module_files:
+                if file in dependencies_by_file:
+                    external_dependencies.update(dependencies_by_file[file])
+            
+            # 提取内部依赖（从base_modules的dependencies字段）
+            internal_dependencies = module.get('dependencies', [])
+            
+            # 计算模块间的调用关系
+            called_by_modules = set()
+            calls_modules = set()
+            
+            for edge in call_graph_edges:
+                caller_file = edge.get('caller_file', '')
+                callee_file = edge.get('callee_file', '')
+                
+                # 如果当前模块的文件被调用
+                if callee_file in module_files and caller_file in file_to_module:
+                    caller_module = file_to_module[caller_file]
+                    if caller_module != module_name:
+                        called_by_modules.add(caller_module)
+                
+                # 如果当前模块调用了其他模块
+                if caller_file in module_files and callee_file in file_to_module:
+                    callee_module = file_to_module[callee_file]
+                    if callee_module != module_name:
+                        calls_modules.add(callee_module)
+            
+            enhanced_module = ModuleInfo(
+                name=module_name,
                 description=module.get('description', ''),
                 files=module_files,
                 key_functions=module.get('key_functions', []),
                 data_sources=data_sources,
                 data_formats=data_formats,
-                processing_operations=processing_operations
+                processing_operations=processing_operations,
+                external_dependencies=sorted(list(external_dependencies)),
+                internal_dependencies=internal_dependencies,
+                called_by_modules=sorted(list(called_by_modules)),
+                calls_modules=sorted(list(calls_modules))
             )
-            enhanced_modules.append(enhanced_module)
+            modules.append(enhanced_module)
         
-        return enhanced_modules
+        return modules
     
     def _detect_patterns(self, functions: List[Dict], call_graph: List[Dict], pattern_type: str) -> List[str]:
         """检测特定类型的模式"""
@@ -630,9 +781,112 @@ class SoftwareProfiler:
         
         return list(patterns)
     
+    def _extract_data_flow_patterns(
+        self,
+        modules: List[ModuleInfo],
+        deep_analysis: Dict
+    ) -> List[DataFlowPattern]:
+        """extract data flow patterns from modules and deep analysis"""
+        patterns = []
+        functions_map = {f['file']: f for f in deep_analysis.get('functions', [])}
+        call_graph_edges = deep_analysis.get('call_graph_edges', [])
+        
+        # 构建模块级别的数据流模式
+        for module in modules:
+            if not module.data_sources or not module.data_formats:
+                continue
+            
+            # module.files 已经在 _enhance_modules_with_deep_analysis 中展开过了
+            # 查找源API和汇API
+            source_apis = []
+            sink_apis = []
+            intermediate_ops = []
+            file_paths = module.files
+            
+            # 从模块的函数中提取相关API
+            module_functions = {}  # {file::func_name: func_info}
+            for file_path in module.files:
+                if file_path in functions_map:
+                    func_info = functions_map[file_path]
+                    for func in func_info.get('functions', []):
+                        func_name = func.get('name', '')
+                        func_key = f"{file_path}::{func_name}"
+                        module_functions[func_key] = func
+                        
+                        # 根据数据源识别源API
+                        for data_source in module.data_sources:
+                            source_rules = self.detection_rules.get('data_sources', {}).get(data_source, {})
+                            keywords = source_rules.get('keywords', [])
+                            if any(kw.lower() in func_name.lower() for kw in keywords):
+                                source_apis.append(func_key)
+                        
+                        # 根据数据格式识别汇API
+                        for data_format in module.data_formats:
+                            format_rules = self.detection_rules.get('data_formats', {}).get(data_format, {})
+                            keywords = format_rules.get('keywords', [])
+                            if any(kw.lower() in func_name.lower() for kw in keywords):
+                                sink_apis.append(func_key)
+                        
+                        # 识别中间处理操作
+                        for proc_op in module.processing_operations:
+                            proc_rules = self.detection_rules.get('processing_operations', {}).get(proc_op, {})
+                            keywords = proc_rules.get('keywords', [])
+                            if any(kw.lower() in func_name.lower() for kw in keywords):
+                                intermediate_ops.append(func_key)
+            
+            # 利用调用图边来追踪数据流路径
+            # 找出源API到汇API之间的中间调用
+            for edge in call_graph_edges:
+                caller_file = edge.get('caller_file', '')
+                caller_func = edge.get('caller_function', '')
+                callee_file = edge.get('callee_file', '')
+                callee_func = edge.get('callee_function', '')
+                
+                caller_key = f"{caller_file}::{caller_func}"
+                callee_key = f"{callee_file}::{callee_func}"
+                
+                # 如果调用者或被调用者在模块内
+                if caller_key in module_functions or callee_key in module_functions:
+                    # 如果这条边连接了源API和其他函数，将其他函数加入中间操作
+                    if caller_key in source_apis and callee_key in module_functions:
+                        if callee_key not in source_apis and callee_key not in sink_apis and callee_key not in intermediate_ops:
+                            intermediate_ops.append(callee_key)
+                    
+                    # 如果这条边连接了某个函数和汇API，将该函数加入中间操作
+                    if callee_key in sink_apis and caller_key in module_functions:
+                        if caller_key not in source_apis and caller_key not in sink_apis and caller_key not in intermediate_ops:
+                            intermediate_ops.append(caller_key)
+            
+            # 构建数据流模式
+            if source_apis or sink_apis:
+                # 根据数据源和格式生成模式类型
+                sources_str = "_".join(sorted(module.data_sources)[:2])
+                formats_str = "_".join(sorted(module.data_formats)[:2])
+                pattern_type = f"{sources_str}_to_{formats_str}" if sources_str and formats_str else "unknown"
+                
+                pattern = DataFlowPattern(
+                    pattern_type=pattern_type,
+                    source_apis=source_apis[:5],  # 限制数量
+                    sink_apis=sink_apis[:5],
+                    intermediate_operations=list(set(intermediate_ops))[:10],  # 增加中间操作数量
+                    file_paths=file_paths
+                )
+                patterns.append(pattern)
+        
+        # 去重相似的模式
+        unique_patterns = []
+        seen_pattern_types = set()
+        for pattern in patterns:
+            if pattern.pattern_type not in seen_pattern_types:
+                unique_patterns.append(pattern)
+                seen_pattern_types.add(pattern.pattern_type)
+        
+        logger.info(f"Extracted {len(unique_patterns)} unique data flow patterns")
+        return unique_patterns
+    
     def _extract_project_level_features(
         self,
-        enhanced_modules: List[EnhancedModuleInfo],
+        modules: List[ModuleInfo],
         deep_analysis: Dict
     ) -> Dict[str, Any]:
         """从模块中提取项目级特征"""
@@ -640,7 +894,7 @@ class SoftwareProfiler:
         all_data_formats = []
         all_processing_ops = []
         
-        for module in enhanced_modules:
+        for module in modules:
             all_data_sources.extend(module.data_sources)
             all_data_formats.extend(module.data_formats)
             all_processing_ops.extend(module.processing_operations)

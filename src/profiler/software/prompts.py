@@ -1,310 +1,312 @@
 """
-LLM Prompt 模板
-
-包含软件画像分析过程中使用的所有 LLM Prompt 模板。
-集中管理便于维护和调整。
+LLM Prompt Templates for Software Profiling
 """
 
+BASIC_INFO_PROMPT = """Please carefully analyze the following software repository and accurately identify its application domain, target scenarios, and user groups.
 
-# 基本信息分析 Prompt
-BASIC_INFO_PROMPT = """请仔细分析以下软件仓库，准确识别其应用领域、目标场景和用户群体。
+# Repository Information
 
-# 仓库信息
+**Repository name**: {repo_name}
 
-**仓库名称**: {repo_name}
-
-**README内容**:
+**README**:
 ```
 {readme_content}
 ```
 
-**配置文件**:
+**Configuration files**:
 {config_files_formatted}
-
 ---
 
-# 分析任务
+# Analysis Tasks
 
-## 1. 软件描述 (description)
-- 用1-3句话概括软件的核心功能和价值
-- 说明软件解决什么问题或提供什么服务
-- 保持客观、准确，基于README和配置文件的内容
+## 1. Software description (description)
+- Summarize the software’s core functionality and value in 1–3 sentences.
+- Explain what problem the software solves or what service it provides.
+- Stay objective and accurate, based on the README and configuration files.
 
-## 2. 目标应用场景 (target_application)
-识别软件的**具体应用领域**，从以下分类中选择（可多选）：
+## 2. Target application scenarios (target_application)
+Identify the software’s **specific application domains**. List as many relevant scenarios as applicable, ensuring accuracy and detail.
 
-**数据处理与分析**:
-- "数据清洗与ETL" - 数据提取、转换、加载
-- "数据分析与可视化" - 数据统计、图表生成
-- "大数据处理" - 分布式计算、海量数据处理
-
-**AI与机器学习**:
-- "机器学习训练" - 模型训练、特征工程
-- "深度学习" - 神经网络、计算机视觉、NLP
-- "模型推理与部署" - 模型服务化、在线预测
-- "LLM应用" - 大语言模型集成、提示工程
-
-**Web与网络**:
-- "Web后端服务" - API服务、业务逻辑
-- "Web前端应用" - 用户界面、交互体验
-- "全栈Web应用" - 前后端一体化
-- "网络爬虫" - 数据采集、网页解析
-- "API客户端" - 第三方服务集成
-
-**系统与工具**:
-- "自动化脚本" - 任务自动化、批处理
-- "命令行工具" - CLI应用、系统管理
-- "开发工具" - 代码生成、辅助开发
-- "测试工具" - 单元测试、集成测试、性能测试
-- "DevOps工具" - CI/CD、部署、监控
-
-**特定领域**:
-- "科学计算" - 数值计算、仿真模拟
-- "图像处理" - 图像编辑、格式转换
-- "音频/视频处理" - 多媒体编辑、转码
-- "文档处理" - PDF、Word、文本处理
-- "游戏开发" - 游戏引擎、游戏工具
-- "区块链" - 智能合约、DApp
-- "物联网" - 设备管理、数据采集
-- "金融科技" - 交易系统、风控
-- "医疗健康" - 医疗信息系统、健康管理
-- "教育" - 在线学习、教学管理
-
-**其他**:
-- "通用库/框架" - 可复用组件、工具库
-- 如不属于以上分类，请准确描述具体领域
-
-## 3. 目标用户 (target_user)
-识别软件的**主要使用者**，从以下分类中选择（可多选），如果不在以下类别，可以自行补充，确保准确、细致：
-
-**技术角色**:
-- "软件工程师" - 后端、前端、全栈开发者
-- "数据工程师" - 数据管道、ETL开发者
-- "数据科学家" - 数据分析、建模专家
-- "机器学习工程师" - AI/ML模型开发者
-- "算法工程师" - 算法研究与实现
-- "DevOps工程师" - 运维、部署专家
-- "测试工程师" - QA、自动化测试
-- "系统管理员" - 服务器、网络管理
-- "研究人员" - 学术研究、实验
-
-**业务角色**:
-- "产品经理" - 产品规划、需求管理
-- "数据分析师" - 业务数据分析
-- "内容创作者" - 写作、设计、多媒体
-- "教育工作者" - 教师、培训师
-- "企业用户" - 公司、组织使用
-
-**一般用户**:
-- "普通用户" - 非技术背景的最终用户
-- "学生" - 学习、教育用途
-- "爱好者" - 个人兴趣项目
-
+## 3. Target users (target_user)
+Identify the software’s **primary users**. List as many relevant user groups as applicable, ensuring accuracy and detail.
 ---
 
-# 输出要求
+# Working Guidelines
 
-1. **仔细阅读README**：重点关注项目简介、功能特性、使用场景
-2. **分析依赖和配置**：推断技术栈和应用类型
-3. **准确分类**：选择最贴切的分类，避免过于宽泛
-4. **完整性**：如有多个场景或用户群体，都应列出
-5. **仅输出JSON**：不要添加任何解释或额外文本
+1. **Read the README carefully**: focus on the project overview, features, and usage scenarios.
+2. **Analyze dependencies and configuration**: infer the tech stack and application type.
+3. **Classify accurately**: choose the most fitting categories; avoid overly broad labels.
+4. **Completeness**: if there are multiple scenarios or user groups, list them all.
+5. **Output JSON only**: do not add any explanation or extra text.
 
-# JSON格式
+# JSON Format
 
 ```json
 {{
-    "description": "软件的核心功能描述（1-3句话）",
-    "target_application": ["应用场景1", "应用场景2"],
-    "target_user": ["用户群体1", "用户群体2"]
+  "description": "Core software description (1–3 sentences)",
+  "target_application": ["scenario 1", "scenario 2"],
+  "target_user": ["user group 1", "user group 2"]
 }}
 ```
 
-请开始分析："""
+Begin your analysis now."""
 
+CODE_SNIPPET_PROMPT = """Please analyze the following code file and extract its functional characteristics and technical elements.
 
-# 代码文件摘要 Prompt
-CODE_SNIPPET_PROMPT = """请分析以下代码文件，提取其功能特征和技术要素。
+# Code File
 
-# 代码文件
+**File path**: `{file_path}`
 
-**文件路径**: `{file_path}`
-
-**代码内容**:
+**Code content**:
 ```
 {file_content}
 ```
 
----
+# Analysis Tasks
 
-# 分析任务
+## 1. main_purpose (primary purpose)
+- Summarize in one sentence the role this file plays in the overall project.
+- For example: “Provides user authentication and authorization”, “Implements HTTP request handling”, “Defines data models and database mappings”.
 
-## 1. main_purpose (主要目的)
-- 用一句话概括这个文件在整个项目中的作用
-- 例如："提供用户认证和授权功能"、"实现HTTP请求处理"、"定义数据模型和数据库映射"
+## 2. key_functions (key functions/classes)
+- List the **most important** function names or class names in the file as complete as possible.
+- Prioritize:
+  * Public APIs (functions called by other modules)
+  * Core business-logic functions
+  * Important class definitions
+- Format: use the exact function/class names as they appear in the code; do not add parentheses or parameters.
+- Example: ["UserController", "authenticate", "validate_token", "get_user_profile"]
 
-## 2. key_functions (关键函数/类)
-- 列出文件中**最重要的**函数名或类名（3-10个）
-- 优先包括：
-  * 公共API（被其他模块调用的函数）
-  * 核心业务逻辑函数
-  * 重要的类定义
-- 格式：使用实际的函数/类名称，不要添加括号或参数
-- 例如：["UserController", "authenticate", "validate_token", "get_user_profile"]
+## 3. dependencies (key dependencies)
+- List the **key external libraries or modules** imported by the file as complete as possible
+- Prioritize:
+  * Third-party libraries critical to core functionality
+  * Important internal modules referenced within the project
+- Ignore: common standard-library imports (e.g., os, sys, json), unless they are central to the file’s core functionality.
+- Format: use the actual library/module names.
+- Example: ["flask", "sqlalchemy", "jwt", "bcrypt"]
 
-## 3. dependencies (主要依赖)
-- 列出文件导入的**关键外部库或模块**（3-8个）
-- 优先包括：
-  * 核心功能依赖的第三方库
-  * 项目内部的重要模块引用
-- 忽略：标准库的常见导入（如os, sys, json等，除非是核心功能）
-- 格式：使用库/模块的实际名称
-- 例如：["flask", "sqlalchemy", "jwt", "bcrypt"]
+## 4. functionality (core functionality description)
+- Describe what the file implements.
+- Explain what it does, how it does it, and what it interacts with.
+- Include: main logic, algorithm, data processing flow, and external interfaces.
 
-## 4. functionality (核心功能描述)
-- 用2-4句话详细描述文件实现的功能
-- 说明文件做什么、如何做、与什么交互
-- 包括：主要的业务逻辑、数据处理流程、对外接口
-- 例如："该文件实现了用户认证系统的核心逻辑。通过JWT令牌验证用户身份，提供登录、注销和令牌刷新接口。使用bcrypt对密码进行加密存储，并与数据库交互管理用户会话。"
+# Analysis Guidance
 
----
+**Understanding the code**:
+- Quickly scan import statements to understand dependencies.
+- Identify the main class and function definitions.
+- Understand call relationships and data flow between functions.
 
-# 分析指导
+**Accuracy first**:
+- Use names that actually appear in the code.
+- Do not guess or add content that does not exist.
+- If the code is short or single-purpose, the lists can be shorter.
 
-**代码理解**:
-- 快速浏览导入语句，了解依赖关系
-- 识别主要的类和函数定义
-- 理解函数间的调用关系和数据流
+**Avoid**:
+- Do not include helper functions (e.g., _private_helper) unless they are important.
+- Do not list every function; select only the most critical ones.
+- Do not repeat lists of function names inside the functionality paragraph.
 
-**准确性优先**:
-- 使用代码中实际出现的名称
-- 不要猜测或添加不存在的内容
-- 如果代码很短或功能单一，列表可以较短
-
-**避免**:
-- 不要包含辅助函数（如_private_helper）除非它很重要
-- 不要列出所有函数，只选择最关键的
-- 不要在functionality中重复列举函数名
-
----
-
-# JSON格式
+# Output Format
 
 ```json
 {{
-    "main_purpose": "一句话描述文件作用",
-    "key_functions": ["function1", "ClassName1", "method2"],
-    "dependencies": ["library1", "module2"],
-    "functionality": "2-4句话的详细功能描述"
+  "main_purpose": "One-sentence description of the file’s role",
+  "key_functions": ["function1", "ClassName1", "method2"],
+  "dependencies": ["library1", "module2"],
+  "functionality": "A detailed 2–4 sentence description of the core functionality"
 }}
 ```
-
-请开始分析："""
-
-
-# 模块分析系统 Prompt (使用原生工具调用)
-MODULE_ANALYSIS_SYSTEM_PROMPT = """你是一个软件架构分析专家，负责分析代码仓库并识别其模块结构。
-
-# 目标
-你的任务是识别仓库中的功能模块。模块不仅限于特定的包或文件夹，它泛指负责某一功能的组件，例如：
-- Web接口模块
-- 数据加载模块
-- 数据预处理模块
-- 模型加载模块
-- 核心算法模块
-- LLM交互模块
-- 配置管理模块
-- 工具函数模块
-- 测试模块
-等等
-
-# 可用工具
-你可以使用以下工具来获取更多信息：
-
-1. **list_folder**: 列出指定文件夹下的直接子项（文件和子文件夹）
-   - 使用 folder_paths 参数传入一个或多个文件夹路径
-   - 用于探索仓库结构
-
-2. **read_file**: 读取一个或多个文件的完整内容
-   - 使用 file_paths 参数传入一个或多个文件路径
-   - 用于分析代码结构和功能
-
-3. **finalize**: 完成分析并返回最终结果
-   - 当你已经收集了足够的信息来识别所有功能模块时，调用此工具
-   - 使用 modules 参数传入识别出的模块列表
-
-# 分析流程
-1. 首先使用 list_folder 探索仓库的目录结构
-2. 根据目录名称和结构，识别可能的模块
-3. 使用 read_file 读取关键文件（如 __init__.py, 核心代码文件）来确认模块功能
-4. 当你有足够的信息时，调用 finalize 工具返回分析结果
-
-# 注意事项
-- 你可以一次请求多个文件夹或文件，以提高效率
-- 确保对所有重要目录进行充分分析
-- 在分析过程中，保持对仓库结构的全局视角
-- 尽量避免在没有足够信息的情况下做出假设
-- 作出最终决定前，确保你已经考虑了所有主要文件夹和模块
-
-# 模块输出格式
-每个模块应包含以下字段：
-- name: 模块名称
-- category: 模块类别（如：web_interface, data_loading, core_algorithm等）
-- description: 模块功能描述
-- files: 模块相关文件路径列表
-- key_functions: 模块关键函数或类名
-- dependencies: 模块依赖的其他模块
-
-返回的文件路径列表、关键函数或类名、依赖的其他模块应全面、准确，不得遗漏。"""
+Begin your analysis now."""
 
 
-# 模块分析初始用户消息模板
-MODULE_ANALYSIS_INITIAL_MESSAGE = """请分析以下代码仓库的模块结构：
+MODULE_ANALYSIS_SYSTEM_PROMPT = """You are a repository-structure analyst. Your task is to infer and report the repository’s module architecture, responsibilities, and boundaries using the provided high-level metadata plus targeted tool exploration.
 
-## 目录结构
+# Objective
+
+Your task is to identify the functional modules in the repository. A “module” is not limited to a specific package or folder; it refers to any component responsible for a particular function (e.g., a Web API module).
+
+The definition of “module” is flexible: it can be a directory, a package, or a specific functionality implemented by a set of files/classes/functions that are referenced across different directories.
+
+A module is essentially a logical unit that encapsulates certain functionality, such as authentication/login, database operations, user input processing, file handling, etc.
+
+A module may contain smaller submodules. You may reason about code semantics to discover and organize such submodules.
+
+# Available Tools
+
+You can use the following tools to gather information:
+1.	**list_folder**: List the direct children (files and subfolders) of one or more folders
+- Provide one or more folder paths via the folder_paths parameter
+- Use it to explore the repository structure
+2.	**read_file**: Read the full content of one or more files
+- Provide one or more file paths via the file_paths parameter
+- Use it to analyze code structure and functionality
+3.	**finalize**: Finish the analysis and return the final result
+- Call this tool when you have collected enough information to identify all major functional modules
+- Provide the identified module list via the modules parameter
+
+# Analysis Workflow
+1.	First, use list_folder to explore the repository’s directory structure.
+2.	Based on directory names and structure, identify candidate modules.
+3.	Use read_file to inspect key files (e.g., __init__.py, core implementation files) to confirm module responsibilities.
+4.	When you have sufficient evidence, call finalize to return the analysis results.
+
+### Workflow
+1. **Start with a hypothesis** of the repo’s top-level architecture based on the given context.
+2. Use `list_folder` to explore directories **iteratively**, prioritizing:
+   - Top-level folders (e.g., `src/`, `lib/`, `packages/`, `cmd/`, `apps/`, `services/`, `tests/`, `docs/`, `scripts/`)
+   - Any folders referenced by README or dependency signals.
+3. Use `read_file` to inspect **only key files** needed to confirm structure and responsibilities, prioritizing:
+   - Entry points (e.g., `main.*`, `app.*`, `server.*`, CLI commands)
+   - Build/config files (e.g., `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `CMakeLists.txt`)
+   - Module index/exports (e.g., `__init__.py`, `index.ts`, `lib.rs`)
+   - Architecture docs (e.g., `README`)
+   - Dependency injection/wiring files and routing files (web frameworks)
+4. Stop exploring when you can confidently map:
+   - Major modules/components
+   - Their responsibilities
+   - Their public interfaces / entry points
+   - Key dependencies between modules
+
+# Requirements and Constraints
+- You may request multiple folders or files in a single tool call to improve efficiency.
+- Ensure all important directories are thoroughly analyzed.
+- Maintain a global view of the repository structure throughout the analysis.
+- Avoid making assumptions without sufficient evidence.
+- Before finalizing, ensure you have considered all major folders and modules.
+- When using finalize, for each module, list paths of all the relevant files and folders you have explored.
+
+Your final output must be comprehensive and accurate, with no omissions. It must include: relevant file paths, key functions/classes, and dependencies on other modules."""
+
+MODULE_ANALYSIS_INITIAL_MESSAGE = """Please analyze the module structure of the following code repository:
+
+## Directory Structure
 {dir_structure}
 
-## 文件列表
-共有 {file_count} 个代码文件
+## File List
+There are {file_count} code files in total.
 
-## README摘要
+## README Summary
 {readme_content}
 
-## 已识别的主要语言
+## Identified Main Languages
 {languages}
 
-## 主要依赖
+## Main Dependencies
 {dependencies}
 
-请开始分析。使用 list_folder 工具探索目录结构，使用 read_file 工具阅读关键文件，当你收集了足够的信息后，使用 finalize 工具返回最终的模块分析结果。"""
+Begin Now."""
+
+# =============================================================================
+# Module-analysis prompts based on folder-splitting rules
+# =============================================================================
+
+# Leaf-module analysis system prompt (minimal submodule; all are code files)
+FOLDER_LEAF_MODULE_SYSTEM_PROMPT = """You are a code analysis specialist. Your job is to analyze a single folder that represents one minimal module unit and produce a concise, accurate summary of what this module does.
+
+# Goal
+Understand and summarize the module’s purpose, public interface, and key technical elements **based strictly on code evidence**.
+
+# Tools
+- `read_file(file_path)`: Read the contents of a file (relative path).
+- `finalize(...)`: Return the final structured module analysis once you have enough evidence.
+
+# Method (required)
+1. Start from the folder’s file list (provided by the environment). Identify likely entry/aggregation files (e.g., package initializer, module index, CLI entry, framework entry).
+2. Select and read the **minimum set of high-signal files** to confidently infer:
+   - The module’s responsibility and boundaries
+   - Its public API / exported symbols
+   - Core workflows and data flow
+   - External and internal dependencies
+3. Prefer reading:
+   - Export surfaces (package initializers / index files)
+   - Entry points and orchestrators
+   - Central classes, core functions, handlers, or pipelines
+   - Configuration or wiring files if they define behavior
+4. Do not read everything. If the folder is large, cap reads to the **3–5 most informative files**.
+
+# Constraints
+- Accuracy over completeness: do not invent functions, behavior, or dependencies.
+- If evidence is insufficient, state uncertainty explicitly in `notes` rather than guessing.
+
+Begin the analysis now using `read_file` as needed, and call `finalize` when ready."""
+
+ 
 
 
-# # 模块分析回退 Prompt (BASELINE METHOD)
-# MODULE_ANALYSIS_FALLBACK_PROMPT = """请根据以下信息分析代码仓库的模块结构。
 
-# ## 目录结构
-# {dir_structure}
 
-# ## 文件功能摘要
-# {summaries_text}
 
-# ## README内容
-# {readme_content}
+# Leaf-module analysis initial user message
+FOLDER_LEAF_MODULE_INITIAL_MESSAGE = """Please analyze the following code folder and summarize its functionality:
 
-# 请识别并分类代码仓库中的功能模块。模块不仅限于特定的包或文件夹，它泛指负责某一功能的组件。
+## Folder path
+`{folder_path}`
 
-# 请以JSON格式返回分析结果：
-# {{
-#     "modules": [
-#         {{
-#             "name": "模块名称",
-#             "category": "模块类别",
-#             "description": "模块功能描述",
-#             "files": ["相关文件路径"],
-#             "key_functions": ["关键函数"],
-#             "dependencies": ["依赖的其他模块"]
-#         }}
-#     ]
-# }}
+## Included files
+{file_list}
 
-# 只返回JSON，不要其他内容。"""
+## Context
+- Repository: {repo_name}
+- Parent module path: {parent_path}
+
+Please use the read_file tool to read the key files, then use the finalize tool to return the analysis results.
+"""
+
+
+FOLDER_CONTAINER_MODULE_SYSTEM_PROMPT = """You are a software architecture analysis agent. Your job is to understand and summarize the folder that primarily organizes multiple submodules and may include coordination scripts.
+
+# Objective
+Given:
+- Summaries of each submodule, and
+- The scripts directly under the current folder (readable via tools),
+produce a clear, accurate description of what this container module does, how its submodules relate.
+
+# Tools
+1) read_file(file_path)
+   - Reads a file that is directly inside the current folder (relative path).
+   - Use it for entry points, orchestration code, configuration/registration, imports/exports, or glue logic.
+
+2) finalize(...)
+   - Use when you have enough evidence to deliver a stable summary.
+
+# Approach
+1. Treat submodule summaries as authoritative; do not re-derive them unless necessary for consistency checks.
+2. Build a high-level architecture map:
+   - Which submodules exist, their responsibilities, and how they compose a larger workflow.
+3. Inspect the current folder’s direct scripts only when it improves precision:
+   - Look for __init__.py / package exports, registry patterns, factory/builders, CLI entrypoints, pipeline runners, config loaders, adapters, and shared utilities.
+4. Infer integration points with the parent module and the rest of the repository:
+   - Imports/exports, registration hooks, public API surface, and runtime wiring.
+5. Assign a module name:
+   - Clear, descriptive, English; reflects purpose and responsibility (not implementation details).
+   - Align naming with the shared theme of submodules.
+
+# Constraints
+- Ground conclusions in submodule summaries and any files you actually read.
+- Stay scoped to this folder; only reference broader repo context when needed to explain integration.
+"""
+
+
+
+
+FOLDER_CONTAINER_MODULE_INITIAL_MESSAGE = """Analyze the following container module folder and summarize its overall role and functionality.
+
+## Context
+- Folder path: `{folder_path}`
+- Repository: `{repo_name}`
+- Parent module path: `{parent_path}`
+
+## Submodules (trusted summaries)
+{submodule_summaries}
+
+## Files directly under this folder (scripts only)
+{direct_files}
+
+## Instructions
+1) Use the submodule summaries to construct the module-level purpose and architecture.
+2) If needed for precision, call `read_file` on key direct scripts in this folder (e.g., __init__.py, registries, entrypoints, orchestration code).
+3) Return a structured summary via `finalize`.
+"""
+

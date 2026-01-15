@@ -178,11 +178,7 @@ analyzer_config:
     - .eggs
     - "*.egg-info"
   
-  # 分析配置
-  max_module_analysis_iterations: 2
-  
   # 是否启用LLM对每个文件进行摘要分析
-  # 设为 false 可大幅减少LLM调用次数和分析时间，但会降低模块分析的准确性
   enable_llm_file_summary: false
   
   # 文件摘要分析使用的LLM配置（可选）
@@ -199,6 +195,173 @@ analyzer_config:
     temperature: 0.7
     # 最大token数
     max_tokens: 2048
+
+# =============================================================================
+# 模块分析器配置
+# =============================================================================
+module_analyzer_config:
+  # 模块分析器类型
+  # - "folder": 基于文件夹分割规则的分析器（默认，推荐用于大型仓库）
+  # - "agent": 原有的 agent 方式分析器（适用于需要更灵活分析的场景）
+  # - "hybrid": 先用 agent 分析器划分模块，再用 folder 分析器对每个模块进行更深入分析
+  analyzer_type: agent
+  
+  # 最大 LLM 调用次数（在单个分析 turn 内允许的最大 LLM 调用次数）
+  # 两种分析器都使用此配置：
+  # - folder: 每个文件夹模块分析允许的最大 LLM 调用次数
+  # - agent: 整个仓库模块分析允许的最大 LLM 调用次数
+  max_agent_iterations: 100
+  
+  max_folder_iterations: 100
+  
+  # 读取文件内容的最大长度
+  max_file_content_length: 10000
+  
+  # 是否跳过空文件夹
+  skip_empty_folders: true
+  
+  # 成为模块的最小文件数
+  min_files_for_module: 1
+  
+  # 排除的文件夹列表（支持通配符模式）
+  # 这些文件夹会被完全忽略，不会被分析为模块
+  excluded_folders:
+
+    # 版本控制
+    - ".git"
+    - ".svn"
+    - ".hg"
+    
+    # Python 相关
+    - "__pycache__"
+    - ".pytest_cache"
+    - ".mypy_cache"
+    - ".ruff_cache"
+    - "*.egg-info"
+    - ".eggs"
+    - ".tox"
+    - ".nox"
+    - ".venv"
+    - "venv"
+    - "env"
+    - ".env"
+    - "virtualenv"
+    - "site-packages"
+    
+    # Node.js / JavaScript
+    - "node_modules"
+    - "bower_components"
+    - ".npm"
+    - ".yarn"
+    
+    # Build outputs
+    - "build"
+    - "dist"
+    - "out"
+    - "target"
+    - "_build"
+    
+    # IDE / Editor
+    - ".idea"
+    - ".vscode"
+    - ".vs"
+    - ".eclipse"
+    - ".settings"
+    
+    # Documentation build
+    - "docs/_build"
+    - "_site"
+    - "site"
+    
+    # Coverage / Testing
+    - "coverage"
+    - "htmlcov"
+    - ".coverage"
+    
+    # 临时文件
+    - ".cache"
+    - ".tmp"
+    - "tmp"
+    - "temp"
+    - "logs"
+    
+    # CI/CD
+    - ".github"
+    - ".gitlab"
+    - ".circleci"
+    - ".travis"
+    
+    # Container
+    - ".docker"
+    
+    # 其他
+    - ".DS_Store"
+    - "Thumbs.db"
+    - "*.bak"
+    - "*.swp"
+  
+  # 代码文件扩展名（只有这些扩展名的文件会被视为代码文件）
+  code_extensions:
+    # Python
+    - ".py"
+    - ".pyx"
+    - ".pyi"
+    
+    # JavaScript / TypeScript
+    - ".js"
+    - ".jsx"
+    - ".ts"
+    - ".tsx"
+    - ".mjs"
+    - ".cjs"
+    
+    # JVM
+    - ".java"
+    - ".kt"
+    - ".scala"
+    
+    # Go
+    - ".go"
+    
+    # Rust
+    - ".rs"
+    
+    # C/C++
+    - ".c"
+    - ".cpp"
+    - ".cc"
+    - ".cxx"
+    - ".h"
+    - ".hpp"
+    
+    # C#
+    - ".cs"
+    
+    # Ruby
+    - ".rb"
+    
+    # PHP
+    - ".php"
+    
+    # Swift
+    - ".swift"
+    
+    # R
+    - ".r"
+    - ".R"
+    
+    # Julia
+    - ".jl"
+    
+    # Lua
+    - ".lua"
+    
+    # Shell
+    - ".sh"
+    - ".bash"
+    
+    # SQL
+    - ".sql"
 
 # RepoAnalyzer 深度静态分析配置
 repo_analyzer_config:

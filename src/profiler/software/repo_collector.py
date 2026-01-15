@@ -1,4 +1,4 @@
-"""仓库信息收集器"""
+"""Repository information collector."""
 
 import os
 import re
@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 
 class RepoInfoCollector:
-    """收集仓库的基本信息和文件列表"""
+    """Collect basic repository information and file lists."""
     
     def __init__(
         self,
@@ -39,21 +39,21 @@ class RepoInfoCollector:
     
     def collect(self, repo_path: Path, repo_name: str = None, version: str = None) -> Dict[str, Any]:
         """
-        收集仓库信息
+        Collect repository information.
         
         Returns:
-            包含以下字段的字典:
-            - files: 文件路径列表
-            - file_count: 文件总数
-            - languages: 检测到的编程语言
-            - readme_content: README内容
-            - dependencies: 依赖列表
-            - config_files: 配置文件列表
+            A dict containing:
+            - files: List of file paths
+            - file_count: Total number of files
+            - languages: Detected programming languages
+            - readme_content: README content
+            - dependencies: Dependency list
+            - config_files: List of config files
         """
         logger.info(f"Collecting repo info from {repo_path}")
         
         def _should_exclude(file_path: Path) -> bool:
-            """检查是否应该排除此文件"""
+            """Check whether a file should be excluded."""
             path_str = str(file_path)
             return any(excluded in path_str for excluded in self.exclude_dirs)
         
@@ -66,12 +66,12 @@ class RepoInfoCollector:
             "config_files": []
         }
         
-        # 收集文件列表
+        # Collect file list
         logger.info("Scanning files...")
         languages = defaultdict(int)
         
         for root, dirs, files in os.walk(repo_path):
-            # 过滤排除的目录
+            # Filter excluded directories
             dirs[:] = [d for d in dirs if d not in self.exclude_dirs]
             
             for file in files:
@@ -90,21 +90,21 @@ class RepoInfoCollector:
         info["languages"] = list(languages)
         logger.info(f"Found {info['file_count']} files in {len(languages)} languages")
 
-        # 读取README
+        # Read README
         logger.info("Reading README...")
         for readme_name in self.readme_files:
             readme_path = repo_path / readme_name
             if readme_path.exists():
                 try:
                     raw_readme = readme_path.read_text(encoding="utf-8")
-                    # 清理 README，移除图标链接等噪音
+                    # Clean README: remove icon links and other noise
                     info["readme_content"] = clean_readme_for_llm(raw_readme, max_length=4000)
                     logger.info(f"Found README: {readme_name}")
                 except Exception as e:
                     logger.warning(f"Failed to read README: {e}")
                 break
         
-        # 读取包配置
+        # Read dependency/config files
         logger.info("Reading dependency files...")
         dependencies = set()
         for config_name in self.dependency_files:
@@ -116,7 +116,7 @@ class RepoInfoCollector:
                         "name": config_name,
                         "content": content
                     })
-                    # 简单提取依赖
+                    # Simple dependency extraction
                     if config_name == "pyproject.toml":
                         dep_match = re.findall(r'"([a-zA-Z0-9_-]+)(?:[>=<].*?)?"', content)
                         dependencies.update(dep_match)

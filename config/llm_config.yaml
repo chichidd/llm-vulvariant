@@ -2,7 +2,7 @@
 llm:
   # 默认配置
   default:
-    temperature: 1.0
+    temperature: 0.1
     top_p: 0.9
     max_tokens: 0
     timeout: 120

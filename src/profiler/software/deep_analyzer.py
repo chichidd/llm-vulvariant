@@ -1,4 +1,4 @@
-"""深度分析模块 - 基于 RepoAnalyzer"""
+"""Deep analysis module (based on RepoAnalyzer)."""
 
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -9,7 +9,7 @@ logger = get_logger(__name__)
 
 
 class DeepAnalyzer:
-    """使用 RepoAnalyzer 进行深度静态分析"""
+    """Perform deep static analysis using RepoAnalyzer."""
     
     def __init__(
         self,
@@ -30,19 +30,20 @@ class DeepAnalyzer:
         cache_dir: Optional[Path] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        执行深度分析
+        Run deep analysis.
         
         Args:
-            repo_path: 仓库路径
-            cache_dir: 缓存目录
+            repo_path: Repository path
+            cache_dir: Cache directory
             
         Returns:
-            深度分析结果字典，包含:
-            - call_graph_edges: 调用图边
-            - functions: 函数列表
-            - dependencies: 依赖信息
-            - entry_points: 入口点列表
-            失败返回 None
+            Deep analysis result dict containing:
+            - call_graph_edges: Call graph edges
+            - functions: Functions
+            - dependencies: Dependencies
+            - entry_points: Entry points
+
+            Returns None on failure.
         """
         logger.info("Running deep static analysis with RepoAnalyzer...")
         logger.info(f"RepoAnalyzer config: language={self.language}, "
@@ -75,7 +76,7 @@ class DeepAnalyzer:
             return None
     
     def _extract_analysis_info(self) -> Dict[str, Any]:
-        """从 RepoAnalyzer 提取深度分析信息"""
+        """Extract deep analysis information from RepoAnalyzer."""
         if not self.repo_analyzer:
             return {}
         
@@ -86,7 +87,7 @@ class DeepAnalyzer:
             'entry_points': []
         }
         
-        # 提取调用图
+        # Extract call graph
         try:
             call_graph = self.repo_analyzer.call_graph
             if call_graph:
@@ -106,7 +107,7 @@ class DeepAnalyzer:
         except Exception as e:
             logger.warning(f"Failed to extract call graph: {e}")
         
-        # 提取函数信息
+        # Extract functions
         try:
             functions = self.repo_analyzer.functions
             if functions:
@@ -125,7 +126,7 @@ class DeepAnalyzer:
         except Exception as e:
             logger.warning(f"Failed to extract functions: {e}")
         
-        # 提取依赖信息
+        # Extract dependencies
         try:
             dependencies = self.repo_analyzer.dependencies
             if dependencies:
@@ -135,7 +136,8 @@ class DeepAnalyzer:
                         'version': dep.version,
                         'is_builtin': dep.is_builtin,
                         'is_third_party': dep.is_third_party,
-                        'import_count': len(dep.import_locations)
+                        'import_count': len(dep.import_locations),
+                        'import_files': list(set([loc.file for loc in dep.import_locations]))
                     }
                     for dep in list(dependencies.values())
                 ]
@@ -143,7 +145,7 @@ class DeepAnalyzer:
         except Exception as e:
             logger.warning(f"Failed to extract dependencies: {e}")
         
-        # 提取入口点
+        # Extract entry points
         try:
             entry_points = self.repo_analyzer.entry_points
             if entry_points:

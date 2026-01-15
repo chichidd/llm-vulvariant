@@ -40,21 +40,21 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "read_file",
-                    "description": "读取仓库中指定文件的内容，用于检查源代码中潜在漏洞。",
+                    "description": "Read the content of a file in the repository to inspect source code for potential vulnerabilities.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "file_path": {
                                 "type": "string",
-                                "description": "相对于仓库根目录的文件路径",
+                                "description": "File path relative to the repository root.",
                             },
                             "start_line": {
                                 "type": "integer",
-                                "description": "可选起始行号（从 1 开始）。不提供则从文件开头读取。",
+                                "description": "Optional start line number (1-indexed). If omitted, read from the beginning.",
                             },
                             "end_line": {
                                 "type": "integer",
-                                "description": "可选结束行号（从 1 开始）。不提供则读取到文件末尾。",
+                                "description": "Optional end line number (1-indexed). If omitted, read to end of file.",
                             },
                         },
                         "required": ["file_path"],
@@ -65,15 +65,15 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "search_in_file",
-                    "description": "在指定文件中搜索模式（正则或纯文本），并返回带行号的匹配行。",
+                    "description": "Search for a pattern (regex or plain text) in a file and return matching lines with line numbers.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "文件的相对路径"},
-                            "pattern": {"type": "string", "description": "搜索模式（支持正则）"},
+                            "file_path": {"type": "string", "description": "Relative file path."},
+                            "pattern": {"type": "string", "description": "Search pattern (regex supported)."},
                             "context_lines": {
                                 "type": "integer",
-                                "description": "每处匹配前后返回的上下文行数（默认：2）",
+                                "description": "Number of context lines before/after each match (default: 2).",
                             },
                         },
                         "required": ["file_path", "pattern"],
@@ -84,15 +84,15 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "search_in_folder",
-                    "description": "在某个文件夹下的所有 Python 文件中搜索模式，返回文件路径与匹配行。",
+                    "description": "Search for a pattern across all Python files under a folder and return file paths with matching lines.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "folder_path": {"type": "string", "description": "文件夹的相对路径"},
-                            "pattern": {"type": "string", "description": "搜索模式（支持正则）"},
+                            "folder_path": {"type": "string", "description": "Relative folder path."},
+                            "pattern": {"type": "string", "description": "Search pattern (regex supported)."},
                             "max_results": {
                                 "type": "integer",
-                                "description": "最多返回的结果数量（默认：50）",
+                                "description": "Maximum number of results to return (default: 50).",
                             },
                         },
                         "required": ["folder_path", "pattern"],
@@ -103,14 +103,14 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "list_files_in_folder",
-                    "description": "列出文件夹内所有 Python 文件及其大小。",
+                    "description": "List all Python files in a folder along with their sizes.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "folder_path": {"type": "string", "description": "文件夹的相对路径"},
+                            "folder_path": {"type": "string", "description": "Relative folder path."},
                             "recursive": {
                                 "type": "boolean",
-                                "description": "是否递归搜索（默认：True）",
+                                "description": "Whether to search recursively (default: True).",
                             },
                         },
                         "required": ["folder_path"],
@@ -121,12 +121,12 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "get_function_code",
-                    "description": "从文件中提取指定函数或类的源代码。",
+                    "description": "Extract the source code of a specified function or class from a file.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "文件的相对路径"},
-                            "function_name": {"type": "string", "description": "要提取的函数或类名"},
+                            "file_path": {"type": "string", "description": "Relative file path."},
+                            "function_name": {"type": "string", "description": "Function or class name to extract."},
                         },
                         "required": ["file_path", "function_name"],
                     },
@@ -136,11 +136,11 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "get_imports",
-                    "description": "获取 Python 文件中的所有 import 语句，展示导入了哪些模块与函数。",
+                    "description": "Get all import statements in a Python file to show which modules and symbols are imported.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "文件的相对路径"}
+                            "file_path": {"type": "string", "description": "Relative file path."}
                         },
                         "required": ["file_path"],
                     },
@@ -150,15 +150,15 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "find_dangerous_patterns",
-                    "description": "在文件或文件夹中搜索潜在危险模式，例如 subprocess 调用、eval、exec、pickle 等。",
+                    "description": "Search for potentially dangerous patterns in a file or folder (e.g., subprocess calls, eval, exec, pickle).",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "path": {"type": "string", "description": "要分析的文件或文件夹相对路径"},
+                            "path": {"type": "string", "description": "Relative path to the file or folder to analyze."},
                             "patterns": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "可选：指定要搜索的具体模式列表。不提供则使用默认危险模式集合。",
+                                "description": "Optional: explicit list of patterns to search for. If omitted, a default set of dangerous patterns is used.",
                             },
                         },
                         "required": ["path"],
@@ -169,12 +169,12 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "analyze_data_flow",
-                    "description": "深度分析函数的代码结构，提供详细信息：参数、变量使用、函数调用、属性访问、字符串操作、赋值、返回值等。",
+                    "description": "Deeply analyze a function's code structure and provide details: parameters, variable usage, function calls, attribute access, string operations, assignments, return values, etc.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "文件的相对路径"},
-                            "function_name": {"type": "string", "description": "要分析的函数名"},
+                            "file_path": {"type": "string", "description": "Relative file path."},
+                            "function_name": {"type": "string", "description": "Function name to analyze."},
                         },
                         "required": ["file_path", "function_name"],
                     },
@@ -184,19 +184,19 @@ class AgenticToolkit:
                 "type": "function",
                 "function": {
                     "name": "report_vulnerability",
-                    "description": "上报你发现的潜在漏洞。",
+                    "description": "Report a potential vulnerability you found.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "漏洞所在的文件路径"},
-                            "function_name": {"type": "string", "description": "包含漏洞的函数或方法名"},
-                            "line_number": {"type": "integer", "description": "漏洞的大致行号"},
-                            "vulnerability_type": {"type": "string", "description": "漏洞类型"},
-                            "description": {"type": "string", "description": "漏洞的详细描述"},
-                            "evidence": {"type": "string", "description": "证明漏洞存在的代码片段或证据"},
-                            "similarity_to_known": {"type": "string", "description": "说明相似性的原因"},
-                            "confidence": {"type": "string", "description": "置信度：high / medium / low"},
-                            "attack_scenario": {"type": "string", "description": "利用场景"},
+                            "file_path": {"type": "string", "description": "File path where the vulnerability exists."},
+                            "function_name": {"type": "string", "description": "Function or method name that contains the vulnerability."},
+                            "line_number": {"type": "integer", "description": "Approximate line number of the vulnerability."},
+                            "vulnerability_type": {"type": "string", "description": "Vulnerability type."},
+                            "description": {"type": "string", "description": "Detailed vulnerability description."},
+                            "evidence": {"type": "string", "description": "Code snippet or evidence proving the vulnerability exists."},
+                            "similarity_to_known": {"type": "string", "description": "Why this is similar to the known vulnerability."},
+                            "confidence": {"type": "string", "description": "Confidence: high / medium / low"},
+                            "attack_scenario": {"type": "string", "description": "Attack scenario / exploit narrative."},
                         },
                         "required": [
                             "file_path",

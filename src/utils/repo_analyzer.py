@@ -1,23 +1,22 @@
-"""
-Repository Analyzer - 基于 CodeQL 的仓库静态分析工具
+"""Repository Analyzer - a CodeQL-based static analysis tool.
 
-功能：
-1. 调用图分析：提取函数间调用关系
-2. 数据流分析：追踪数据从源到汇的流动
-3. 程序切片：提取影响特定代码行的相关代码
-4. 依赖分析：分析第三方库依赖
-5. 入口点检测：识别 HTTP 端点、CLI 入口等
+Capabilities:
+1. Call graph analysis: extract inter-function call relationships
+2. Data flow analysis: track data flows from sources to sinks
+3. Program slicing: extract code relevant to a specific line
+4. Dependency analysis: analyze third-party library dependencies
+5. Entry point detection: identify HTTP endpoints, CLI entries, etc.
 
-使用示例：
+Example:
     analyzer = RepoAnalyzer("/path/to/repo", language="python")
-    
-    # 获取调用图
+
+    # Get call graph
     call_graph = analyzer.call_graph
-    
-    # 获取特定行的代码上下文
+
+    # Get code context around a specific line
     context = analyzer.get_code_context("main.py", 42, window=20)
-    
-    # 程序切片：找出影响第42行的所有代码
+
+    # Program slicing: find all code that influences line 42
     slice_result = analyzer.backward_slice("main.py", 42, max_depth=3)
 """
 
@@ -39,11 +38,11 @@ from .logger import get_logger
 logger = get_logger(__name__)
 
 
-# ========== 数据结构定义 ==========
+# ========== Data structures ==========
 
 @dataclass
 class CodeLocation:
-    """代码位置"""
+    """A code location."""
     file: str
     line: int
     column: int = 0
@@ -62,15 +61,15 @@ class CodeLocation:
 
 @dataclass
 class FunctionInfo:
-    """函数信息"""
+    """Function information."""
     name: str
     file: str
     start_line: int
     end_line: int
     parameters: List[str] = field(default_factory=list)
-    is_entry_point: bool = False  # 是否为入口点（main, HTTP handler 等）
-    calls: List[str] = field(default_factory=list)  # 调用的函数列表
-    called_by: List[str] = field(default_factory=list)  # 被哪些函数调用
+    is_entry_point: bool = False  # Whether it is an entry point (main, HTTP handler, etc.)
+    calls: List[str] = field(default_factory=list)  # Functions called by this function
+    called_by: List[str] = field(default_factory=list)  # Functions that call this function
     
     def __str__(self):
         return f"{self.name} @ {self.file}:{self.start_line}"
@@ -78,7 +77,7 @@ class FunctionInfo:
 
 @dataclass
 class DependencyInfo:
-    """依赖信息"""
+    """Dependency information."""
     name: str
     version: Optional[str] = None
     import_locations: List[CodeLocation] = field(default_factory=list)
@@ -88,7 +87,7 @@ class DependencyInfo:
 
 @dataclass
 class SliceResult:
-    """程序切片结果"""
+    """Program slicing result."""
     target: CodeLocation
     related_locations: List[Dict[str, Any]] = field(default_factory=list)
     data_flow_paths: List[List[str]] = field(default_factory=list)
@@ -96,7 +95,7 @@ class SliceResult:
     depth: int = 0
     
     def to_dict(self):
-        """转换为字典（便于序列化）"""
+        """Convert to a dict (for serialization)."""
         return {
             "target": {
                 "file": self.target.file,
@@ -110,68 +109,68 @@ class SliceResult:
         }
     
     def to_markdown(self) -> str:
-        """转换为 Markdown 格式（便于人类阅读）"""
-        md = f"## 程序切片结果\n\n"
-        md += f"**目标位置**: `{self.target.file}:{self.target.line}`\n\n"
+        """Convert to Markdown (for human reading)."""
+        md = f"## Program Slicing Result\n\n"
+        md += f"**Target location**: `{self.target.file}:{self.target.line}`\n\n"
         
         if self.target.code:
             md += f"```python\n{self.target.code}\n```\n\n"
         
-        md += f"**分析深度**: {self.depth}\n"
-        md += f"**涉及文件数**: {len(self.files_involved)}\n"
-        md += f"**相关代码位置数**: {len(self.related_locations)}\n\n"
+        md += f"**Analysis depth**: {self.depth}\n"
+        md += f"**Files involved**: {len(self.files_involved)}\n"
+        md += f"**Related code locations**: {len(self.related_locations)}\n\n"
         
         if self.data_flow_paths:
-            md += "### 数据流路径\n\n"
+            md += "### Data Flow Paths\n\n"
             for i, path in enumerate(self.data_flow_paths, 1):
                 md += f"{i}. {' → '.join(path)}\n"
             md += "\n"
         
         if self.related_locations:
-            md += "### 相关代码\n\n"
-            for loc in self.related_locations[:10]:  # 只显示前10个
+            md += "### Related Code\n\n"
+            for loc in self.related_locations[:10]:  # Only show the first 10
                 md += f"#### {loc['file']}:{loc['start_line']}-{loc['end_line']}\n"
-                md += f"**关系**: {loc['relationship']}\n\n"
+                md += f"**Relationship**: {loc['relationship']}\n\n"
                 if loc.get('code'):
                     md += f"```python\n{loc['code']}\n```\n\n"
         
         return md
 
 
-# ========== 主类 ==========
+# ========== Main class ==========
 
 class RepoAnalyzer:
     """
-    仓库分析器 - 使用 CodeQL 进行深度静态分析
-    
-    特性：
-    - 自动语言检测（支持 Python, C/C++）
-    - 基于 commit hash 的智能缓存
-    - 调用图、数据流、程序切片
-    - 依赖分析、入口点检测、敏感数据追踪
-    
-    参数：
-        repo_path: 仓库路径
-        language: 编程语言（auto, python, cpp）
-        cache_dir: 缓存目录
-        max_slice_depth: 程序切片最大深度（默认3层）
-        max_slice_files: 程序切片最大文件数（默认10个）
+    Repository analyzer - deep static analysis using CodeQL.
+
+    Features:
+    - Automatic language detection (supports Python, C/C++)
+    - Commit-hash-based caching
+    - Call graph, data flow, and program slicing
+    - Dependency analysis, entry point detection, and sensitive data tracking
+
+    Args:
+        repo_path: Repository path
+        language: Language (auto, python, cpp)
+        cache_dir: Cache directory
+        max_slice_depth: Max program slice depth (default: 3)
+        max_slice_files: Max number of files in a slice (default: 10)
     """
     
     @classmethod
     def _load_entry_point_patterns(cls, config_path: Optional[Path] = None) -> Dict[str, List[str]]:
-        """加载入口点检测规则
+        """Load entry point detection rules.
         
         Args:
-            config_path: 配置文件路径，默认为 config/repo_analyzer_rules.yaml
+            config_path: Config file path; defaults to config/repo_analyzer_rules.yaml
             
         Returns:
-            入口点模式字典
+            A dict of entry point patterns
         """
         import yaml
         
         if config_path is None:
-            # 默认使用项目根目录的 config/repo_analyzer_rules.yaml
+            # Default to config/repo_analyzer_rules.yaml under project root
             project_root = Path(__file__).parent.parent.parent
             config_path = project_root / "config" / "repo_analyzer_rules.yaml"
         
@@ -185,7 +184,7 @@ class RepoAnalyzer:
         except Exception as e:
             logger.error(f"Failed to load entry point patterns: {e}, using defaults")
         
-        # 默认模式（如果配置文件加载失败）
+        # Default patterns (if config file loading fails)
         return {
             "python": ["main", "__main__"],
             "cpp": ["main"],
@@ -200,7 +199,7 @@ class RepoAnalyzer:
         max_slice_files: int = 10,
         rebuild_cache: bool = False
     ):
-        """初始化分析器"""
+        """Initialize the analyzer."""
         self.repo_path = Path(repo_path).resolve()
         if not self.repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
@@ -208,7 +207,7 @@ class RepoAnalyzer:
         self.max_slice_depth = max_slice_depth
         self.max_slice_files = max_slice_files
         
-        # 自动检测语言
+        # Auto-detect language
         if language == "auto":
             self.language = self._detect_language()
         else:
@@ -216,20 +215,20 @@ class RepoAnalyzer:
         
         logger.info(f"Detected language: {self.language}")
         
-        # 设置缓存目录
+        # Set cache directory
         if cache_dir is None:
             cache_dir = os.path.join(os.path.dirname(__file__), "..", ".cache", "repo_analyzer")
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
-        # 获取当前 commit hash
+        # Get current commit hash
         self.commit_hash = get_git_commit(str(self.repo_path))
         if not self.commit_hash:
             logger.warning("Could not get commit hash, using timestamp as fallback")
             import time
             self.commit_hash = str(int(time.time()))
         
-        # 初始化 CodeQL 分析器
+        # Initialize CodeQL analyzer
         try:
             from config import _path_config
         except ImportError as e:
@@ -238,7 +237,7 @@ class RepoAnalyzer:
         
         codeql_config = load_codeql_config()
         
-        # 只有成功导入 _path_config 时才设置 database_dir
+        # Only set database_dir when _path_config is successfully imported
         if _path_config:
             codeql_config['database_dir'] = str(_path_config['codeql_db_path'])
         
@@ -253,23 +252,23 @@ class RepoAnalyzer:
         
         logger.info(f"Using CodeQL version: {self.codeql_analyzer.version}")
         
-        # 数据存储
+        # Data storage
         self._call_graph_edges: List[CallGraphEdge] = []
         self._functions: Dict[str, FunctionInfo] = {}
         self._dependencies: Dict[str, DependencyInfo] = {}
         self._entry_points: List[FunctionInfo] = []
         self._findings: List[CodeQLFinding] = []
         
-        # 加载或构建分析数据
+        # Load or build analysis data
         self._load_or_build(rebuild_cache)
     
     def _detect_language(self) -> str:
-        """自动检测仓库主要语言"""
-        # 统计文件扩展名
+        """Auto-detect the repository's primary language."""
+        # Count file extensions
         extensions = defaultdict(int)
         
         for root, dirs, files in os.walk(self.repo_path):
-            # 跳过常见的忽略目录
+            # Skip common ignored directories
             dirs[:] = [d for d in dirs if d not in {'.git', 'node_modules', '__pycache__', 'build', 'dist'}]
             
             for file in files:
@@ -277,7 +276,7 @@ class RepoAnalyzer:
                 if ext in {'.py', '.c', '.cpp', '.cc', '.h', '.hpp'}:
                     extensions[ext] += 1
         
-        # 判断主要语言
+        # Decide primary language
         total_py = extensions.get('.py', 0)
         total_cpp = extensions.get('.cpp', 0) + extensions.get('.cc', 0) + \
                     extensions.get('.c', 0) + extensions.get('.h', 0) + extensions.get('.hpp', 0)
@@ -287,23 +286,23 @@ class RepoAnalyzer:
         elif total_cpp > 0:
             return "cpp"
         else:
-            return "python"  # 默认
+            return "python"  # Default
     
     def _get_cache_key(self) -> str:
-        """生成缓存键（基于 repo 路径和 commit hash）"""
+        """Generate a cache key (based on repo path and commit hash)."""
         key_str = f"{self.repo_path}:{self.commit_hash}:{self.language}"
         return hashlib.md5(key_str.encode()).hexdigest()
     
     def _get_cache_path(self) -> Path:
-        """获取缓存文件路径"""
+        """Get the cache file path."""
         cache_key = self._get_cache_key()
         return self.cache_dir / f"{cache_key}.pkl"
     
     def _load_or_build(self, rebuild: bool = False):
-        """加载缓存或重新构建分析数据"""
+        """Load cache or rebuild analysis data."""
         cache_path = self._get_cache_path()
         
-        # 尝试加载缓存
+        # Try loading cache
         if not rebuild and cache_path.exists():
             try:
                 logger.info(f"Loading cache from {cache_path}")
@@ -325,11 +324,11 @@ class RepoAnalyzer:
             except Exception as e:
                 logger.warning(f"Failed to load cache: {e}, rebuilding...")
         
-        # 构建分析数据
+        # Build analysis data
         logger.info(f"Building analysis data (this may take a few minutes)...")
         self._build_analysis()
         
-        # 保存缓存
+        # Save cache
         try:
             cache_data = {
                 'call_graph_edges': self._call_graph_edges,
@@ -345,8 +344,8 @@ class RepoAnalyzer:
             logger.warning(f"Failed to save cache: {e}")
     
     def _build_analysis(self):
-        """构建完整的分析数据"""
-        # Step 1: 创建 CodeQL 数据库
+        """Build the full analysis dataset."""
+        # Step 1: Create CodeQL database
         logger.info("[1/5] Creating CodeQL database...")
         db_name = f"{self.repo_path.name}-{self.commit_hash[:8]}-{self.language}-db"
         success, db_path = self.codeql_analyzer.create_database(
@@ -362,19 +361,19 @@ class RepoAnalyzer:
         self.db_path = db_path
         logger.info(f"    Database created: {db_path}")
         
-        # Step 2: 构建调用图
+        # Step 2: Build call graph
         logger.info("[2/5] Building call graph...")
         self._build_call_graph()
         
-        # Step 3: 提取函数信息
+        # Step 3: Extract function info
         logger.info("[3/5] Extracting function information...")
         self._extract_functions()
         
-        # Step 4: 分析依赖
+        # Step 4: Analyze dependencies
         logger.info("[4/5] Analyzing dependencies...")
         self._analyze_dependencies()
         
-        # Step 5: 检测入口点
+        # Step 5: Detect entry points
         logger.info("[5/5] Detecting entry points...")
         self._detect_entry_points()
         
@@ -385,8 +384,7 @@ class RepoAnalyzer:
         logger.info(f"  - Entry points: {len(self._entry_points)}")
     
     def _build_call_graph(self):
-        """构建调用图（使用 CodeQL）"""
-        # 尝试使用 CodeQL 内置的调用图分析
+        """Build the call graph (using CodeQL)."""
         try:
             logger.info(f"Building call graph with CodeQL for database: {self.db_path}")
             self._call_graph_edges = self.codeql_analyzer._build_call_graph(
@@ -399,101 +397,27 @@ class RepoAnalyzer:
             import traceback
             logger.debug(traceback.format_exc())
             self._call_graph_edges = []
-        
-        # 如果 CodeQL 调用图为空，使用简单的 AST 解析作为后备
-        if not self._call_graph_edges:
-            logger.info("Using fallback AST-based call graph extraction...")
-            self._call_graph_edges = self._build_call_graph_fallback()
     
-    def _build_call_graph_fallback(self) -> List[CallGraphEdge]:
-        """后备方案：使用 AST 解析构建调用图"""
-        edges = []
-        
-        if self.language != "python":
-            return edges
-        
-        try:
-            import ast
-        except ImportError:
-            return edges
-        
-        # 扫描所有 Python 文件
-        for root, dirs, files in os.walk(self.repo_path):
-            dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__', 'node_modules', 'build'}]
-            
-            for file in files:
-                if not file.endswith('.py'):
-                    continue
-                
-                file_path = os.path.join(root, file)
-                rel_path = os.path.relpath(file_path, self.repo_path)
-                
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        source = f.read()
-                    
-                    tree = ast.parse(source, filename=rel_path)
-                    
-                    # 遍历 AST 提取函数定义和调用
-                    for node in ast.walk(tree):
-                        if isinstance(node, ast.FunctionDef):
-                            func_name = node.name
-                            func_line = node.lineno
-                            
-                            # 查找函数内的调用
-                            for child in ast.walk(node):
-                                if isinstance(child, ast.Call):
-                                    callee_name = self._extract_call_name(child)
-                                    if callee_name:
-                                        edge = CallGraphEdge(
-                                            caller_name=func_name,
-                                            caller_file=rel_path,
-                                            caller_line=func_line,
-                                            callee_name=callee_name,
-                                            callee_file=rel_path,  # 简化：假设在同一文件
-                                            callee_line=getattr(child, 'lineno', 0),
-                                            call_site_line=getattr(child, 'lineno', 0)
-                                        )
-                                        edges.append(edge)
-                
-                except Exception:
-                    continue
-        
-        return edges
-    
-    def _extract_call_name(self, call_node) -> Optional[str]:
-        """从 Call 节点提取被调用的函数名"""
-        try:
-            import ast
-            
-            if isinstance(call_node.func, ast.Name):
-                return call_node.func.id
-            elif isinstance(call_node.func, ast.Attribute):
-                # 处理 obj.method() 形式
-                return call_node.func.attr
-            else:
-                return None
-        except Exception:
-            return None
+
     
     def _extract_functions(self):
-        """提取函数信息（从调用图）"""
-        # 从调用图边提取函数
+        """Extract function information from the call graph."""
+        # Extract functions from call graph edges
         seen_functions = set()
         
         for edge in self._call_graph_edges:
-            # 添加 caller
+            # Add caller
             if edge.caller_name not in seen_functions:
                 func = FunctionInfo(
                     name=edge.caller_name,
                     file=edge.caller_file,
                     start_line=edge.caller_line,
-                    end_line=edge.caller_line  # 简化处理
+                    end_line=edge.caller_line  # Simplification
                 )
                 self._functions[edge.caller_name] = func
                 seen_functions.add(edge.caller_name)
             
-            # 添加 callee
+            # Add callee
             if edge.callee_name not in seen_functions:
                 func = FunctionInfo(
                     name=edge.callee_name,
@@ -504,15 +428,15 @@ class RepoAnalyzer:
                 self._functions[edge.callee_name] = func
                 seen_functions.add(edge.callee_name)
             
-            # 建立调用关系
+            # Build call relationships
             if edge.caller_name in self._functions:
                 self._functions[edge.caller_name].calls.append(edge.callee_name)
             if edge.callee_name in self._functions:
                 self._functions[edge.callee_name].called_by.append(edge.caller_name)
     
     def _analyze_dependencies(self):
-        """分析第三方库依赖"""
-        # 扫描 import 语句
+        """Analyze third-party library dependencies."""
+        # Scan import statements
         for root, dirs, files in os.walk(self.repo_path):
             dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__', 'node_modules'}]
             
@@ -531,9 +455,9 @@ class RepoAnalyzer:
                         continue
     
     def _extract_import(self, line: str, file: str, line_num: int):
-        """从 import 语句提取依赖"""
+        """Extract dependencies from an import statement."""
         try:
-            # 简单的 import 解析
+            # Simple import parsing
             if line.startswith('import '):
                 modules = line[7:].split(',')
             elif line.startswith('from '):
@@ -549,7 +473,7 @@ class RepoAnalyzer:
                 module = module.strip().split()[0].split('.')[0]
                 
                 if module not in self._dependencies:
-                    # 判断是否为内置库
+                    # Determine whether this is a built-in module
                     import sys
                     is_builtin = module in sys.builtin_module_names or \
                                  module in {'os', 'sys', 'json', 'time', 're', 'math'}
@@ -560,19 +484,19 @@ class RepoAnalyzer:
                         is_third_party=not is_builtin
                     )
                 
-                # 添加导入位置
+                # Add import location
                 loc = CodeLocation(file=file, line=line_num, code=line)
                 self._dependencies[module].import_locations.append(loc)
         except Exception:
             pass
     
     def _detect_entry_points(self):
-        """检测入口点函数"""
+        """Detect entry point functions."""
         entry_point_patterns = self._load_entry_point_patterns()
         patterns = entry_point_patterns.get(self.language, [])
         
         for func in self._functions.values():
-            # 检查函数名是否匹配入口点模式
+            # Check whether the function name matches entry point patterns
             func_name_lower = func.name.lower()
             
             for pattern in patterns:
@@ -581,38 +505,38 @@ class RepoAnalyzer:
                     self._entry_points.append(func)
                     break
             
-            # 特殊检查：没有被调用的函数可能是入口点
+            # Special case: functions not called by others may be entry points
             if not func.called_by and len(func.calls) > 0:
                 if func not in self._entry_points:
                     func.is_entry_point = True
                     self._entry_points.append(func)
     
-    # ========== 公共属性 ==========
+    # ========== Public properties ==========
     
     @property
     def call_graph(self) -> List[CallGraphEdge]:
-        """获取调用图"""
+        """Get the call graph."""
         return self._call_graph_edges
     
     @property
     def functions(self) -> Dict[str, FunctionInfo]:
-        """获取所有函数信息"""
+        """Get all function information."""
         return self._functions
     
     @property
     def dependencies(self) -> Dict[str, DependencyInfo]:
-        """获取依赖信息"""
+        """Get dependency information."""
         return self._dependencies
     
     @property
     def entry_points(self) -> List[FunctionInfo]:
-        """获取入口点函数"""
+        """Get entry point functions."""
         return self._entry_points
     
-    # ========== 公共方法 ==========
+    # ========== Public methods ==========
     
     def get_function_callers(self, func_name: str) -> List[FunctionInfo]:
-        """获取调用指定函数的所有函数"""
+        """Get all functions that call the specified function."""
         if func_name not in self._functions:
             return []
         
@@ -620,7 +544,7 @@ class RepoAnalyzer:
         return [self._functions[name] for name in caller_names if name in self._functions]
     
     def get_function_callees(self, func_name: str) -> List[FunctionInfo]:
-        """获取指定函数调用的所有函数"""
+        """Get all functions called by the specified function."""
         if func_name not in self._functions:
             return []
         
@@ -634,15 +558,15 @@ class RepoAnalyzer:
         window: int = 20
     ) -> str:
         """
-        获取指定位置的代码上下文
+        Get code context around a specific location.
         
         Args:
-            file: 文件路径（相对于仓库根目录）
-            line: 行号
-            window: 上下文窗口大小（前后行数）
+            file: File path (relative to the repository root)
+            line: Line number
+            window: Context window size (lines before/after)
         
         Returns:
-            代码片段（带行号）
+            Code snippet (with line numbers)
         """
         file_path = self.repo_path / file
         if not file_path.exists():
@@ -673,16 +597,16 @@ class RepoAnalyzer:
         max_files: Optional[int] = None
     ) -> SliceResult:
         """
-        向后程序切片：找出所有影响指定代码行的代码
+        Backward program slicing: find all code that influences a given line.
         
         Args:
-            file: 文件路径
-            line: 行号
-            max_depth: 最大追踪深度（None 使用默认值）
-            max_files: 最大文件数（None 使用默认值）
+            file: File path
+            line: Line number
+            max_depth: Maximum tracing depth (None uses default)
+            max_files: Maximum number of files (None uses default)
         
         Returns:
-            SliceResult 对象
+            A SliceResult
         """
         if max_depth is None:
             max_depth = self.max_slice_depth
@@ -691,20 +615,20 @@ class RepoAnalyzer:
         
         target = CodeLocation(file=file, line=line)
         
-        # 读取目标行代码
+        # Read target line code
         code = self._read_line(file, line)
         target.code = code
         
-        # 查找影响该行的函数
+        # Find functions affecting this line
         affected_functions = self._find_functions_in_file(file, line)
         
-        # 向后追踪调用链
+        # Trace the call chain backwards
         related_locations = []
         data_flow_paths = []
         files_involved = {file}
         
         for func in affected_functions:
-            # 获取调用者
+            # Get callers
             callers = self.get_function_callers(func.name)
             
             for depth in range(1, max_depth + 1):
@@ -714,7 +638,7 @@ class RepoAnalyzer:
                 for caller in callers:
                     files_involved.add(caller.file)
                     
-                    # 提取调用者代码
+                    # Extract caller code
                     caller_code = self.get_code_context(caller.file, caller.start_line, window=10)
                     
                     related_locations.append({
@@ -726,11 +650,11 @@ class RepoAnalyzer:
                         "function_name": caller.name
                     })
                     
-                    # 构建数据流路径
+                    # Build a data-flow path
                     path = [f"{caller.file}:{caller.start_line}", f"{file}:{line}"]
                     data_flow_paths.append(path)
                 
-                # 继续向上追踪
+                # Continue tracing upwards
                 next_callers = []
                 for caller in callers:
                     next_callers.extend(self.get_function_callers(caller.name))
@@ -757,16 +681,16 @@ class RepoAnalyzer:
         max_files: Optional[int] = None
     ) -> SliceResult:
         """
-        向前程序切片：找出指定代码行影响的所有代码
+        Forward program slicing: find all code influenced by a given line.
         
         Args:
-            file: 文件路径
-            line: 行号
-            max_depth: 最大追踪深度
-            max_files: 最大文件数
+            file: File path
+            line: Line number
+            max_depth: Maximum tracing depth
+            max_files: Maximum number of files
         
         Returns:
-            SliceResult 对象
+            A SliceResult
         """
         if max_depth is None:
             max_depth = self.max_slice_depth
@@ -777,16 +701,16 @@ class RepoAnalyzer:
         code = self._read_line(file, line)
         target.code = code
         
-        # 查找该行所在的函数
+        # Find the function containing this line
         affected_functions = self._find_functions_in_file(file, line)
         
-        # 向前追踪调用链
+        # Trace the call chain forwards
         related_locations = []
         data_flow_paths = []
         files_involved = {file}
         
         for func in affected_functions:
-            # 获取被调用者
+            # Get callees
             callees = self.get_function_callees(func.name)
             
             for depth in range(1, max_depth + 1):
@@ -796,7 +720,7 @@ class RepoAnalyzer:
                 for callee in callees:
                     files_involved.add(callee.file)
                     
-                    # 提取被调用者代码
+                    # Extract callee code
                     callee_code = self.get_code_context(callee.file, callee.start_line, window=10)
                     
                     related_locations.append({
@@ -808,11 +732,11 @@ class RepoAnalyzer:
                         "function_name": callee.name
                     })
                     
-                    # 构建数据流路径
+                    # Build a data-flow path
                     path = [f"{file}:{line}", f"{callee.file}:{callee.start_line}"]
                     data_flow_paths.append(path)
                 
-                # 继续向下追踪
+                # Continue tracing downwards
                 next_callees = []
                 for callee in callees:
                     next_callees.extend(self.get_function_callees(callee.name))
@@ -838,17 +762,17 @@ class RepoAnalyzer:
         max_paths: int = 10
     ) -> List[List[str]]:
         """
-        查找从 source 到 sink 的数据流路径
+        Find data-flow paths from source to sink.
         
         Args:
-            source_pattern: 源函数名模式（部分匹配）
-            sink_pattern: 汇函数名模式（部分匹配）
-            max_paths: 最大返回路径数
+            source_pattern: Source function name pattern (substring match)
+            sink_pattern: Sink function name pattern (substring match)
+            max_paths: Maximum number of paths to return
         
         Returns:
-            路径列表，每条路径是函数名列表
+            A list of paths; each path is a list of function names
         """
-        # 找到匹配的 source 和 sink 函数
+        # Find matching source and sink functions
         sources = [f for name, f in self._functions.items() 
                    if source_pattern.lower() in name.lower()]
         sinks = [f for name, f in self._functions.items() 
@@ -857,7 +781,7 @@ class RepoAnalyzer:
         if not sources or not sinks:
             return []
         
-        # BFS 搜索路径
+        # BFS search for paths
         all_paths = []
         
         for source in sources:
@@ -872,13 +796,13 @@ class RepoAnalyzer:
     
     def search_pattern(self, pattern: str) -> List[CodeLocation]:
         """
-        搜索代码模式（简单文本搜索）
+        Search for a code pattern (simple text search).
         
         Args:
-            pattern: 搜索模式（正则表达式）
+            pattern: Search pattern (regular expression)
         
         Returns:
-            匹配的代码位置列表
+            List of matching code locations
         """
         import re
         
@@ -909,7 +833,7 @@ class RepoAnalyzer:
         return results
     
     def get_summary(self) -> Dict[str, Any]:
-        """获取分析摘要"""
+        """Get an analysis summary."""
         return {
             "repo_path": str(self.repo_path),
             "language": self.language,
@@ -926,7 +850,7 @@ class RepoAnalyzer:
             },
             "entry_points": [
                 {"name": ep.name, "file": ep.file, "line": ep.start_line}
-                for ep in self._entry_points[:10]  # 只显示前10个
+                for ep in self._entry_points[:10]  # Only show the first 10
             ],
             "top_dependencies": [
                 {"name": name, "import_count": len(dep.import_locations)}
@@ -938,10 +862,10 @@ class RepoAnalyzer:
             ]
         }
     
-    # ========== 辅助方法 ==========
+    # ========== Helper methods ==========
     
     def _read_line(self, file: str, line: int) -> str:
-        """读取文件的指定行"""
+        """Read the specified line from a file."""
         file_path = self.repo_path / file
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -953,7 +877,7 @@ class RepoAnalyzer:
         return ""
     
     def _find_functions_in_file(self, file: str, line: int) -> List[FunctionInfo]:
-        """查找文件中包含指定行的函数"""
+        """Find functions in a file that contain the specified line."""
         results = []
         
         for func in self._functions.values():
@@ -968,7 +892,7 @@ class RepoAnalyzer:
         end: str,
         max_depth: int
     ) -> List[List[str]]:
-        """BFS 搜索函数调用路径"""
+        """BFS search for function call paths."""
         if start not in self._functions or end not in self._functions:
             return []
         
@@ -990,10 +914,10 @@ class RepoAnalyzer:
                 continue
             visited.add(current)
             
-            # 获取被调用的函数
+            # Get called functions
             if current in self._functions:
                 for callee in self._functions[current].calls:
-                    if callee not in path:  # 避免循环
+                    if callee not in path:  # Avoid cycles
                         queue.append((callee, path + [callee]))
         
         return paths

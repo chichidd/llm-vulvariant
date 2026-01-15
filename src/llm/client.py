@@ -12,7 +12,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# 设置日志
+# Logging
 logger = logging.getLogger(__name__)
 
 
@@ -20,24 +20,24 @@ DS_THINK_TOKENS = ('<think>', '</think>')
 
 
 def concat_ds_think_content(reasoning: str, output: str) -> str:
-    """将DeepSeek的reasoning内容和输出内容合并"""
+    """Combine DeepSeek reasoning content and the final output content."""
     think_start, think_end = DS_THINK_TOKENS
-    # 处理 output 为 None 的情况（例如只有 tool_calls 没有 content）
+    # Handle output=None (e.g., tool_calls present but no content)
     output = output or ''
-    # 处理 reasoning 为 None 的情况
+    # Handle reasoning=None
     reasoning = reasoning or ''
     return ''.join([think_start, reasoning, think_end, output])
 
 
 def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """
-    从配置文件加载 LLM 配置
-    
+    Load LLM configuration from a YAML file.
+
     Args:
-        config_path: 配置文件路径，如果未提供则使用默认路径
-        
+        config_path: Path to the config file; uses a default path if not provided.
+
     Returns:
-        包含 LLM 配置的字典
+        A dict containing LLM configuration.
     """
     try:
         if config_path is None:
@@ -51,7 +51,7 @@ def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, A
     except Exception as e:
         pass
     
-    # 默认值
+    # Defaults
     return {
         'llm': {
             'default': {
@@ -72,7 +72,7 @@ def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, A
 
 @dataclass
 class LLMConfig:
-    """LLM配置"""
+    """LLM configuration."""
     provider: str = ""  # openai, anthropic, lab, deepseek, mock
     model: str = ""
     api_key: Optional[str] = None
@@ -82,24 +82,24 @@ class LLMConfig:
     max_tokens: int = 0
     timeout: int = 120
 
-    # 重试配置
-    max_retries: int = 10  # 最大重试次数
-    initial_delay: float = 1.0  # 初始延迟（秒）
-    max_delay: float = 60.0  # 最大延迟（秒）
-    backoff_factor: float = 2.0  # 指数退避因子
+    # Retry settings
+    max_retries: int = 10  # Maximum retries
+    initial_delay: float = 1.0  # Initial delay (seconds)
+    max_delay: float = 60.0  # Maximum delay (seconds)
+    backoff_factor: float = 2.0  # Exponential backoff factor
     
 
-    enable_thinking: bool = True  # LAB LLM DS参数
+    enable_thinking: bool = True  # DeepSeek/LAB thinking parameter
     
     def __post_init__(self):
-        """根据provider自动设置API key和base_url，优先从YAML加载"""
-        # 首先尝试从 YAML 加载配置
+        """Auto-populate api_key/base_url based on provider, preferring YAML config."""
+        # First try to load from YAML
         yaml_config = load_llm_config_from_yaml()
         llm_config = yaml_config.get('llm', {})
         providers_config = llm_config.get('providers', {})
         default_config = llm_config.get('default', {})
         
-        # 如果没有明确设置，使用默认配置
+        # If not explicitly set, use defaults
         if self.temperature == 1.0 and 'temperature' in default_config:
             self.temperature = default_config['temperature']
         if self.top_p == 0.9 and 'top_p' in default_config:
@@ -117,15 +117,15 @@ class LLMConfig:
         if 'enable_thinking' in default_config:
             self.enable_thinking = default_config['enable_thinking']
         
-        # 根据 provider 加载特定配置
+        # Load provider-specific config
         if self.provider and self.provider in providers_config:
             provider_config = providers_config[self.provider]
             
-            # 设置 API key
+            # Set API key
             if 'api_key_env' in provider_config:
                 self.api_key = os.getenv(provider_config['api_key_env'])
             
-            # 设置其他配置
+            # Set other fields
             if not self.base_url and 'base_url' in provider_config:
                 self.base_url = provider_config['base_url']
             if not self.model and 'model' in provider_config:
@@ -133,7 +133,7 @@ class LLMConfig:
             if self.max_tokens == 0 and 'max_tokens' in provider_config:
                 self.max_tokens = provider_config['max_tokens']
         
-        # 向后兼容：如果 YAML 中没有配置，使用硬编码的默认值
+        # Backward compatibility: if YAML has no config, use hardcoded defaults
         if self.provider and not self.base_url:
             if self.provider == "lab":
                 # LAB LLM API
@@ -156,7 +156,7 @@ class LLMConfig:
 
 
 class LLMAPIError(Exception):
-    """LLM API调用错误"""
+    """LLM API call error."""
     def __init__(self, message: str, status_code: int = None, response: Any = None):
         super().__init__(message)
         self.status_code = status_code
@@ -164,18 +164,18 @@ class LLMAPIError(Exception):
 
 
 class LLMRetryExhaustedError(Exception):
-    """LLM重试次数耗尽错误"""
+    """Raised when LLM retries are exhausted."""
     def __init__(self, message: str, last_error: Exception = None):
         super().__init__(message)
         self.last_error = last_error
 
 
 class BaseLLMClient(ABC):
-    """LLM客户端基类"""
+    """Base class for LLM clients."""
     
     def __init__(self, config: LLMConfig):
         self.config = config
-        # 从config读取重试配置
+        # Load retry settings from config
         self.max_retries = config.max_retries
         self.initial_delay = config.initial_delay
         self.max_delay = config.max_delay
@@ -192,15 +192,15 @@ class BaseLLMClient(ABC):
     
     def _should_retry(self, exception: Exception) -> bool:
         """
-        判断是否应该重试
-        
+        Decide whether an exception should trigger a retry.
+
         Args:
-            exception: 捕获的异常
-            
+            exception: The caught exception.
+
         Returns:
-            是否应该重试
+            True if the call should be retried.
         """
-        # 导入OpenAI相关异常（如果可用）
+        # Import OpenAI exceptions if available
         try:
             from openai import (
                 APIError,
@@ -210,29 +210,29 @@ class BaseLLMClient(ABC):
                 InternalServerError,
                 APIStatusError,
             )
-            # 这些错误应该重试
+            # These errors should be retried
             retriable_exceptions = (
-                APIConnectionError,  # 连接错误
-                RateLimitError,  # 速率限制
-                APITimeoutError,  # 超时
-                InternalServerError,  # 服务器内部错误 (5xx)
+                APIConnectionError,  # Connection error
+                RateLimitError,  # Rate limit
+                APITimeoutError,  # Timeout
+                InternalServerError,  # Internal server error (5xx)
             )
             if isinstance(exception, retriable_exceptions):
                 return True
-            # 对于APIStatusError，检查状态码
+            # For APIStatusError, check status code
             if isinstance(exception, APIStatusError):
-                # 5xx 错误和 429 (Rate Limit) 应该重试
+                # Retry on 5xx and 429 (rate limit)
                 if exception.status_code >= 500 or exception.status_code == 429:
                     return True
         except ImportError:
             pass
         
-        # 通用网络错误
+        # Generic network errors
         import socket
         if isinstance(exception, (ConnectionError, TimeoutError, socket.timeout)):
             return True
         
-        # 检查异常消息中的关键词
+        # Check keywords in the error message
         error_msg = str(exception).lower()
         retriable_keywords = [
             'rate limit', 'rate_limit', 'ratelimit',
@@ -249,16 +249,16 @@ class BaseLLMClient(ABC):
     
     def _calculate_delay(self, attempt: int) -> float:
         """
-        计算重试延迟时间（指数退避）
-        
+        Compute retry delay using exponential backoff.
+
         Args:
-            attempt: 当前重试次数（从0开始）
-            
+            attempt: Current retry attempt (0-based).
+
         Returns:
-            延迟时间（秒）
+            Delay in seconds.
         """
         delay = self.initial_delay * (self.backoff_factor ** attempt)
-        # 添加随机抖动（±10%）
+        # Add jitter (±10%)
         import random
         jitter = delay * 0.1 * (2 * random.random() - 1)
         delay = delay + jitter
@@ -266,18 +266,18 @@ class BaseLLMClient(ABC):
     
     def _execute_with_retry(self, func, *args, **kwargs) -> Any:
         """
-        带重试机制执行函数
-        
+        Execute a function with retry logic.
+
         Args:
-            func: 要执行的函数
-            *args: 位置参数
-            **kwargs: 关键字参数
-            
+            func: Function to execute.
+            *args: Positional args.
+            **kwargs: Keyword args.
+
         Returns:
-            函数执行结果
-            
+            Function result.
+
         Raises:
-            LLMRetryExhaustedError: 重试次数耗尽
+            LLMRetryExhaustedError: When retries are exhausted.
         """
         last_exception = None
         
@@ -287,12 +287,12 @@ class BaseLLMClient(ABC):
             except Exception as e:
                 last_exception = e
                 
-                # 判断是否应该重试
+                # Decide whether to retry
                 if not self._should_retry(e):
                     logger.error(f"!!!!\n\n\nNon-retriable error occurred: {type(e).__name__}: {e}\n\n\n!!!!\n\n\n")
                     raise
                 
-                # 检查是否还有重试次数
+                # Check whether we have remaining retries
                 if attempt < self.max_retries - 1:
                     delay = self._calculate_delay(attempt)
                     logger.warning(
@@ -313,41 +313,43 @@ class BaseLLMClient(ABC):
     
     @abstractmethod
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> str:
-        """发送聊天请求
-        
+        """Send a chat request.
+
         Args:
-            messages: 消息列表
-            tools: 可选的工具定义列表（OpenAI format）
-            **kwargs: 其他参数
-            
+            messages: List of messages.
+            tools: Optional tool definitions (OpenAI format).
+            **kwargs: Other parameters.
+
         Returns:
-            响应内容字符串（或包含tool_calls的字典）
+            Response content string (or a dict containing tool_calls).
         """
         pass
     
     @abstractmethod
     def complete(self, prompt: str, **kwargs) -> str:
-        """发送补全请求"""
+        """Send a completion request."""
         pass
     
 
 
 class OpenAIClient(BaseLLMClient):
-    """OpenAI客户端 - 带自动重试机制，支持工具调用"""
+    """OpenAI client with automatic retries and tool calling support."""
     
     def __init__(self, config: LLMConfig):
         super().__init__(config)
         
     def _make_chat_request(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
-        """实际执行聊天请求（内部方法）"""
+        """Execute the underlying chat request (internal helper)."""
         request_params = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": kwargs.get("temperature", self.config.temperature),
+            "top_p": kwargs.get("top_p", self.config.top_p),
+            "timeout": kwargs.get("timeout", self.config.timeout),
+            "stream": False,
             "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
         }
         
-        # 添加tools参数
+        # Add tools parameters
         if tools is not None:
             request_params["tools"] = tools
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
@@ -356,7 +358,7 @@ class OpenAIClient(BaseLLMClient):
         return response.choices[0].message
     
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
-        """发送聊天请求（带重试机制）"""
+        """Send a chat request (with retry logic)."""
         return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
     
     def complete(self, prompt: str, **kwargs) -> str:
@@ -366,8 +368,7 @@ class OpenAIClient(BaseLLMClient):
 
 
 class DeepSeekClient(BaseLLMClient):
-    """DeepSeek客户端 - 支持工具调用和思考模式
-    """
+    """DeepSeek client supporting tool calling and thinking mode."""
     
     def __init__(self, config: LLMConfig):
         super().__init__(config)
@@ -386,16 +387,16 @@ class DeepSeekClient(BaseLLMClient):
         return {}
 
     def _make_chat_request(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
-        """实际执行聊天请求（内部方法）
-        
+        """Execute the underlying chat request (internal helper).
+
         Args:
-            messages: 消息列表
-            tools: 工具定义列表（可选）
-            **kwargs: 其他参数
-                - tool_choice: 工具选择策略 "none"/"auto"/"required"
+            messages: List of messages.
+            tools: Optional tool definitions.
+            **kwargs: Other parameters.
+                - tool_choice: Tool selection strategy: "none"/"auto"/"required"
 
         """
-        # 添加系统消息如果不存在
+        # Add a system message if missing
         if not any(m.get("role") == "system" for m in messages):
             messages = [
                 {"role": "system", "content": "You are a helpful AI assistant specialized in code security analysis."},
@@ -404,7 +405,7 @@ class DeepSeekClient(BaseLLMClient):
         
         
         
-        # 构建基础请求参数
+        # Build base request parameters
         request_params = {
             "model": self.config.model,
             "messages": messages,
@@ -413,47 +414,45 @@ class DeepSeekClient(BaseLLMClient):
             "timeout": kwargs.get("timeout", self.config.timeout),
             "stream": False,
             "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
-            "stream": False,
-            
         }
         
         request_params["extra_body"] = self._process_extra_body(kwargs)
 
-        # 添加tools参数
+        # Add tools parameters
         if tools is not None:
             request_params["tools"] = tools
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
         
-        # 发送请求
+        # Send request
         response = self.client.chat.completions.create(**request_params)
 
         return response.choices[0].message
 
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
-        """发送聊天请求（带重试机制）
-        
+        """Send a chat request (with retry logic).
+
         Args:
-            messages: 消息列表
-            tools: 工具定义列表（可选）
-            **kwargs: 其他参数
-                - tool_choice: 工具选择 "none"/"auto"/"required"（当提供tools时）
-                - separate_reasoning: bool，是否返回分离的 reasoning 和 content（无 tool_calls 时）
-                
+            messages: List of messages.
+            tools: Optional tool definitions.
+            **kwargs: Other parameters.
+                - tool_choice: Tool choice: "none"/"auto"/"required" (when tools are provided)
+                - separate_reasoning: bool, whether to return separate reasoning and content when there are no tool_calls
+
         Returns:
-            根据响应类型返回不同格式：
-            - 有 tool_calls: {"content": str, "tool_calls": [...], "reasoning": str (if thinking enabled)}
-            - 无 tool_calls 且 separate_reasoning=True: {"reasoning": str, "content": str}
-            - 其他: str (合并后的内容)
+            Different formats depending on response type:
+            - With tool_calls: {"content": str, "tool_calls": [...], "reasoning": str (if thinking enabled)}
+            - No tool_calls and separate_reasoning=True: {"reasoning": str, "content": str}
+            - Otherwise: str (merged content)
         """
         return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
     
     def complete(self, prompt: str, **kwargs) -> str:
-        """发送补全请求（转换为聊天格式）"""
+        """Send a completion request (translated into chat format)."""
         return self.chat([{"role": "user", "content": prompt}], **kwargs)
     
 
 class MockLLMClient(BaseLLMClient):
-    """Mock LLM客户端，用于测试"""
+    """Mock LLM client for tests."""
     
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> str:
         if tools is not None:
@@ -461,13 +460,13 @@ class MockLLMClient(BaseLLMClient):
         return '{"status": "mock_response", "message": "This is a mock response for testing"}'
     
     def complete(self, prompt: str, **kwargs) -> str:
-        """发送补全请求（Mock实现）"""
+        """Send a completion request (mock implementation)."""
         return '{"status": "mock_completion", "prompt": "' + prompt[:50] + '..."}'
     
 
 
 def create_llm_client(config: LLMConfig) -> BaseLLMClient:
-    """创建LLM客户端"""
+    """Create an LLM client."""
     providers = {
         "openai": OpenAIClient,
         "lab": DeepSeekClient,

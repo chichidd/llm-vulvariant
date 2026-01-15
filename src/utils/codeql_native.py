@@ -1,14 +1,13 @@
-"""
-真正的 CodeQL 分析器
+"""A native CodeQL analyzer.
 
-基于 GitHub CodeQL CLI 工具的分析器封装，提供：
-1. 数据库创建
-2. 查询执行
-3. 结果解析
-4. 跨函数/跨文件调用图构建
+This module provides a wrapper around the GitHub CodeQL CLI, including:
+1. Database creation
+2. Query execution
+3. Result parsing
+4. Cross-function / cross-file call graph construction
 
 
-### 方法1: 使用 CodeQLAnalyzer（推荐）
+### Method 1: Use CodeQLAnalyzer (recommended)
 
 ```python
 from utils.codeql_native import CodeQLAnalyzer
@@ -16,29 +15,29 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# 初始化分析器
+# Initialize analyzer
 analyzer = CodeQLNativeAnalyzer()
 
-# 创建数据库
+# Create database
 success, db_path = analyzer.create_database(
     source_path="/path/to/repo",
     language="python",
     database_name="my_project"
 )
 
-logger.info(f"数据库路径: {db_path}")
+logger.info(f"Database path: {db_path}")
 ```
 
-### 方法2: 直接使用 CodeQL CLI
+### Method 2: Use CodeQL CLI directly
 
 ```bash
-# 设置环境变量
+# Set environment variables
 export PATH="$HOME/.codeql/codeql-cli/codeql:$PATH"
 
-# 创建数据库
+# Create database
 codeql database create my_db --language=python --source-root=/path/to/repo
 
-# 运行分析（需要查询包）
+# Run analysis (requires query packs)
 codeql database analyze my_db --format=sarif-latest --output=results.sarif
 ```
 """
@@ -61,26 +60,26 @@ logger = get_logger(__name__)
 
 def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """
-    从配置文件加载 CodeQL 配置
+    Load CodeQL configuration from a config file.
     
     Args:
-        config_path: 配置文件路径，如果未提供则使用默认路径
+        config_path: Config file path; uses the default path if not provided
         
     Returns:
-        包含 CodeQL 配置的字典
+        A dict containing CodeQL configuration
     """
     try:
         import yaml
         from pathlib import Path
         
-        # 尝试导入配置模块（用于获取默认路径）
+        # Try importing the config module (to obtain default paths)
         try:
             from config import _path_config
         except ImportError:
             logger.debug("Could not import config module in load_codeql_config")
             _path_config = None
         
-        # 默认配置文件路径
+        # Default config file path
         if config_path is None:
             config_path = Path(__file__).parent.parent.parent / "config" / "codeql_config.yaml"
         
@@ -98,7 +97,7 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             config['memory'] = codeql_cli.get('memory', 0)
             config['timeout'] = codeql_cli.get('timeout', 600)
         else:
-            # 使用默认值
+            # Use defaults
             config = {
                 'cli_path': '',
                 'queries_path': '',
@@ -109,30 +108,30 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             }
         
         logger.debug(f"Loaded CodeQL config: queries_path={config.get('queries_path')}, database_dir={config.get('database_dir')}")
-        # 如果没有指定查询路径，使用默认路径（项目根目录下的 .codeql）
+        # If no query path is provided, use the default (.codeql under project root)
         if not config['queries_path']:
             if _path_config:
                 config['queries_path'] = os.path.join(str(_path_config['project_root']), ".codeql")
             else:
-                # 如果无法导入配置，回退到计算项目根目录
+                # If config cannot be imported, fall back to computing the project root
                 project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
                 config['queries_path'] = os.path.join(project_root, ".codeql")
         
-        # 如果没有指定数据库目录，使用项目配置的路径
+        # If no database directory is provided, use the project's configured path
         if not config['database_dir']:
             if _path_config:
                 config['database_dir'] = str(_path_config['codeql_db_path'])
             else:
-                # 如果无法导入，使用 temp 目录作为回退
+                # If config cannot be imported, fall back to a temp directory
                 config['database_dir'] = os.path.join(tempfile.gettempdir(), "codeql-dbs")
         
-        # 确保数据库目录存在
+        # Ensure database directory exists
         os.makedirs(config['database_dir'], exist_ok=True)
         
         return config
         
     except Exception as e:
-        # 如果加载失败，返回默认值
+        # If loading fails, return defaults
         logger.error(f"Failed to load CodeQL config: {e}")
         import traceback
         logger.debug(traceback.format_exc())
@@ -150,7 +149,7 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
 
 @dataclass
 class CodeQLFinding:
-    """CodeQL 发现的问题"""
+    """A finding reported by CodeQL."""
     rule_id: str
     severity: str
     message: str
@@ -161,7 +160,7 @@ class CodeQLFinding:
     end_column: int
     cwe_ids: List[str] = field(default_factory=list)
     
-    # 数据流路径（如果是污点分析结果）
+    # Data-flow path (for taint analysis results)
     source: Optional[Dict[str, Any]] = None
     sink: Optional[Dict[str, Any]] = None
     path_nodes: List[Dict[str, Any]] = field(default_factory=list)
@@ -169,7 +168,7 @@ class CodeQLFinding:
 
 @dataclass 
 class CallGraphEdge:
-    """调用图边"""
+    """A call graph edge."""
     caller_name: str
     caller_file: str
     caller_line: int
@@ -181,7 +180,7 @@ class CallGraphEdge:
 
 @dataclass
 class CodeQLAnalysisResult:
-    """CodeQL 分析结果"""
+    """CodeQL analysis result."""
     success: bool
     database_path: str
     query_results: Dict[str, List[CodeQLFinding]] = field(default_factory=dict)
@@ -193,16 +192,16 @@ class CodeQLAnalysisResult:
 
 class CodeQLAnalyzer:
     """
-    真正的 CodeQL 分析器
+    A native CodeQL analyzer.
     
-    使用 GitHub CodeQL CLI 进行代码分析，支持：
-    - 创建 CodeQL 数据库
-    - 执行自定义和标准查询
-    - 构建跨函数/跨文件调用图
-    - 污点分析
+    Uses the GitHub CodeQL CLI to analyze code. Supports:
+    - Creating CodeQL databases
+    - Running custom and standard queries
+    - Building cross-function / cross-file call graphs
+    - Taint analysis
     """
     
-    # 支持的语言及其别名
+    # Supported languages and their aliases
     SUPPORTED_LANGUAGES = {
         "python": ["python", "py"],
         "javascript": ["javascript", "js", "typescript", "ts"],
@@ -213,7 +212,7 @@ class CodeQLAnalyzer:
         "ruby": ["ruby", "rb"],
     }
     
-    # 预定义查询包
+    # Predefined query suites
     QUERY_SUITES = {
         "security": "codeql/{lang}-queries:codeql-suites/{lang}-security-extended.qls",
         "quality": "codeql/{lang}-queries:codeql-suites/{lang}-code-quality.qls",
@@ -221,10 +220,10 @@ class CodeQLAnalyzer:
     }
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """初始化 CodeQL 分析器
+        """Initialize the CodeQL analyzer.
         
         Args:
-            config: CodeQL 配置字典，如未提供则从 config/codeql_config.yaml 加载
+            config: CodeQL config dict; if not provided it is loaded from config/codeql_config.yaml
         """
         self.config = config if config is not None else load_codeql_config()
         logger.debug(f"CodeQLAnalyzer initialized with queries_path: {self.config.get('queries_path')}")
@@ -232,16 +231,16 @@ class CodeQLAnalyzer:
         self._verify_installation()
     
     def _find_codeql(self) -> str:
-        """查找 CodeQL CLI"""
+        """Locate the CodeQL CLI."""
         if self.config.get('cli_path'):
             return self.config['cli_path']
         
-        # 尝试从 PATH 中查找
+        # Try finding via PATH
         result = shutil.which("codeql")
         if result:
             return result
         
-        # 尝试常见安装位置
+        # Try common installation locations
         common_paths = [
             os.path.expanduser("~/.codeql/codeql-cli/codeql/codeql"),
             "/opt/codeql/codeql",
@@ -251,10 +250,10 @@ class CodeQLAnalyzer:
             if os.path.isfile(path) and os.access(path, os.X_OK):
                 return path
         
-        return "codeql"  # 假设在 PATH 中
+        return "codeql"  # Assume it is available in PATH
     
     def _verify_installation(self) -> bool:
-        """验证 CodeQL 安装"""
+        """Verify CodeQL installation."""
         try:
             result = subprocess.run(
                 [self._codeql_cmd, "version", "--format=json"],
@@ -274,16 +273,16 @@ class CodeQLAnalyzer:
     
     @property
     def is_available(self) -> bool:
-        """CodeQL 是否可用"""
+        """Whether CodeQL is available."""
         return self._version is not None
     
     @property
     def version(self) -> Optional[str]:
-        """CodeQL 版本"""
+        """CodeQL version."""
         return self._version
     
     def _run_codeql(self, args: List[str], timeout: Optional[int] = None) -> Tuple[bool, str, str]:
-        """运行 CodeQL 命令"""
+        """Run a CodeQL command."""
         cmd = [self._codeql_cmd] + args
         
         try:
@@ -307,23 +306,23 @@ class CodeQLAnalyzer:
         overwrite: bool = True
     ) -> Tuple[bool, str]:
         """
-        创建 CodeQL 数据库
+        Create a CodeQL database.
         
         Args:
-            source_path: 源代码路径
-            language: 编程语言
-            database_name: 数据库名称
-            overwrite: 是否覆盖已存在的数据库
+            source_path: Source code path
+            language: Programming language
+            database_name: Database name
+            overwrite: Whether to overwrite an existing database
         
         Returns:
-            (成功与否, 数据库路径或错误信息)
+            (success, database path or error message)
         """
         source_path = os.path.abspath(source_path)
         
         if not os.path.exists(source_path):
             return False, f"Source path does not exist: {source_path}"
         
-        # 规范化语言名称
+        # Normalize language name
         lang_lower = language.lower()
         normalized_lang = None
         for lang, aliases in self.SUPPORTED_LANGUAGES.items():
@@ -334,20 +333,20 @@ class CodeQLAnalyzer:
         if not normalized_lang:
             return False, f"Unsupported language: {language}"
         
-        # 确定数据库路径
+        # Determine database path
         if not database_name:
             database_name = os.path.basename(source_path) + f"-{normalized_lang}-db"
         
         db_path = os.path.join(self.config['database_dir'], database_name)
         
-        # 如果数据库已存在
+        # If database already exists
         if os.path.exists(db_path):
             if overwrite:
                 shutil.rmtree(db_path)
             else:
-                return True, db_path  # 使用现有数据库
+                return True, db_path  # Use existing database
         
-        # 构建命令
+        # Build command
         args = [
             "database", "create",
             db_path,
@@ -358,8 +357,8 @@ class CodeQLAnalyzer:
         if self.config.get('threads', 0) > 0:
             args.append(f"--threads={self.config['threads']}")
         
-        # 执行创建
-        success, stdout, stderr = self._run_codeql(args, timeout=1800)  # 30分钟超时
+        # Execute creation
+        success, stdout, stderr = self._run_codeql(args, timeout=1800)  # 30-minute timeout
         
         if success:
             return True, db_path
@@ -373,35 +372,35 @@ class CodeQLAnalyzer:
         output_format: str = "sarif-latest"
     ) -> Tuple[bool, Any]:
         """
-        运行 CodeQL 查询
+        Run a CodeQL query.
         
         Args:
-            database_path: 数据库路径
-            query: 查询路径或查询套件名称
-            output_format: 输出格式 (sarif-latest, csv, json)
+            database_path: Database path
+            query: Query path or query suite name
+            output_format: Output format (sarif-latest, csv, json)
         
         Returns:
-            (成功与否, 查询结果或错误信息)
+            (success, query result or error message)
         """
         if not os.path.exists(database_path):
             return False, f"Database does not exist: {database_path}"
         
-        # 确定查询路径
+        # Determine query path
         query_path = query
         if not os.path.exists(query):
-            # 可能是内置查询套件
+            # Possibly a built-in query suite
             if query in self.QUERY_SUITES:
-                # 从数据库推断语言
+                # Infer language from database
                 lang = self._get_database_language(database_path)
                 if lang:
                     query_path = self.QUERY_SUITES[query].format(lang=lang)
             else:
-                # 尝试自定义查询目录
+                # Try custom queries directory
                 custom_query = os.path.join(self.config['queries_path'], query)
                 if os.path.exists(custom_query):
                     query_path = custom_query
         
-        # 创建临时输出文件
+        # Create a temporary output file
         with tempfile.NamedTemporaryFile(suffix=".sarif", delete=False) as f:
             output_path = f.name
         
@@ -432,7 +431,7 @@ class CodeQLAnalyzer:
                 os.unlink(output_path)
     
     def _get_database_language(self, database_path: str) -> Optional[str]:
-        """从数据库获取语言信息"""
+        """Get language information from a database."""
         db_info_path = os.path.join(database_path, "codeql-database.yml")
         if os.path.exists(db_info_path):
             try:
@@ -443,13 +442,13 @@ class CodeQLAnalyzer:
             except:
                 pass
         
-        # 从目录名推断
+        # Infer from directory name
         db_name = os.path.basename(database_path)
         for lang in self.SUPPORTED_LANGUAGES:
             if lang in db_name.lower():
                 return lang
         
-        return "python"  # 默认
+        return "python"  # Default
     
     def analyze(
         self,
@@ -459,13 +458,13 @@ class CodeQLAnalyzer:
         include_call_graph: bool = True
     ) -> CodeQLAnalysisResult:
         """
-        完整分析流程
+        Full analysis workflow.
         
         Args:
-            source_path: 源代码路径
-            language: 编程语言
-            queries: 要执行的查询列表，None 表示使用默认安全查询
-            include_call_graph: 是否包含调用图分析
+            source_path: Source code path
+            language: Programming language
+            queries: List of queries to run; None means using default security queries
+            include_call_graph: Whether to include call graph analysis
         
         Returns:
             CodeQLAnalysisResult
@@ -476,12 +475,12 @@ class CodeQLAnalyzer:
             database_path=""
         )
         
-        # 检查 CodeQL 是否可用
+        # Check whether CodeQL is available
         if not self.is_available:
             result.errors.append("CodeQL is not installed or not in PATH")
             return result
         
-        # 创建数据库
+        # Create database
         success, db_path_or_error = self.create_database(source_path, language)
         if not success:
             result.errors.append(db_path_or_error)
@@ -489,11 +488,11 @@ class CodeQLAnalyzer:
         
         result.database_path = db_path_or_error
         
-        # 确定要执行的查询
+        # Determine which queries to run
         if queries is None:
             queries = self._get_default_queries(language)
         
-        # 执行查询
+        # Run queries
         for query in queries:
             query_success, query_result = self.run_query(result.database_path, query)
             
@@ -504,12 +503,12 @@ class CodeQLAnalyzer:
             else:
                 result.errors.append(f"Query '{query}' failed: {query_result}")
         
-        # 构建调用图
+        # Build call graph
         if include_call_graph:
             call_graph = self._build_call_graph(result.database_path, language)
             result.call_graph = call_graph
         
-        # 统计信息
+        # Statistics
         result.statistics = {
             "total_findings": sum(len(f) for f in result.query_results.values()),
             "findings_by_query": {k: len(v) for k, v in result.query_results.items()},
@@ -522,7 +521,7 @@ class CodeQLAnalyzer:
         return result
     
     def _get_default_queries(self, language: str) -> List[str]:
-        """获取默认查询列表"""
+        """Get the default query list."""
         queries_dir = os.path.join(self.config['queries_path'], language)
         
         if os.path.exists(queries_dir):
@@ -532,25 +531,25 @@ class CodeQLAnalyzer:
                 if f.endswith(".ql")
             ]
         
-        # 使用内置安全查询
+        # Use built-in security queries
         return ["security"]
     
     def _parse_sarif_results(self, sarif: Dict) -> List[CodeQLFinding]:
-        """解析 SARIF 格式结果"""
+        """Parse SARIF-format results."""
         findings = []
         
         for run in sarif.get("runs", []):
-            # 获取规则信息
+            # Collect rule metadata
             rules = {}
             for rule in run.get("tool", {}).get("driver", {}).get("rules", []):
                 rules[rule["id"]] = rule
             
-            # 解析结果
+            # Parse results
             for result in run.get("results", []):
                 rule_id = result.get("ruleId", "")
                 rule_info = rules.get(rule_id, {})
                 
-                # 获取位置信息
+                # Extract location info
                 locations = result.get("locations", [{}])
                 if locations:
                     location = locations[0].get("physicalLocation", {})
@@ -566,7 +565,7 @@ class CodeQLAnalyzer:
                     file_path = ""
                     start_line = end_line = start_col = end_col = 0
                 
-                # 获取严重程度
+                # Determine severity
                 severity = "warning"
                 if "security-severity" in rule_info.get("properties", {}):
                     sec_sev = float(rule_info["properties"]["security-severity"])
@@ -579,13 +578,13 @@ class CodeQLAnalyzer:
                     else:
                         severity = "low"
                 
-                # 获取 CWE
+                # Collect CWE IDs
                 cwe_ids = []
                 for tag in rule_info.get("properties", {}).get("tags", []):
                     if tag.startswith("external/cwe/cwe-"):
                         cwe_ids.append(tag.replace("external/cwe/", "").upper())
                 
-                # 解析数据流路径
+                # Parse data-flow path
                 source = None
                 sink = None
                 path_nodes = []
@@ -623,7 +622,7 @@ class CodeQLAnalyzer:
         return findings
     
     def _parse_flow_location(self, location: Dict) -> Dict[str, Any]:
-        """解析数据流位置"""
+        """Parse a data-flow location."""
         phys_loc = location.get("location", {}).get("physicalLocation", {})
         artifact = phys_loc.get("artifactLocation", {})
         region = phys_loc.get("region", {})
@@ -637,7 +636,7 @@ class CodeQLAnalyzer:
         }
     
     def _build_call_graph(self, database_path: str, language: str) -> List[CallGraphEdge]:
-        """构建调用图"""
+        """Build a call graph."""
         call_graph_query = os.path.join(
             self.config['queries_path'], language, "call_graph.ql"
         )
@@ -651,8 +650,8 @@ class CodeQLAnalyzer:
         
         logger.info(f"Found call graph query, executing against database: {database_path}")
         
-        # 使用两步法：query run + bqrs decode
-        # 因为 database analyze 需要 @kind 元数据
+        # Two-step approach: query run + bqrs decode
+        # Because database analyze requires @kind metadata
         with tempfile.NamedTemporaryFile(suffix=".bqrs", delete=False) as f:
             bqrs_path = f.name
         with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
@@ -709,7 +708,7 @@ class CodeQLAnalyzer:
         return []
     
     def _parse_call_graph_csv(self, csv_path: str) -> List[CallGraphEdge]:
-        """解析调用图 CSV"""
+        """Parse call graph CSV."""
         edges = []
         
         with open(csv_path, 'r') as f:
@@ -739,17 +738,17 @@ class CodeQLAnalyzer:
         max_depth: int = 10
     ) -> List[List[str]]:
         """
-        在调用图中查找到达 sink 的所有路径
+        Find all paths that reach a sink in the call graph.
         
         Args:
-            call_graph: 调用图边列表
-            sink_name: 目标 sink 函数名（部分匹配）
-            max_depth: 最大搜索深度
+            call_graph: List of call graph edges
+            sink_name: Target sink function name (substring match)
+            max_depth: Maximum search depth
         
         Returns:
-            路径列表，每个路径是函数名列表
+            A list of paths; each path is a list of function names
         """
-        # 构建图
+        # Build graphs
         graph = {}  # caller -> [callees]
         reverse_graph = {}  # callee -> [callers]
         
@@ -765,10 +764,10 @@ class CodeQLAnalyzer:
                 reverse_graph[callee] = []
             reverse_graph[callee].append(caller)
         
-        # 找到匹配的 sink
+        # Find matching sinks
         sinks = [name for name in reverse_graph if sink_name in name]
         
-        # 从 sink 反向搜索
+        # Reverse search from sinks
         all_paths = []
         for sink in sinks:
             paths = self._find_paths_bfs(reverse_graph, sink, max_depth)
@@ -782,7 +781,7 @@ class CodeQLAnalyzer:
         start: str,
         max_depth: int
     ) -> List[List[str]]:
-        """BFS 搜索路径"""
+        """BFS search for paths."""
         paths = []
         queue = [(start, [start])]
         
@@ -793,11 +792,11 @@ class CodeQLAnalyzer:
                 continue
             
             if node not in graph or not graph[node]:
-                # 到达入口
+                # Reached entry point
                 paths.append(list(reversed(path)))
             else:
                 for next_node in graph[node]:
-                    if next_node not in path:  # 避免循环
+                    if next_node not in path:  # Avoid cycles
                         queue.append((next_node, path + [next_node]))
         
         return paths

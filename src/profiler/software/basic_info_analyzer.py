@@ -1,4 +1,4 @@
-"""基本信息分析器 - 分析应用名称、目标场景等"""
+"""Basic information analyzer (app name, target scenarios, etc.)."""
 
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -14,12 +14,11 @@ logger = get_logger(__name__)
 
 
 class BasicInfoAnalyzer:
-    """分析软件的基本信息"""
+    """Analyze basic information about the software."""
     
-    def __init__(self, llm_client: BaseLLMClient, detection_rules: Dict[str, Any] = None):
+    def __init__(self, llm_client: BaseLLMClient):
         self.llm_client = llm_client
-        self.detection_rules = detection_rules or {}
-    
+
     def analyze(
         self, 
         repo_path: Path, 
@@ -29,28 +28,25 @@ class BasicInfoAnalyzer:
         storage_manager: Optional[ProfileStorageManager] = None
     ) -> Dict[str, Any]:
         """
-        分析基本信息
+        Analyze basic information.
         
         Returns:
-            包含以下字段的字典:
-            - description: 项目描述
-            - target_application: 目标应用场景
-            - target_user: 目标用户
+            A dict containing the following fields:
+            - description: Project description
+            - target_application: Target application scenarios
+            - target_user: Target users
         """
         logger.info("Analyzing basic info...")
         
-        # 先尝试基于规则的分析
-        rule_based_result = self._rule_based_analysis(repo_path, repo_info)
-        
-        # 格式化配置文件
+        # Format configuration files
         config_files_text = self._format_config_files(repo_info.get("config_files", []))
         
-        # 构建 LLM prompt
+        # Build the LLM prompt
         prompt = BASIC_INFO_PROMPT.format(
             repo_name=repo_name or repo_path.name,
             readme_content=repo_info.get("readme_content", ""),
             config_files_formatted=config_files_text,
-            file_list="\n".join(repo_info.get("files", []))
+            # file_list="\n".join(repo_info.get("files", []))
         )
         
         try:
@@ -72,49 +68,25 @@ class BasicInfoAnalyzer:
                 path_parts = (repo_name, version) if repo_name else (repo_path.name, version)
                 storage_manager.save_conversation("basic_info", conversation_data, *path_parts)
 
-            # 合并规则分析和 LLM 分析结果
+            # Merge rule-based analysis and LLM-based analysis results
             if llm_result:
                 return {
                     "description": llm_result.get("description", ""),
-                    "target_application": llm_result.get("target_application", 
-                                                        rule_based_result.get("target_application", [])),
-                    "target_user": llm_result.get("target_user", 
-                                                 rule_based_result.get("target_user", []))
+                    "target_application": llm_result.get("target_application", []),
+                    "target_user": llm_result.get("target_user", [])
                 }
         except Exception as e:
             logger.warning(f"LLM-based basic info analysis failed: {e}, using rule-based results")
         
-        return rule_based_result
+        return {}
     
     def _format_config_files(self, config_files: list) -> str:
-        """格式化配置文件内容"""
+        """Format configuration file contents."""
         result = []
-        for config in config_files[:3]:  # 最多3个
+        for config in config_files[:3]:  # At most 3
             name = config.get("name", "unknown")
             content = config.get("content", "")
             result.append(f"[{name}]\n{content}")
         return "\n\n".join(result)
     
-    def _rule_based_analysis(self, repo_path: Path, repo_info: Dict) -> Dict[str, Any]:
-        """基于规则的基本分析"""
-        result = {
-            "description": "",
-            "target_application": [],
-            "target_user": []
-        }
-        
-        readme = repo_info.get("readme_content", "").lower()
-        
-        # 检测应用场景
-        app_scenarios = self.detection_rules.get("application_scenarios", {})
-        for scenario, keywords in app_scenarios.items():
-            if any(kw in readme for kw in keywords):
-                result["target_application"].append(scenario)
-        
-        # 检测目标用户
-        user_types = self.detection_rules.get("user_types", {})
-        for user_type, keywords in user_types.items():
-            if any(kw in readme for kw in keywords):
-                result["target_user"].append(user_type)
-        
-        return result
+

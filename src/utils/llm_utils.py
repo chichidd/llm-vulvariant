@@ -7,18 +7,18 @@ logger = get_logger(__name__)
 
 def _get_line_number_formatter(line_number_format: str, max_line_number: int) -> Callable[[int, str], str]:
     """
-    获取行号格式化函数（内部辅助函数）
-    
+    Get a line-number formatting function (internal helper).
+
     Args:
-        line_number_format: 行号格式类型
-            - "standard": "1: code" (简洁清晰)
-            - "markdown": "`1` code" (Markdown风格)
-            - "pipe": "1 | code" (管道分隔符)
-            - "bracket": "[1] code" (方括号)
-        max_line_number: 最大行号，用于计算填充宽度
-    
+        line_number_format: Line number format type.
+            - "standard": "1: code" (simple and clear)
+            - "markdown": "`1` code" (Markdown style)
+            - "pipe": "1 | code" (pipe separator)
+            - "bracket": "[1] code" (brackets)
+        max_line_number: Max line number, used to compute padding width.
+
     Returns:
-        格式化函数，接受 (行号, 行内容) 返回格式化后的字符串
+        A formatter function that accepts (line_number, line_text) and returns a formatted string.
     """
     if line_number_format == "standard":
         width = len(str(max_line_number))
@@ -34,48 +34,48 @@ def _get_line_number_formatter(line_number_format: str, max_line_number: int) ->
 
 
 def extract_message_content(response: Any) -> str:
-    """从 LLM 响应中提取文本内容
-    
+    """Extract textual content from an LLM response.
+
     Args:
-        response: LLM 响应，可能是：
-            - str: 直接返回字符串
-            - ChatCompletionMessage: OpenAI/DeepSeek 响应对象
-            - dict: 字典格式的响应
-            
+        response: LLM response, which may be:
+            - str: returned directly
+            - ChatCompletionMessage: OpenAI/DeepSeek response object
+            - dict: dict-form response
+
     Returns:
-        提取的文本内容
+        Extracted text content.
     """
-    # 如果已经是字符串，直接返回
+    # If it's already a string, return directly.
     if isinstance(response, str):
         return response
     
-    # 如果是字典，尝试提取 content 字段
+    # If it's a dict, try extracting the content field.
     if isinstance(response, dict):
         return response.get('content', str(response))
     
-    # 处理 ChatCompletionMessage 对象
+    # Handle ChatCompletionMessage-like objects.
     if hasattr(response, 'content'):
         return response.content or ''
     
-    # 其他情况，转为字符串
+    # Fallback: coerce to string.
     return str(response)
 
 
 def parse_llm_json(response: Any) -> Optional[Dict[str, Any]]:
-    """解析LLM返回的JSON
-    
+    """Parse JSON returned by an LLM.
+
     Args:
-        response: LLM响应，可以是字符串或ChatCompletionMessage对象
-        
+        response: LLM response, which can be a string or a ChatCompletionMessage-like object.
+
     Returns:
-        解析后的JSON字典，如果解析失败则返回None
+        Parsed JSON dict, or None if parsing fails.
     """
     import json
     
-    # 先提取内容字符串
+    # First extract a content string.
     response_str = extract_message_content(response)
     
-    # 尝试从响应中提取JSON
+    # Try extracting JSON from a fenced code block.
     json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', response_str)
     if json_match:
         json_str = json_match.group(1)
@@ -97,21 +97,21 @@ def extract_function_snippet_based_on_name_with_ast(
     line_number_format: str = "standard"
 ) -> str:
     """
-    使用AST提取指定函数的代码片段
-    
+    Extract a code snippet for a given function/class name using AST.
+
     Args:
-        file_content: 文件内容字符串
-        function_name: 要提取的函数/类名称
-        with_line_numbers: 是否包含行号 (默认False，保持向后兼容)
-        line_number_format: 行号格式，可选:
-            - "standard": "1: code" (默认，简洁清晰)
-            - "padded": "001: code" (对齐的行号)
-            - "markdown": "`1` code" (Markdown风格)
-            - "pipe": "1 | code" (管道分隔符)
-            - "bracket": "[1] code" (方括号)
-    
+        file_content: File content as a string.
+        function_name: Function/class name to extract.
+        with_line_numbers: Whether to include line numbers (default: False; keeps backward compatibility).
+        line_number_format: Line number format. Options:
+            - "standard": "1: code" (default, simple and clear)
+            - "padded": "001: code" (aligned line numbers)
+            - "markdown": "`1` code" (Markdown style)
+            - "pipe": "1 | code" (pipe separator)
+            - "bracket": "[1] code" (brackets)
+
     Returns:
-        提取的函数/类代码片段，如果找不到则返回空字符串
+        Extracted function/class snippet; returns an empty string if not found.
         
     Example:
         >>> snippet = extract_function_snippet_based_on_name_with_ast(
@@ -137,19 +137,19 @@ def extract_function_snippet_based_on_name_with_ast(
                         start_line = node.lineno - 1  # 0-indexed
                         end_line = node.end_lineno if node.end_lineno else start_line + 1
                         
-                        # 如果不需要行号，返回原始代码片段
+                        # If line numbers are not needed, return the raw snippet.
                         if not with_line_numbers:
                             snippet = '\n'.join(lines[start_line:end_line])
                             return snippet
                         
-                        # 添加行号
+                        # Add line numbers.
                         snippet_lines = lines[start_line:end_line]
-                        actual_start_line = start_line + 1  # 转换为1-indexed
+                        actual_start_line = start_line + 1  # Convert to 1-indexed.
                         
-                        # 获取行号格式化函数
+                        # Get line number formatter.
                         format_func = _get_line_number_formatter(line_number_format, end_line)
                         
-                        # 构建带行号的片段
+                        # Build a snippet with line numbers.
                         result_lines = []
                         for i, line in enumerate(snippet_lines):
                             line_number = actual_start_line + i
@@ -172,23 +172,23 @@ def read_code_file_with_line_numbers(
     encoding: str = "utf-8"
 ) -> str:
     """
-    读取代码文件并添加行号，格式化为适合LLM查询的形式
-    
+    Read a code file and add line numbers, formatted for LLM queries.
+
     Args:
-        file_path: 文件路径 (str 或 Path对象)
-        start_line: 起始行号 (1-indexed, 默认为1)
-        end_line: 结束行号 (1-indexed, None表示读取到文件末尾)
-        line_number_format: 行号格式，可选:
-            - "standard": "1: code" (默认，简洁清晰)
-            - "padded": "001: code" (对齐的行号，适合大文件)
-            - "markdown": "`1` code" (Markdown风格)
-            - "pipe": "1 | code" (管道分隔符)
-            - "bracket": "[1] code" (方括号)
-        include_empty_lines: 是否包含空行 (默认True)
-        encoding: 文件编码 (默认utf-8)
-    
+        file_path: File path (str or Path).
+        start_line: Start line number (1-indexed; default: 1).
+        end_line: End line number (1-indexed; None means read to EOF).
+        line_number_format: Line number format. Options:
+            - "standard": "1: code" (default, simple and clear)
+            - "padded": "001: code" (aligned line numbers; good for large files)
+            - "markdown": "`1` code" (Markdown style)
+            - "pipe": "1 | code" (pipe separator)
+            - "bracket": "[1] code" (brackets)
+        include_empty_lines: Whether to include empty lines (default: True).
+        encoding: File encoding (default: utf-8).
+
     Returns:
-        带行号的代码字符串
+        Code string with line numbers.
         
     Example:
         >>> content = read_code_file_with_line_numbers("example.py", start_line=10, end_line=20)
@@ -197,42 +197,42 @@ def read_code_file_with_line_numbers(
         11:     return "hello"
         
     Notes:
-        - 行号格式 "standard" 最适合LLM查询，因为格式简单，LLM容易识别和引用
-        - 对于超过1000行的文件，建议使用 "padded" 格式以保持对齐
-        - LLM可以轻松引用特定行，例如："在第15行..."
+        - The "standard" format is best for LLM queries because it is simple and easy to reference.
+        - For files over 1000 lines, consider using "padded" to keep alignment.
+        - LLMs can easily reference specific lines, e.g., "at line 15...".
     """
     from pathlib import Path
     
     file_path = Path(file_path)
     
-    # 读取文件内容
+    # Read file contents.
     try:
         with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
             lines = f.readlines()
     except Exception as e:
         return f"Error reading file: {e}"
     
-    # 确定行范围
+    # Determine line range.
     total_lines = len(lines)
-    start_idx = max(0, start_line - 1)  # 转换为0-indexed
+    start_idx = max(0, start_line - 1)  # Convert to 0-indexed.
     end_idx = min(total_lines, end_line) if end_line else total_lines
     
     if start_idx >= total_lines:
         return f"Error: start_line {start_line} exceeds file length {total_lines}"
     
-    # 获取行号格式化函数
+    # Get line number formatter.
     format_func = _get_line_number_formatter(line_number_format, end_idx)
     
-    # 构建带行号的内容
+    # Build content with line numbers.
     result_lines = []
     for i in range(start_idx, end_idx):
-        line = lines[i].rstrip('\n\r')  # 移除行尾换行符，保留其他空白
+        line = lines[i].rstrip('\n\r')  # Strip line endings; keep other whitespace.
         
-        # 根据选项决定是否包含空行
+        # Optionally skip empty lines.
         if not include_empty_lines and not line.strip():
             continue
         
-        line_number = i + 1  # 转换回1-indexed
+        line_number = i + 1  # Convert back to 1-indexed.
         formatted_line = format_func(line_number, line)
         result_lines.append(formatted_line)
     
@@ -247,23 +247,23 @@ def read_code_file_with_context(
     encoding: str = "utf-8"
 ) -> str:
     """
-    读取代码文件中指定行及其上下文，添加行号
-    
-    这对于向LLM展示特定代码位置的上下文特别有用。
-    
+    Read a target line and surrounding context from a code file, with line numbers.
+
+    This is especially useful when showing the surrounding context of a specific code location to an LLM.
+
     Args:
-        file_path: 文件路径 (str 或 Path对象)
-        target_line: 目标行号 (1-indexed)
-        context_lines: 目标行前后显示的行数 (默认5行)
-        line_number_format: 行号格式 (同 read_code_file_with_line_numbers)
-        encoding: 文件编码
-    
+        file_path: File path (str or Path).
+        target_line: Target line number (1-indexed).
+        context_lines: Number of lines to show before/after the target (default: 5).
+        line_number_format: Line number format (same as read_code_file_with_line_numbers).
+        encoding: File encoding.
+
     Returns:
-        带行号的代码字符串，包含目标行及其上下文
+        Code string with line numbers, including the target line and its context.
         
     Example:
         >>> content = read_code_file_with_context("example.py", target_line=42, context_lines=3)
-        >>> # 显示第39-45行，第42行是目标行
+        >>> # Shows lines 39-45; line 42 is the target.
     """
     start_line = max(1, target_line - context_lines)
     end_line = target_line + context_lines
@@ -285,27 +285,27 @@ def read_multiple_code_sections(
     encoding: str = "utf-8"
 ) -> str:
     """
-    读取代码文件的多个不连续部分，用分隔符连接
-    
-    适合向LLM展示代码的多个关键部分而不显示全部内容。
-    
+    Read multiple non-contiguous sections of a code file and join them with a separator.
+
+    Useful for showing an LLM several key parts of a file without including the entire content.
+
     Args:
-        file_path: 文件路径 (str 或 Path对象)
-        sections: 区间列表，每个区间为 (start_line, end_line) 元组
-                 例如: [(1, 10), (50, 60), (100, 110)]
-        line_number_format: 行号格式
-        separator: 区间之间的分隔符 (默认为 "...")
-        encoding: 文件编码
-    
+        file_path: File path (str or Path).
+        sections: List of ranges, each a (start_line, end_line) tuple.
+                 Example: [(1, 10), (50, 60), (100, 110)]
+        line_number_format: Line number format.
+        separator: Separator between sections (default: "...").
+        encoding: File encoding.
+
     Returns:
-        带行号的代码字符串，包含所有指定区间，用分隔符连接
+        Code string with line numbers, containing all requested sections joined by the separator.
         
     Example:
         >>> content = read_multiple_code_sections(
         ...     "example.py",
         ...     sections=[(1, 5), (20, 25), (50, 55)]
         ... )
-        >>> # 显示第1-5行，然后 "..."，然后20-25行，然后 "..."，然后50-55行
+        >>> # Shows lines 1-5, then "...", then 20-25, then "...", then 50-55.
     """
     from pathlib import Path
     

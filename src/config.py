@@ -10,13 +10,13 @@ from pathlib import Path
 
 def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
     """
-    从配置文件加载路径配置
-    
+    Load path configuration from a config file.
+
     Args:
-        config_path: 配置文件路径，如果未提供则使用默认路径
-        
+        config_path: Path to the config file; uses the default path if not provided.
+
     Returns:
-        包含路径配置的字典
+        A dict containing path configuration.
     """
     try:
         if config_path is None:
@@ -35,13 +35,13 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
                 'codeql_db_path': Path(paths.get('codeql_db_path', '~/vuln/codeql_dbs')).expanduser(),
             }
         else:
-            # 使用默认值
+            # Fall back to defaults
             pass
     except Exception as e:
-        # 如果加载失败，使用默认值
+        # Fall back to defaults if loading fails
         pass
     
-    # 默认值
+    # Defaults
     project_root = Path.home() / "vuln"
     return {
         'project_root': project_root,
