@@ -149,3 +149,8 @@ vuln-profiles*/
 docs/
 
 **/*.bak
+
+models/
+data/
+codeql_dbs/
+.codeql/

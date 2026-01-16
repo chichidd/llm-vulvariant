@@ -121,6 +121,8 @@ CODE_SNIPPET_PROMPT = """Please analyze the following code file and extract its 
 Begin your analysis now."""
 
 
+
+
 MODULE_ANALYSIS_SYSTEM_PROMPT = """You are a repository-structure analyst. Your task is to infer and report the repository’s module architecture, responsibilities, and boundaries using the provided high-level metadata plus targeted tool exploration.
 
 # Objective
