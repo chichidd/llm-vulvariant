@@ -201,10 +201,11 @@ analyzer_config:
 # =============================================================================
 module_analyzer_config:
   # 模块分析器类型
+  # - "skill": 基于 .claude/skills/ai-infra-module-modeler 的 taxonomy + LLM 语义判断
   # - "folder": 基于文件夹分割规则的分析器（默认，推荐用于大型仓库）
   # - "agent": 原有的 agent 方式分析器（适用于需要更灵活分析的场景）
   # - "hybrid": 先用 agent 分析器划分模块，再用 folder 分析器对每个模块进行更深入分析
-  analyzer_type: agent
+  analyzer_type: skill
   
   # 最大 LLM 调用次数（在单个分析 turn 内允许的最大 LLM 调用次数）
   # 两种分析器都使用此配置：
@@ -216,6 +217,27 @@ module_analyzer_config:
   
   # 读取文件内容的最大长度
   max_file_content_length: 10000
+
+  # Skill-based analyzer scanning limits
+  # - max_files: 扫描文件数上限
+  # - max_file_bytes: 单文件读取上限
+  # - min_file_score: 模块最小文件数阈值
+  # - max_key_functions: 模块关键函数数量上限
+  skill_max_files: 2000
+  skill_max_file_bytes: 200000
+  skill_min_file_score: 2
+  skill_max_key_functions: 12
+
+  # Skill LLM settings (optional)
+  # - provider/model: empty means use main LLM client settings
+  skill_llm_provider: ""
+  skill_llm_model: ""
+  skill_require_llm: true
+  skill_group_depth: 2
+  skill_group_sample_files: 12
+  skill_group_snippets: 2
+  skill_snippet_bytes: 800
+  skill_batch_size: 12
   
   # 是否跳过空文件夹
   skip_empty_folders: true
@@ -270,6 +292,14 @@ module_analyzer_config:
     
     # Documentation build
     - "docs/_build"
+    - "docs"
+    - "doc"
+    - "examples"
+    - "example"
+    - "benchmarks"
+    - "benchmark"
+    - "tests"
+    - "test"
     - "_site"
     - "site"
     

@@ -4,8 +4,9 @@
 
 LLM-VulVariant 利用大语言模型（LLM）、原生工具调用以及 CodeQL，将“已知漏洞画像”迁移到新版本或相似代码中，自动发现潜在的漏洞变种。系统围绕“画像生成→智能体推理→静态验证”三步构建，支持深度静态分析、模块级推理、以及可重复的 CLI 工作流。
 
-## 最近更新（2026-01-14）
+## 更新（2026-01-16）
 
+- 🧭 软件画像模块分析新增 **SkillModuleAnalyzer**：使用 `.claude/skills/ai-infra-module-modeler` 的 taxonomy + LLM 语义判断，替代原 module analyzer
 - 🌀 模块分析新增 **HybridModuleAnalyzer**：文件夹分割 + Agent 原生工具调用双轨并行，细粒度结果落盘 `module_tree.json`
 - 🔁 软件画像支持 **增量分析**：复用基线 commit 的文件摘要，基于 diff 只重新分析变更文件
 - 🧩 文件摘要可独立配置专用 LLM（`config/llm_config.yaml`），长文本自动截断
@@ -54,7 +55,7 @@ pip install -e .
 3) 生成软件画像（支持深度分析、增量分析）：
 
 ```bash
-python -m cli.software \
+software-profile \
   --repo-name NeMo \
   --llm-provider deepseek \
   --enable-deep-analysis \
@@ -90,13 +91,43 @@ python -m scanner.agentic_vuln_scanner \
 ## 软件画像流水线（`profiler/software`）
 
 1. **RepoInfoCollector**：遍历文件、识别语言/依赖、收集 README 与依赖文件；可生成文件级摘要（LLM，可配置独立模型）。
-2. **模块分析**（三选一，可配置 `analyzer_type`）：
+2. **模块分析**（可配置 `analyzer_type`）：
+   - `SkillModuleAnalyzer`：基于 `.claude/skills/ai-infra-module-modeler` 的 taxonomy + LLM 语义判断输出模块（AI infra 优先）。
    - `HybridModuleAnalyzer`：先做文件夹拆分，随后 agent 式深挖，细粒度结果写入 module_tree/fine_grained_results。
    - `FolderModuleAnalyzer`：按目录切分模块，保存树状结构 `module_tree.json`。
    - `ModuleAnalyzer`：纯 agent，原生工具 `list_folder` / `read_file` / `finalize`。
 3. **DeepAnalyzer（可选）**：调用 RepoAnalyzer 输出调用图、函数列表、依赖、入口点；在 `_enhance_modules_with_deep_analysis` 中为每个模块补充数据源/格式/处理操作、外部依赖、模块间调用关系，并提取项目级数据流模式。
 4. **增量分析**：基于基线 commit 比对 changed files，复用未变更文件摘要，只重新分析差异；diff 统计与 changed 文件写入 repo_info。
 5. **存储**：分阶段 checkpoint（repo_info/basic_info/modules/module_tree），最终结果落盘 `software_profile.json`；可多次运行复用缓存。
+
+## Skill-based 软件画像模块分析（AI infra）
+
+### 使用
+- 配置 `config/software_profile_rule.yaml`：`module_analyzer_config.analyzer_type: skill`（默认已设置）。
+- Claude Code 里可直接使用技能：`.claude/skills/software-profile-generator` 与 `.claude/skills/ai-infra-module-modeler`。
+- 运行软件画像 CLI（示例）：
+  ```bash
+  software-profile --repo-name llama_index --enable-deep-analysis
+  ```
+- Claude Code/Codex CLI 可用 wrapper：`python .claude/skills/software-profile-generator/scripts/run_profile.py --repo-name llama_index`
+- Skill analyzer 会调用 `.claude/skills/ai-infra-module-modeler/scripts/scan_repo.py`，并读取 `module_map.json` + `file_index.json`。
+- 输出模块字段包含：`name` / `category` / `description` / `paths` / `key_functions` / `dependencies`。
+
+### 测试（本地不跑，服务器上验证）
+- 在 `data/repos/<repo>` 上运行 CLI，检查 `repo-profiles/<repo>/<commit>/software_profile.json`。
+- 额外检查：
+  - `repo-profiles/<repo>/<commit>/checkpoints/skill_module_map.json`
+  - `repo-profiles/<repo>/<commit>/checkpoints/skill_file_index.json`
+  - `repo-profiles/<repo>/<commit>/checkpoints/skill_module_modeler/module_profile.json`
+- 确认 `paths` 覆盖主要代码（排除 `docs/` 等已配置目录）。
+
+### 调整
+- 调整 taxonomy：编辑 `.claude/skills/ai-infra-module-modeler/references/taxonomy.md`。
+- 调整扫描范围与分组：修改 `config/software_profile_rule.yaml` 中的
+  `skill_max_files` / `skill_max_file_bytes` / `skill_min_file_score` / `skill_group_depth` /
+  `skill_group_sample_files` / `skill_group_snippets` / `skill_snippet_bytes` / `skill_batch_size` /
+  `skill_llm_provider` / `skill_llm_model` / `skill_require_llm` / `excluded_folders`。
+- 若需要模块间依赖与关键函数，开启 `--enable-deep-analysis` 以注入调用图信息。
 
 ## 漏洞画像流水线（`profiler/vulnerability`）
 

@@ -21,7 +21,7 @@ from utils.path_utils import to_relative_path
 from .models import SoftwareProfile, ModuleInfo, ModuleTree, DataFlowPattern
 from .repo_collector import RepoInfoCollector
 from .basic_info_analyzer import BasicInfoAnalyzer
-from .module_analyzer import ModuleAnalyzer, FolderModuleAnalyzer, HybridModuleAnalyzer
+from .module_analyzer import ModuleAnalyzer, FolderModuleAnalyzer, HybridModuleAnalyzer, SkillModuleAnalyzer
 
 from .file_summarizer import FileSummarizer
 from .deep_analyzer import DeepAnalyzer
@@ -189,7 +189,26 @@ class SoftwareProfiler:
         self.folder_module_analyzer = None
         self.hybrid_module_analyzer = None
         
-        if analyzer_type == 'hybrid':
+        if analyzer_type == 'skill':
+            logger.info("Using skill-based module analyzer (AI infra taxonomy)")
+            self.module_analyzer = SkillModuleAnalyzer(
+                llm_client=self.llm_client,
+                excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,
+                code_extensions=self.module_analyzer_config.get('code_extensions') or None,
+                max_files=self.module_analyzer_config.get('skill_max_files', 2000),
+                max_file_bytes=self.module_analyzer_config.get('skill_max_file_bytes', 200000),
+                min_file_score=self.module_analyzer_config.get('skill_min_file_score', 2),
+                max_key_functions=self.module_analyzer_config.get('skill_max_key_functions', 12),
+                llm_provider=self.module_analyzer_config.get('skill_llm_provider') or None,
+                llm_model=self.module_analyzer_config.get('skill_llm_model') or None,
+                group_depth=self.module_analyzer_config.get('skill_group_depth', 2),
+                group_sample_files=self.module_analyzer_config.get('skill_group_sample_files', 12),
+                group_snippets=self.module_analyzer_config.get('skill_group_snippets', 2),
+                snippet_bytes=self.module_analyzer_config.get('skill_snippet_bytes', 800),
+                batch_size=self.module_analyzer_config.get('skill_batch_size', 12),
+                require_llm=self.module_analyzer_config.get('skill_require_llm', False),
+            )
+        elif analyzer_type == 'hybrid':
             logger.info("Using hybrid module analyzer (agent + folder-based)")
             self.hybrid_module_analyzer = HybridModuleAnalyzer(
                 llm_client=self.llm_client,
@@ -652,7 +671,7 @@ class SoftwareProfiler:
         # 构建模块名到文件的映射
         module_name_to_files = {}
         for module in base_modules:
-            module_paths = module.get('paths', [])
+            module_paths = module.get('paths') or module.get('files', [])
             module_files = []
             for path in module_paths:
                 path = path.replace('\\', '/').rstrip('/')

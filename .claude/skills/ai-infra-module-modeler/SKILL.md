@@ -1,6 +1,6 @@
 ---
 name: ai-infra-module-modeler
-description: Classify an AI/LLM infrastructure repository into a hierarchical module taxonomy and generate a module map + skeleton, using evidence from repo structure, configs, and key files.
+description: Classify an AI/LLM infrastructure repository into a hierarchical module taxonomy and generate a module map + skeleton using LLM semantic analysis of repo structure and key files.
 ---
 
 # AI Infra Module Modeler
@@ -16,7 +16,9 @@ Typical inputs:
 - Optional: a target output directory.
 
 ## Outputs
-- `module_map.json`: **coarse** module labels with evidence (scores + paths + keyword/dep signals).
+- `module_map.json`: **coarse** module labels with evidence (scores + paths + counts).
+- `file_index.json`: file → module assignment (coarse.fine labels).
+- `module_profile.json`: module list in software-profile schema (name/category/description/paths).
 - `MODULES.md`: human-readable summary.
 - (Optional) `module_skeleton/`: folders + READMEs aligned to detected modules (with fine-grained stubs if enabled).
 
@@ -27,12 +29,26 @@ Typical inputs:
 
 ## Procedure (recommended)
 0. **Check Python environment**, make sure in the conda environment `dsocr`.
-1. **Run the scanner** to produce evidence-driven module candidates:
+1. **Run the scanner** to produce LLM-driven module candidates:
    ```bash
    python .claude/skills/ai-infra-module-modeler/scripts/scan_repo.py \
      --repo data/repos/<repo-name> \
-     --out analysis/<repo-name>
+     --out analysis/<repo-name> \
+     --max-files 2000 \
+     --max-bytes 200000 \
+     --min-file-score 2 \
+     --llm-provider deepseek \
+     --llm-model ""
    ```
+   - Use `--require-llm` to fail fast if the LLM is unavailable or returns invalid JSON.
+   - Adjust grouping with `--group-depth`, `--group-sample-files`, `--group-snippets`, `--snippet-bytes`, `--batch-size`.
+   - Optional: pass a JSON list of files to map (e.g., from software profiler repo_info):
+     ```bash
+     python .claude/skills/ai-infra-module-modeler/scripts/scan_repo.py \
+       --repo data/repos/<repo-name> \
+       --out analysis/<repo-name> \
+       --file-list analysis/<repo-name>/file_list.json
+     ```
 2. **Inspect the summary** in `analysis/<repo-name>/MODULES.md`.
 3. **Validate borderline modules** using the checklist files under `references/checklists/`.
 4. **(Optional) Scaffold** a module skeleton (non-destructive by default):
@@ -49,7 +65,7 @@ python tools/batch_scan_repos.py --repos data/repos --out analysis/repos
 ```
 
 ## Notes / guardrails
+- The scanner relies on LLM semantic classification, not keyword rules.
 - Prefer evidence from `README*`, `pyproject.toml` / `requirements*`, `Dockerfile`, `helm/`, `k8s/`, `examples/`, and top-level packages.
 - If the repo is monorepo-style, run the scanner on the specific subdir of interest.
 - Keep reasoning reproducible: include paths/snippets in the evidence list rather than intuition-only assignments.
-

@@ -56,7 +56,7 @@ class ModuleInfo:
     calls_modules: List[str] = field(default_factory=list)            # 调用哪些模块
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "name": self.name,
             "category": self.category,
             "description": self.description,
@@ -72,6 +72,10 @@ class ModuleInfo:
             "called_by_modules": self.called_by_modules,
             "calls_modules": self.calls_modules,
         }
+        # Keep compatibility with module analyzer output schema.
+        data["paths"] = self.files
+        data["dependencies"] = self.internal_dependencies
+        return data
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ModuleInfo":
@@ -79,7 +83,7 @@ class ModuleInfo:
             name=data.get("name", ""),
             category=data.get("category", ""),
             description=data.get("description", ""),
-            files=data.get("files", []),
+            files=data.get("files", data.get("paths", [])),
             public_apis=data.get("public_apis", []),
             entry_points=data.get("entry_points", []),
             key_functions=data.get("key_functions", []),
@@ -87,7 +91,7 @@ class ModuleInfo:
             data_formats=data.get("data_formats", []),
             processing_operations=data.get("processing_operations", []),
             external_dependencies=data.get("external_dependencies", []),
-            internal_dependencies=data.get("internal_dependencies", []),
+            internal_dependencies=data.get("internal_dependencies", data.get("dependencies", [])),
             called_by_modules=data.get("called_by_modules", []),
             calls_modules=data.get("calls_modules", []),
         )
@@ -159,7 +163,10 @@ class SoftwareProfile:
         
 
         if self.modules:
-            result["modules"] = [m.to_dict() for m in self.modules]
+            if hasattr(self.modules[0], "to_dict"):
+                result["modules"] = [m.to_dict() for m in self.modules]
+            else:
+                result["modules"] = self.modules
         
         if self.data_flow_patterns:
             result["data_flow_patterns"] = [p.to_dict() for p in self.data_flow_patterns]
