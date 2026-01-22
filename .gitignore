@@ -154,3 +154,4 @@ models/
 data/
 codeql_dbs/
 .codeql/
+notebooks/

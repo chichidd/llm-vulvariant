@@ -223,9 +223,9 @@ module_analyzer_config:
   # - max_file_bytes: 单文件读取上限
   # - min_file_score: 模块最小文件数阈值
   # - max_key_functions: 模块关键函数数量上限
-  skill_max_files: 2000
+  skill_max_files: 20000
   skill_max_file_bytes: 200000
-  skill_min_file_score: 2
+  skill_min_file_score: 1
   skill_max_key_functions: 12
 
   # Skill LLM settings (optional)
@@ -233,10 +233,10 @@ module_analyzer_config:
   skill_llm_provider: ""
   skill_llm_model: ""
   skill_require_llm: true
-  skill_group_depth: 2
-  skill_group_sample_files: 12
-  skill_group_snippets: 2
-  skill_snippet_bytes: 800
+  skill_group_depth: 6
+  skill_group_sample_files: 20
+  skill_group_snippets: 4
+  skill_snippet_bytes: 8000
   skill_batch_size: 12
   
   # 是否跳过空文件夹

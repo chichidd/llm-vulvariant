@@ -34,14 +34,15 @@ Typical inputs:
    python .claude/skills/ai-infra-module-modeler/scripts/scan_repo.py \
      --repo data/repos/<repo-name> \
      --out analysis/<repo-name> \
-     --max-files 2000 \
+     --max-files 20000 \
      --max-bytes 200000 \
+     --group_depth 1000 \
      --min-file-score 2 \
      --llm-provider deepseek \
-     --llm-model ""
+     --llm-model "deepseek-reasoner"
    ```
    - Use `--require-llm` to fail fast if the LLM is unavailable or returns invalid JSON.
-   - Adjust grouping with `--group-depth`, `--group-sample-files`, `--group-snippets`, `--snippet-bytes`, `--batch-size`.
+   - Adjust grouping with `--group-depth`, `--group-sample-files`, `--group-snippets`, `--snippet-bytes`, `--batch-size`. Make sure you can cover as many groups as possible. I want the module classification to be as assurate as possible.
    - Optional: pass a JSON list of files to map (e.g., from software profiler repo_info):
      ```bash
      python .claude/skills/ai-infra-module-modeler/scripts/scan_repo.py \
@@ -50,7 +51,7 @@ Typical inputs:
        --file-list analysis/<repo-name>/file_list.json
      ```
 2. **Inspect the summary** in `analysis/<repo-name>/MODULES.md`.
-3. **Validate borderline modules** using the checklist files under `references/checklists/`.
+3. **Validate modules** using the checklist files under `references/checklists/`. Review every output of the module assignment. If you found any insistency betweeen assigned module and the file, read relevant files and correct them. You need to do this check for several arround to make sure they are correct.
 4. **(Optional) Scaffold** a module skeleton (non-destructive by default):
    ```bash
    python .claude/skills/ai-infra-module-modeler/scripts/build_module_skeleton.py \
