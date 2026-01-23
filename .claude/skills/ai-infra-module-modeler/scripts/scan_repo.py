@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import textwrap
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -54,9 +55,34 @@ def _ensure_llm_import() -> bool:
 
 # Directories commonly considered non-source or vendor content.
 DEFAULT_EXCLUDE_DIRS = {
-    ".git", ".hg", ".svn", ".tox", ".venv", "venv", "__pycache__", ".mypy_cache",
-    "node_modules", "dist", "build", "target", "out", "bazel-bin", "bazel-out",
-    "bazel-testlogs", "bazel-workspace", ".idea", ".vscode", ".pytest_cache",
+    # Version control
+    ".git", ".github", ".hg", ".svn", ".gitignore",
+    # Python environments and caches
+    ".venv", "venv", "env", ".env", "virtualenv", "__pycache__", ".mypy_cache", 
+    ".pytest_cache", ".tox", ".eggs", "*.egg-info", ".egg", "__pypackages__",
+    # Build outputs and distributions
+    "dist", "build", "target", "out", "output", "outputs", "_build",
+    "wheels", "*.dist-info", "site-packages",
+    # Node/JS
+    "node_modules", "bower_components", ".npm",
+    # Bazel
+    "bazel-bin", "bazel-out", "bazel-testlogs", "bazel-workspace",
+    # IDEs and editors
+    ".idea", ".vscode", ".vs", ".eclipse", ".settings", ".project",
+    # Testing and coverage
+    "test", "tests", "testing", ".coverage", "htmlcov", "coverage",
+    # Documentation
+    "doc", "docs", "documentation", "_docs", "site",
+    # Logging and experiments
+    "logs", "log", "wandb", "mlruns", ".tensorboard", "runs", "results",
+    # CI/CD
+    ".circleci", ".gitlab", ".jenkins", ".github/workflows",
+    # Temporary files
+    "tmp", "temp", ".tmp", ".temp", "cache", ".cache",
+    # Language-specific
+    ".cargo", ".gradle", ".m2", ".ivy2",
+    # macOS
+    ".DS_Store",
 }
 
 DEFAULT_MAX_FILES = 2000
@@ -66,7 +92,6 @@ DEFAULT_GROUP_SAMPLE_FILES = 12
 DEFAULT_GROUP_SNIPPETS = 2
 DEFAULT_SNIPPET_BYTES = 800
 DEFAULT_BATCH_SIZE = 12
-DEFAULT_MIN_FILE_SCORE = 2
 
 TEXT_EXTS = {
     ".py", ".pyi", ".md", ".rst", ".txt", ".toml", ".ini", ".cfg", ".json", ".yaml", ".yml",
@@ -82,13 +107,6 @@ SPECIAL_FILENAMES = {
     "yarn.lock", "go.mod", "Cargo.toml", "Cargo.lock", "SECURITY.md", "README", "README.md",
 }
 
-
-def flatten_taxonomy(tax: dict) -> List[str]:
-    """Return stable coarse module keys from taxonomy."""
-    return list(tax.keys())
-
-
-COARSE_MODULES = flatten_taxonomy(AI_INFRA_TAXONOMY)
 
 
 @dataclass
@@ -294,14 +312,6 @@ def _split_module_name(module_name: str) -> Tuple[str, str]:
     return module_name, module_name
 
 
-def _default_module_name() -> str:
-    if not AI_INFRA_TAXONOMY:
-        return "platform_systems"
-    coarse = next(iter(AI_INFRA_TAXONOMY.keys()))
-    fine_map = AI_INFRA_TAXONOMY.get(coarse) or {}
-    fine = next(iter(fine_map.keys()), "")
-    return _module_name(coarse, fine)
-
 
 def _module_name(coarse: str, fine: str) -> str:
     if not fine or fine == coarse:
@@ -352,13 +362,76 @@ Groups to classify (JSON):
     return textwrap.dedent(prompt)
 
 
+def _process_batch_worker(
+    batch_index: int,
+    batch: List[GroupSummary],
+    taxonomy_ref: str,
+    llm_config: Any,
+    require_llm: bool,
+) -> Tuple[int, Dict[str, str]]:
+    """Worker function to process a single batch in a separate process."""
+    # Import here to avoid serialization issues
+    if not _ensure_llm_import():
+        if require_llm:
+            raise RuntimeError("LLM client not available in worker")
+        return batch_index, {}
+    
+    # Create LLM client in this process
+    llm_client = create_llm_client(llm_config) if llm_config else None
+    if not llm_client:
+        if require_llm:
+            raise RuntimeError("Failed to create LLM client in worker")
+        return batch_index, {}
+    
+    assignments: Dict[str, str] = {}
+    prompt = _prompt_for_groups(batch, taxonomy_ref)
+    
+    try:
+        response = llm_client.chat([
+            {"role": "system", "content": "You are an AI infra architect. Return JSON only."},
+            {"role": "user", "content": prompt},
+        ])
+        content = _response_content(response)
+        payload = _parse_json_payload(content)
+        
+        if payload:
+            items = payload.get("assignments", [])
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                group = item.get("group")
+                module = item.get("module")
+                if group:
+                    assignments[str(group)] = str(module or "")
+    except Exception as e:
+        print(f"Error processing batch {batch_index}: {e}")
+        if require_llm:
+            raise
+    
+    return batch_index, assignments
+
+
 def classify_groups_with_llm(
     group_summaries: List[GroupSummary],
     llm_client: Any,
     batch_size: int,
     taxonomy_ref: str,
     require_llm: bool,
+    max_workers: int = 4,
 ) -> Dict[str, str]:
+    """Classify groups using LLM with multiprocessing.
+    
+    Args:
+        group_summaries: List of group summaries to classify
+        llm_client: LLM client (used only to get config for workers)
+        batch_size: Number of groups per batch
+        taxonomy_ref: Taxonomy reference string
+        require_llm: Whether to raise error if LLM unavailable
+        max_workers: Maximum number of parallel processes
+    
+    Returns:
+        Dictionary mapping group names to module assignments
+    """
     if not group_summaries:
         return {}
     if not llm_client:
@@ -366,28 +439,46 @@ def classify_groups_with_llm(
             raise RuntimeError("LLM client not available")
         return {}
 
-    assignments: Dict[str, str] = {}
+    # Get LLM config for workers
+    llm_config = getattr(llm_client, 'config', None)
+    
+    # Split into batches
+    batches: List[Tuple[int, List[GroupSummary]]] = []
     for i in range(0, len(group_summaries), batch_size):
         batch = group_summaries[i:i + batch_size]
-        prompt = _prompt_for_groups(batch, taxonomy_ref)
-        response = llm_client.chat([
-            {"role": "system", "content": "You are an AI infra architect. Return JSON only."},
-            {"role": "user", "content": prompt},
-        ])
-        content = _response_content(response)
-        payload = _parse_json_payload(content)
-        if not payload:
-            if require_llm:
-                raise RuntimeError("Failed to parse LLM response JSON")
-            continue
-        items = payload.get("assignments", [])
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            group = item.get("group")
-            module = item.get("module")
-            if group:
-                assignments[str(group)] = str(module or "")
+        batches.append((i, batch))
+    
+    print(f"Processing {len(batches)} batches with {max_workers} workers...")
+    
+    assignments: Dict[str, str] = {}
+    
+    # Process batches in parallel
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all batch jobs
+        futures = {}
+        for batch_idx, batch in batches:
+            future = executor.submit(
+                _process_batch_worker,
+                batch_idx,
+                batch,
+                taxonomy_ref,
+                llm_config,
+                require_llm,
+            )
+            futures[future] = batch_idx
+        
+        # Collect results as they complete
+        for future in as_completed(futures):
+            batch_idx = futures[future]
+            try:
+                returned_idx, batch_assignments = future.result()
+                print(f"Completed batch {returned_idx} (groups {returned_idx}-{returned_idx + batch_size})")
+                assignments.update(batch_assignments)
+            except Exception as e:
+                print(f"Error in batch {batch_idx}: {e}")
+                if require_llm:
+                    raise
+    
     return assignments
 
 
@@ -404,9 +495,6 @@ def build_module_profile(file_index: Dict[str, str]) -> List[Dict[str, Any]]:
             "category": coarse,
             "description": _describe_module(module_name, files),
             "paths": sorted(set(files)),
-            "key_functions": [],
-            "dependencies": [],
-            "files": sorted(set(files)),
         }
         modules.append(module)
     return modules
@@ -471,7 +559,6 @@ def scan(
     exclude_dirs: set[str],
     max_files: int,
     max_bytes: int,
-    min_file_score: int,
     group_depth: int,
     group_sample_files: int,
     group_snippets: int,
@@ -480,6 +567,7 @@ def scan(
     llm_client: Any,
     require_llm: bool,
     file_list: Optional[List[str]] = None,
+    max_workers: int = 4,
 ) -> Tuple[Signals, Dict[str, Evidence], Dict[str, str]]:
     scan_files, all_files, total_files = iter_files(repo, exclude_dirs, max_files)
     if file_list:
@@ -506,13 +594,14 @@ def scan(
         batch_size=batch_size,
         taxonomy_ref=taxonomy_ref,
         require_llm=require_llm,
+        max_workers=max_workers,
     )
 
-    default_module = _default_module_name()
+
     file_index: Dict[str, str] = {}
     for group, files in group_to_files.items():
-        module_name = assignments.get(group, default_module)
-        module_name = _normalize_module_name(module_name, default_module)
+        module_name = assignments.get(group, "UNKNOWN")
+        module_name = _normalize_module_name(module_name, "UNKNOWN")
         for rel in files:
             file_index[rel] = module_name
 
@@ -589,12 +678,13 @@ def main() -> int:
     ap.add_argument("--exclude", nargs="*", default=[], help="Extra directory names to exclude")
     ap.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES, help="Maximum files to scan")
     ap.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES, help="Maximum bytes to read per file")
-    ap.add_argument("--min-file-score", type=int, default=DEFAULT_MIN_FILE_SCORE, help="Minimum file count to keep a module")
     ap.add_argument("--group-depth", type=int, default=DEFAULT_GROUP_DEPTH, help="Directory depth for grouping files")
     ap.add_argument("--group-sample-files", type=int, default=DEFAULT_GROUP_SAMPLE_FILES, help="Sample paths per group")
     ap.add_argument("--group-snippets", type=int, default=DEFAULT_GROUP_SNIPPETS, help="Snippets per group")
     ap.add_argument("--snippet-bytes", type=int, default=DEFAULT_SNIPPET_BYTES, help="Max bytes per snippet")
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Groups per LLM call")
+    ap.add_argument("--max-workers", type=int, default=4, help="Max parallel workers for LLM calls")
+    ap.add_argument("--min-file-score", type=int, default=1, help="Minimum file score for module inclusion")
     ap.add_argument("--llm-provider", default="deepseek", help="LLM provider (openai, deepseek, lab, mock)")
     ap.add_argument("--llm-model", default="", help="LLM model name (optional)")
     ap.add_argument("--require-llm", action="store_true", help="Fail if LLM is unavailable or returns invalid JSON")
@@ -633,7 +723,6 @@ def main() -> int:
         exclude_dirs,
         max_files=args.max_files,
         max_bytes=args.max_bytes,
-        min_file_score=args.min_file_score,
         group_depth=args.group_depth,
         group_sample_files=args.group_sample_files,
         group_snippets=args.group_snippets,
@@ -642,6 +731,7 @@ def main() -> int:
         llm_client=llm_client,
         require_llm=args.require_llm,
         file_list=file_list,
+        max_workers=args.max_workers,
     )
     write_outputs(out_dir, signals, evidences, file_index, min_file_score=args.min_file_score)
     print(f"Wrote: {out_dir / 'module_map.json'}")

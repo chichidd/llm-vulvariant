@@ -49,6 +49,7 @@ Each coarse category has fine-grained subcategories (e.g., `training_optimizatio
 - `bazel-bin`, `bazel-out`, `bazel-testlogs`, `bazel-workspace`, etc.
 - setting folder, `.idea`, `.vscode`, `.pytest_cache`, etc.
 - testing-related, like `test`
+- doc or manual-related, like `doc`
 - any other folder that you decide not related to the main code of the repository
 
 **Output:** List of relative file paths from repository root
@@ -133,7 +134,7 @@ Groups to classify (JSON):
 
 ### Step 6: Validate Results
 
-Read the generated `module_profile.json` and **Use checklists in `references/checklists/` to verify:**
+1. Read the generated `module_profile.json` and **Use checklists in `references/checklists/` to verify:**
 - Each module has appropriate file types
 - Module boundaries make semantic sense
 - No misclassifications
@@ -144,6 +145,7 @@ Read the generated `module_profile.json` and **Use checklists in `references/che
 3. Manually correct `file_index.json` if needed
 4. Re-generate `module_profile.json` from corrected index
 
+2. Verify that no code file is missed during analysis. If there is missing code files, repeat the above procedures.
 
 ## References
 - **Taxonomy**: [references/taxonomy.md](references/taxonomy.md) - Full 13-category hierarchy

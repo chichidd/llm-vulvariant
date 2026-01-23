@@ -155,10 +155,9 @@ class AgenticToolkit:
                         "type": "object",
                         "properties": {
                             "path": {"type": "string", "description": "Relative path to the file or folder to analyze."},
-                            "patterns": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Optional: explicit list of patterns to search for. If omitted, a default set of dangerous patterns is used.",
+                            "pattern": {
+                                "type": "string",
+                                "description": "Optional: explicit pattern to search for. If omitted, a default set of dangerous patterns is used.",
                             },
                         },
                         "required": ["path"],
@@ -390,7 +389,7 @@ class AgenticToolkit:
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
 
-    def _find_dangerous_patterns(self, path: str, patterns: List[str] = None) -> ToolResult:
+    def _find_dangerous_patterns(self, path: str, pattern: str = None) -> ToolResult:
         default_patterns = [
             r"subprocess\.(run|call|Popen|check_output|check_call)",
             r"os\.(system|popen|spawn|exec)",
@@ -408,7 +407,7 @@ class AgenticToolkit:
             r"cffi\.",
             r"multiprocessing\.(Pool|Process)",
         ]
-        search_patterns = patterns or default_patterns
+        search_patterns = [pattern] if pattern else default_patterns
         full_path = self.repo_path / path
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"Path not found: {path}")

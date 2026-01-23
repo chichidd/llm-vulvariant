@@ -137,7 +137,7 @@ class LLMConfig:
         if self.provider and not self.base_url:
             if self.provider == "lab":
                 # LAB LLM API
-                self.api_key = os.getenv("HKU_LLM_API_KEY")
+                self.api_key = os.getenv("LAB_LLM_API_KEY")
                 self.base_url = "https://hkucvm.dynv6.net/v1"
                 self.model = "DeepSeek-V3.2"
             elif self.provider == "deepseek":

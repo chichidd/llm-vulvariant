@@ -76,12 +76,6 @@ AI_INFRA_TAXONOMY: Dict[str, Any] = {
         "perf_eval": {},
         "regression_tests": {},
     },
-    "safety_security": {
-        "guardrails_policy": {},
-        "sandbox_permissioning": {},
-        "supply_chain": {},
-        "hardening_guidance": {},
-    },
     "observability_llmops": {
         "experiment_tracking": {},
         "model_registry": {},
@@ -113,3 +107,8 @@ def taxonomy_to_markdown(taxonomy: Dict[str, Any] | None = None) -> str:
         _render_node(k, v, 0, lines)
     lines.append("")
     return "\n".join(lines)
+
+if __name__ == "__main__":
+    # Print the taxonomy as markdown
+    md = taxonomy_to_markdown()
+    print(md)

@@ -12,7 +12,7 @@ set -euo pipefail
 # - Repo name A is the folder name under data/repos (first level only).
 # - You can pass any extra args; they will be forwarded to the command.
 
-ROOT_DIR="${ROOT_DIR:-data/repos}"
+ROOT_DIR="${ROOT_DIR:-../data/repos}"
 
 LLM_PROVIDER=""   # optional; if empty, don't pass it (tool default applies)
 LLM_NAME=""       # optional; if empty, don't pass it (tool default applies)
@@ -113,6 +113,13 @@ for repo_dir in "$ROOT_DIR"/*; do
   # Only first-level git repos
   if [[ -d "$repo_dir/.git" ]] || git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     repo_name="$(basename "$repo_dir")"
+    
+    # Skip if already completed (check for output file)
+    if [[ -n "$OUTPUT_DIR" ]] && [[ -f "$OUTPUT_DIR/${repo_name}/software_profile.json" ]]; then
+      echo "=== Skipping (already completed): $repo_name ==="
+      continue
+    fi
+    
     echo "=== Running for repo: $repo_name ==="
     echo "Repo path: $repo_dir"
 
