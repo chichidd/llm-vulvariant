@@ -104,8 +104,8 @@ def run_agent_analysis(
                     if storage_manager and conversation_name and path_parts:
                         _save_conversation_final(storage_manager, conversation_name, messages, llm_call_count, result, path_parts)
                     return True, result, llm_call_count, messages
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Failed to parse JSON from content: {e}")
             logger.debug(f"No tool calls in response, analysis may be incomplete (call {llm_call_count})")
             return False, {}, llm_call_count, messages
         

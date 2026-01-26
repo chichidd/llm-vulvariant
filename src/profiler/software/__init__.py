@@ -6,8 +6,7 @@ Architecture:
 - prompts.py: LLM prompt templates
 - repo_collector.py: Repository information collection
 - basic_info_analyzer.py: Basic information analysis
-- module_analyzer.py: Module structure analysis (agent-based)
-- folder_module_analyzer.py: Folder-splitting module analyzer (recommended default)
+- module_analyzer.py: Module structure analysis (agent-based or skill-based)
 - file_summarizer.py: File summary generation
 - deep_analyzer.py: Deep static analysis
 """
@@ -23,7 +22,7 @@ from .models import (
 from .analyzer import SoftwareProfiler
 from .repo_collector import RepoInfoCollector
 from .basic_info_analyzer import BasicInfoAnalyzer
-from .module_analyzer import ModuleAnalyzer, FolderModuleAnalyzer
+from .module_analyzer import ModuleAnalyzer
 from .file_summarizer import FileSummarizer
 from .deep_analyzer import DeepAnalyzer
 
@@ -42,7 +41,6 @@ __all__ = [
     "RepoInfoCollector",
     "BasicInfoAnalyzer",
     "ModuleAnalyzer",
-    "FolderModuleAnalyzer",
     "FileSummarizer",
     "DeepAnalyzer",
 ]

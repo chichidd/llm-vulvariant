@@ -487,8 +487,8 @@ class RepoAnalyzer:
                 # Add import location
                 loc = CodeLocation(file=file, line=line_num, code=line)
                 self._dependencies[module].import_locations.append(loc)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to analyze imports in {file}: {e}")
     
     def _detect_entry_points(self):
         """Detect entry point functions."""
@@ -872,8 +872,8 @@ class RepoAnalyzer:
                 for i, l in enumerate(f, 1):
                     if i == line:
                         return l.strip()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to read line {line} from {file}: {e}")
         return ""
     
     def _find_functions_in_file(self, file: str, line: int) -> List[FunctionInfo]:

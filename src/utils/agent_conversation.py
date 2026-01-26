@@ -40,12 +40,12 @@ def make_serializable(obj: Any):
         try:
             return obj.model_dump()
         except Exception:  # pylint: disable=broad-except
-            pass
+            pass  # Try next method
     if hasattr(obj, "dict") and callable(getattr(obj, "dict")):
         try:
             return make_serializable(obj.dict())
         except Exception:  # pylint: disable=broad-except
-            pass
+            pass  # Try next method
     try:
         return str(obj)
     except Exception:  # pylint: disable=broad-except

@@ -181,13 +181,8 @@ class EmbeddingRetriever:
 			)
 			self._backend = "sentence-transformers"
 			return
-		except Exception:
-			pass
-
-		# Backend 2: transformers + torch
-		try:
-			import torch  # type: ignore
-			from transformers import AutoModel, AutoTokenizer  # type: ignore
+		except Exception as e:
+			logger.debug(f"Failed to load sentence-transformers model: {e}")
 
 			device = self.config.device
 			if device is None:

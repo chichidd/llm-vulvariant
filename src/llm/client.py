@@ -49,7 +49,8 @@ def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, A
             
             return config
     except Exception as e:
-        pass
+        import logging
+        logging.debug(f"Failed to load LLM config: {e}")
     
     # Defaults
     return {
@@ -323,12 +324,12 @@ class BaseLLMClient(ABC):
         Returns:
             Response content string (or a dict containing tool_calls).
         """
-        pass
+        raise NotImplementedError("Subclasses must implement chat method")
     
     @abstractmethod
     def complete(self, prompt: str, **kwargs) -> str:
         """Send a completion request."""
-        pass
+        raise NotImplementedError("Subclasses must implement complete method")
     
 
 

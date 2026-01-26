@@ -13,7 +13,6 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import _path_config
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,14 +26,37 @@ class SkillModuleAnalyzer:
         llm_client: Any = None,
         excluded_folders: Optional[List[str]] = None,
         code_extensions: Optional[List[str]] = None,
+        max_files: int = 2000,
+        max_file_bytes: int = 200_000,
+        min_file_score: int = 2,
         max_key_functions: int = 12,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        group_depth: int = 2,
+        group_sample_files: int = 12,
+        group_snippets: int = 2,
+        snippet_bytes: int = 800,
+        batch_size: int = 12,
+        require_llm: bool = False,
     ):
         self.llm_client = llm_client
         self.excluded_folders = excluded_folders or []
         self.code_extensions = set(ext.lower() for ext in (code_extensions or []))
+        self.max_files = max_files
+        self.max_file_bytes = max_file_bytes
+        self.min_file_score = min_file_score
         self.max_key_functions = max_key_functions
+        self.llm_provider = llm_provider or getattr(getattr(llm_client, "config", None), "provider", "")
+        self.llm_model = llm_model or getattr(getattr(llm_client, "config", None), "model", "")
+        self.group_depth = group_depth
+        self.group_sample_files = group_sample_files
+        self.group_snippets = group_snippets
+        self.snippet_bytes = snippet_bytes
+        self.batch_size = batch_size
+        self.require_llm = require_llm
 
         self.skill_root = self._resolve_skill_root()
+        self.scan_script = self._resolve_scan_script()
         self.taxonomy = self._load_taxonomy()
 
     def analyze(
@@ -46,12 +68,12 @@ class SkillModuleAnalyzer:
         version: Optional[str] = None,
     ) -> Dict[str, Any]:
         repo_path = Path(repo_path).resolve()
-        if not self.taxonomy:
-            logger.warning("Taxonomy not available; returning empty module list.")
+        if not self.scan_script or not self.taxonomy:
+            logger.warning("Skill assets not available; returning empty module list.")
             return {"modules": [], "llm_calls": 0}
 
         output_dir = self._resolve_output_dir(storage_manager, repo_name, version)
-        if not self._run_claude_analysis(repo_path, output_dir, repo_name):
+        if not self._run_scan(repo_path, output_dir, repo_info):
             return {"modules": [], "llm_calls": 0}
 
         module_map = self._load_json(output_dir / "module_map.json") or {}
@@ -85,9 +107,18 @@ class SkillModuleAnalyzer:
         return result
 
     def _resolve_skill_root(self) -> Optional[Path]:
-
-        skill_root = _path_config['skill_path'] / "ai-infra-module-modeler"
+        try:
+            project_root = Path(__file__).resolve().parents[4]
+        except IndexError:
+            return None
+        skill_root = project_root / ".claude" / "skills" / "ai-infra-module-modeler"
         return skill_root if skill_root.exists() else None
+
+    def _resolve_scan_script(self) -> Optional[Path]:
+        if not self.skill_root:
+            return None
+        script = self.skill_root / "scripts" / "scan_repo.py"
+        return script if script.exists() else None
 
     def _load_taxonomy(self) -> Dict[str, Any]:
         if not self.skill_root:
@@ -119,35 +150,58 @@ class SkillModuleAnalyzer:
                 return out_dir
         return Path(tempfile.mkdtemp(prefix="skill_module_modeler_"))
 
-    def _run_claude_analysis(self, repo_path: Path, output_dir: Path, repo_name: Optional[str]) -> bool:
-        """Run Claude CLI to analyze repository module structure."""
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        prompt = (
-            f'Use the `ai-infra-module-modeler` skill to analyze the module structure of '
-            f'{repo_path} and write outputs to the folder {output_dir.resolve()}'
-        )
-        if repo_name:
-            logger.info(f"Running Claude analysis for {repo_name} with prompt: {prompt}")
-        else:
-            logger.info(f"Running Claude analysis with prompt: {prompt}")
-        cmd = ["claude", "-p", prompt]
-        
+    def _run_scan(self, repo_path: Path, output_dir: Path, repo_info: Dict[str, Any]) -> bool:
+        if not self.scan_script:
+            return False
+
+        file_list_path = None
+        file_list = repo_info.get("files", [])
+        if file_list:
+            file_list_path = output_dir / "file_list.json"
+            file_list_path.write_text(json.dumps(file_list, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        cmd = [
+            sys.executable,
+            str(self.scan_script),
+            "--repo",
+            str(repo_path),
+            "--out",
+            str(output_dir),
+            "--max-files",
+            str(self.max_files),
+            "--max-bytes",
+            str(self.max_file_bytes),
+            "--min-file-score",
+            str(self.min_file_score),
+            "--group-depth",
+            str(self.group_depth),
+            "--group-sample-files",
+            str(self.group_sample_files),
+            "--group-snippets",
+            str(self.group_snippets),
+            "--snippet-bytes",
+            str(self.snippet_bytes),
+            "--batch-size",
+            str(self.batch_size),
+        ]
+        if self.llm_provider:
+            cmd.extend(["--llm-provider", str(self.llm_provider)])
+        if self.llm_model:
+            cmd.extend(["--llm-model", str(self.llm_model)])
+        if self.require_llm:
+            cmd.append("--require-llm")
+        if file_list_path:
+            cmd.extend(["--file-list", str(file_list_path)])
+        if self.excluded_folders:
+            cmd.append("--exclude")
+            cmd.extend(self.excluded_folders)
+
         try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=str(_path_config['repo_root']),
-            )
-            logger.info(f"Claude analysis completed: {result.stdout}")
+            subprocess.run(cmd, check=True, capture_output=True)
+            logger.info("Skill scan completed")
             return True
         except subprocess.CalledProcessError as exc:
-            logger.warning(f"Claude analysis failed: {exc.stderr}")
-            return False
-        except FileNotFoundError:
-            logger.error("Claude CLI not found. Please install it first.")
+            logger.warning(f"Skill scan failed: {exc}")
             return False
 
     def _load_json(self, path: Path) -> Optional[Dict[str, Any]]:

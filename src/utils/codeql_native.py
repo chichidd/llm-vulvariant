@@ -265,8 +265,8 @@ class CodeQLAnalyzer:
                 version_info = json.loads(result.stdout)
                 self._version = version_info.get("version", "unknown")
                 return True
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-            pass
+        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+            logger.debug(f"Failed to get CodeQL version: {e}")
         
         self._version = None
         return False
@@ -360,10 +360,7 @@ class CodeQLAnalyzer:
         # Execute creation
         success, stdout, stderr = self._run_codeql(args, timeout=1800)  # 30-minute timeout
         
-        if success:
-            return True, db_path
-        else:
-            return False, f"Failed to create database: {stderr}"
+        return (True, db_path) if success else (False, f"Failed to create database: {stderr}")
     
     def run_query(
         self,
@@ -439,8 +436,8 @@ class CodeQLAnalyzer:
                 with open(db_info_path) as f:
                     info = yaml.safe_load(f)
                     return info.get("primaryLanguage")
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to read database language from {db_info_path}: {e}")
         
         # Infer from directory name
         db_name = os.path.basename(database_path)

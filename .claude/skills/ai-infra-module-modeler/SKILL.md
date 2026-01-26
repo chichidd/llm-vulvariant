@@ -62,12 +62,6 @@ Typical inputs:
 4. **IMPORTANT: Validate modules** using the checklist files under `references/checklists/`. Review every output of the module assignment. 
 - If you found any insistency betweeen assigned module and the file, read relevant files and correct them. 
 - You need to do this check for several arround to make sure they are correct.
-5. **(Optional) Scaffold** a module skeleton (non-destructive by default):
-   ```bash
-   python .claude/skills/ai-infra-module-modeler/scripts/build_module_skeleton.py \
-     --module-map analysis/<repo-name>/module_map.json \
-     --out analysis/<repo-name>/module_skeleton
-   ```
 
 ## Notes / guardrails
 - Rely on LLM semantic classification, not keyword rules.

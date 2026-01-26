@@ -4,10 +4,12 @@ Uses a native tool-calling pattern and follows the structure of src/scanner/agen
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from llm import BaseLLMClient
+from config import _path_config
 from utils.logger import get_logger
 from utils.tree_utils import build_directory_structure_tree
 from profiler.software.module_analyzer.toolkit import ModuleAnalyzerToolkit
@@ -18,6 +20,27 @@ from profiler.software.prompts import (
 )
 
 logger = get_logger(__name__)
+
+
+def _load_ai_infra_taxonomy() -> Dict[str, Any]:
+    """Load AI Infra taxonomy from skill scripts."""
+    try:
+        taxonomy_script = _path_config['skill_path']/ "ai-infra-module-modeler" / "scripts" / "ai_infra_taxonomy.py"
+        if not taxonomy_script.exists():
+            logger.warning(f"Taxonomy script not found at {taxonomy_script}")
+            return {}
+        
+        # Import the taxonomy
+        sys.path.insert(0, str(taxonomy_script.parent))
+        try:
+            import ai_infra_taxonomy  # type: ignore
+            return getattr(ai_infra_taxonomy, "AI_INFRA_TAXONOMY", {})
+        finally:
+            if sys.path and sys.path[0] == str(taxonomy_script.parent):
+                sys.path.pop(0)
+    except Exception as e:
+        logger.warning(f"Failed to load AI Infra taxonomy: {e}")
+        return {}
 
 
 class ModuleAnalyzer:
@@ -65,8 +88,15 @@ class ModuleAnalyzer:
         # Initialize toolkit
         self.toolkit = ModuleAnalyzerToolkit(repo_path, file_list)
         
+        # Load AI Infra taxonomy
+        taxonomy = _load_ai_infra_taxonomy()
+        taxonomy_str = self._format_taxonomy(taxonomy) if taxonomy else "Not available"
+        
         dir_structure = build_directory_structure_tree(file_list, max_depth=2)
-        logger.info("Starting module analysis with native tool calling...")
+        logger.info("Starting module analysis with native tool calling and AI Infra taxonomy...")
+        
+        # Enhance system prompt with taxonomy
+        system_prompt = MODULE_ANALYSIS_SYSTEM_PROMPT + "\n\n" + self._get_taxonomy_instruction(taxonomy_str)
         
         # Initialize conversation
         initial_message = MODULE_ANALYSIS_INITIAL_MESSAGE.format(
@@ -86,7 +116,7 @@ class ModuleAnalyzer:
             # Run the agent using shared function
             is_complete, result, llm_calls, messages = run_agent_analysis(
                 llm_client=self.llm_client,
-                system_prompt=MODULE_ANALYSIS_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 initial_message=initial_message,
                 tools=self.toolkit.get_available_tools(),
                 toolkit=self.toolkit,
@@ -117,4 +147,44 @@ class ModuleAnalyzer:
                 "modules": [],
                 "llm_calls": 0
             }
+    
+    def _format_taxonomy(self, taxonomy: Dict[str, Any]) -> str:
+        """Format taxonomy dictionary into a readable string."""
+        lines = []
+        for coarse_key, fine_dict in taxonomy.items():
+            lines.append(f"- {coarse_key}")
+            if isinstance(fine_dict, dict):
+                for fine_key in fine_dict.keys():
+                    lines.append(f"  - {coarse_key}.{fine_key}")
+        return "\n".join(lines)
+    
+    def _get_taxonomy_instruction(self, taxonomy_str: str) -> str:
+        """Generate instruction text for using the taxonomy."""
+        return f"""# AI Infrastructure Module Taxonomy
+
+When identifying modules, classify each module according to the following AI Infrastructure taxonomy. Each module should be assigned a category from this taxonomy.
+
+## Available Categories (coarse.fine format):
+{taxonomy_str}
+
+## Module Classification Requirements:
+1. For each identified module, assign it to one of the taxonomy categories above
+2. Use the format: coarse_category.fine_category (e.g., "data_knowledge.preprocess_tokenization")
+3. If a module spans multiple categories, choose the primary/dominant one
+4. When calling the `finalize` tool, ensure each module has a "category" field with the taxonomy classification
+5. The category should be in the format: "coarse.fine" (e.g., "training_optimization.training_loop")
+
+## Example Module Format:
+```json
+{{
+  "name": "Data Preprocessing",
+  "category": "data_knowledge.preprocess_tokenization",
+  "paths": ["src/data/preprocessing"],
+  "key_functions": ["tokenize", "normalize"],
+  "dependencies": ["transformers", "numpy"],
+  "purpose": "Handles text tokenization and normalization for model input"
+}}
+```
+
+IMPORTANT: Every module you identify MUST have a valid "category" field matching one of the taxonomy categories listed above."""
 

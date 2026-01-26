@@ -160,13 +160,9 @@ class SoftwareProfile:
             "repo_info": self.repo_info,
             "modules": self.modules,
         }
-        
 
-        if self.modules:
-            if hasattr(self.modules[0], "to_dict"):
-                result["modules"] = [m.to_dict() for m in self.modules]
-            else:
-                result["modules"] = self.modules
+        if self.modules and hasattr(self.modules[0], "to_dict"):
+            result["modules"] = [m.to_dict() for m in self.modules]
         
         if self.data_flow_patterns:
             result["data_flow_patterns"] = [p.to_dict() for p in self.data_flow_patterns]

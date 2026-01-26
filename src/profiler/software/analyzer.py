@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 from datetime import datetime
 
 from llm import BaseLLMClient, create_llm_client, LLMConfig
+from config import _path_config
 from profiler.profile_storage import ProfileStorageManager
 from utils.git_utils import get_git_commit, checkout_commit, get_diff_stats, get_changed_files_with_status
 from utils.logger import get_logger
@@ -21,7 +22,7 @@ from utils.path_utils import to_relative_path
 from .models import SoftwareProfile, ModuleInfo, ModuleTree, DataFlowPattern
 from .repo_collector import RepoInfoCollector
 from .basic_info_analyzer import BasicInfoAnalyzer
-from .module_analyzer import ModuleAnalyzer, FolderModuleAnalyzer, HybridModuleAnalyzer, SkillModuleAnalyzer
+from .module_analyzer import ModuleAnalyzer, SkillModuleAnalyzer
 
 from .file_summarizer import FileSummarizer
 from .deep_analyzer import DeepAnalyzer
@@ -50,8 +51,8 @@ class SoftwareProfiler:
                         rules_path = saved_config_path
                 
                 if rules_path is None:
-                    project_root = Path(__file__).parent.parent.parent.parent
-                    rules_path = project_root / "config" / "software_profile_rule.yaml"
+
+                    rules_path = _path_config['repo_root'] / "config" / "software_profile_rule.yaml"
             
             try:
                 if rules_path.exists():
@@ -181,13 +182,11 @@ class SoftwareProfiler:
             llm_client=self.llm_client,
         )
         
-        # 模块分析器 - 根据配置选择类型: 'folder', 'agent', 或 'hybrid'
-        analyzer_type = self.module_analyzer_config.get('analyzer_type', 'hybrid')
+        # 模块分析器 - 根据配置选择类型: 'skill' 或 'agent'
+        analyzer_type = self.module_analyzer_config.get('analyzer_type', 'skill')
         
-        # 初始化所有分析器引用为 None
+        # 初始化分析器引用为 None
         self.module_analyzer = None
-        self.folder_module_analyzer = None
-        self.hybrid_module_analyzer = None
         
         if analyzer_type == 'skill':
             logger.info("Using skill-based module analyzer (AI infra taxonomy)")
@@ -195,41 +194,7 @@ class SoftwareProfiler:
                 llm_client=self.llm_client,
                 excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,
                 code_extensions=self.module_analyzer_config.get('code_extensions') or None,
-                max_files=self.module_analyzer_config.get('skill_max_files', 2000),
-                max_file_bytes=self.module_analyzer_config.get('skill_max_file_bytes', 200000),
-                min_file_score=self.module_analyzer_config.get('skill_min_file_score', 2),
                 max_key_functions=self.module_analyzer_config.get('skill_max_key_functions', 12),
-                llm_provider=self.module_analyzer_config.get('skill_llm_provider') or None,
-                llm_model=self.module_analyzer_config.get('skill_llm_model') or None,
-                group_depth=self.module_analyzer_config.get('skill_group_depth', 2),
-                group_sample_files=self.module_analyzer_config.get('skill_group_sample_files', 12),
-                group_snippets=self.module_analyzer_config.get('skill_group_snippets', 2),
-                snippet_bytes=self.module_analyzer_config.get('skill_snippet_bytes', 800),
-                batch_size=self.module_analyzer_config.get('skill_batch_size', 12),
-                require_llm=self.module_analyzer_config.get('skill_require_llm', False),
-            )
-        elif analyzer_type == 'hybrid':
-            logger.info("Using hybrid module analyzer (agent + folder-based)")
-            self.hybrid_module_analyzer = HybridModuleAnalyzer(
-                llm_client=self.llm_client,
-                max_agent_iterations=self.module_analyzer_config.get('max_agent_iterations', 100),
-                max_folder_iterations=self.module_analyzer_config.get('max_folder_iterations', 100),
-                max_file_content_length=self.module_analyzer_config.get('max_file_content_length', 8000),
-                excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,
-                code_extensions=self.module_analyzer_config.get('code_extensions') or None,
-                skip_empty_folders=self.module_analyzer_config.get('skip_empty_folders', True),
-                min_files_for_module=self.module_analyzer_config.get('min_files_for_module', 1),
-            )
-        elif analyzer_type == 'folder':
-            logger.info("Using folder-based module analyzer")
-            self.folder_module_analyzer = FolderModuleAnalyzer(
-                llm_client=self.llm_client,
-                excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,
-                code_extensions=self.module_analyzer_config.get('code_extensions') or None,
-                max_agent_iterations=self.module_analyzer_config.get('max_agent_iterations', 10),
-                max_file_content_length=self.module_analyzer_config.get('max_file_content_length', 8000),
-                skip_empty_folders=self.module_analyzer_config.get('skip_empty_folders', True),
-                min_files_for_module=self.module_analyzer_config.get('min_files_for_module', 1),
             )
         else:  # 'agent' or default
             logger.info("Using agent-based module analyzer")
@@ -275,11 +240,7 @@ class SoftwareProfiler:
                 logger.info(f"Checking out to target version...")
                 if not checkout_commit(str(repo_path), target_version):
                     raise RuntimeError(f"Failed to checkout to: {target_version}")
-                version = target_version
-            else:
-                version = current_version
-        else:
-            version = current_version
+        version = target_version if target_version else current_version
         
         if version:
             logger.info(f"Git commit hash: {version[:8]}...")
@@ -408,65 +369,21 @@ class SoftwareProfiler:
         # Step 3: 分析模块
         logger.info("Step 3/4: Analyzing modules...")
         modules_result = self.storage_manager.load_checkpoint("modules", *path_parts) if self.storage_manager else None
-        module_tree = None  # 用于存储树状模块结构
-        fine_grained_results = None  # 用于存储细粒度结果（hybrid 模式）
         
         if modules_result:
             logger.info("Loaded modules from checkpoint")
-            # 如果有 module_tree，加载它
-            if self.folder_module_analyzer or self.hybrid_module_analyzer:
-                module_tree_data = self.storage_manager.load_checkpoint("module_tree", *path_parts)
-                if module_tree_data:
-                    module_tree = ModuleTree.from_dict(module_tree_data)
         else:
-            if self.hybrid_module_analyzer:
-                # 使用混合模块分析器（agent + folder-based）
-                logger.info("Using hybrid module analyzer...")
-                hybrid_result = self.hybrid_module_analyzer.analyze(
-                    repo_info=repo_info,
-                    repo_path=repo_path,
-                    storage_manager=self.storage_manager,
-                    repo_name=repo_name,
-                    version=version,
-                )
-                
-                modules_result = {
-                    "modules": hybrid_result.get("modules", []),
-                    "llm_calls": hybrid_result.get("llm_calls", 0),
-                    "fine_grained_results": hybrid_result.get("fine_grained_results", {})
-                }
-
-                # 保存 modules checkpoint
-                if self.storage_manager:
-                    self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
-                    
-            elif self.folder_module_analyzer:
-                # 使用基于文件夹的模块分析器
-                logger.info("Using folder-based module analyzer...")
-                module_tree = self.folder_module_analyzer.analyze(
-                    repo_path=repo_path,
-                    repo_name=repo_name,
-                    file_list=repo_info.get('files', []),
-                    storage_manager=self.storage_manager,
-                    version=version,
-                )
-
-
-                # 保存 module_tree
-                if self.storage_manager:
-                    self.storage_manager.save_checkpoint("module_tree", module_tree.to_dict(), *path_parts)
-            else:
-                # 使用原有的 agent 模块分析器
-                modules_result = self.module_analyzer.analyze(
-                    repo_info, 
-                    repo_path,
-                    storage_manager=self.storage_manager,
-                    repo_name=repo_name,
-                    version=version
-                )
-                
-                if self.storage_manager:
-                    self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
+            # 使用当前配置的模块分析器（skill 或 agent）
+            modules_result = self.module_analyzer.analyze(
+                repo_info, 
+                repo_path,
+                storage_manager=self.storage_manager,
+                repo_name=repo_name,
+                version=version
+            )
+            
+            if self.storage_manager:
+                self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
             
         # Step 4: 构建软件画像
         logger.info("Step 4/4: Building software profile...")
@@ -513,9 +430,6 @@ class SoftwareProfiler:
             if profile.modules and hasattr(profile.modules[0], 'external_dependencies'):
                 logger.debug(f"[DEBUG] First module before save - external_deps: {len(profile.modules[0].external_dependencies)}, called_by: {len(profile.modules[0].called_by_modules)}")
             self.storage_manager.save_final_result("software_profile.json", profile.to_json(), *path_parts)
-            # 如果使用了 folder-based analyzer，也保存 module_tree
-            if module_tree:
-                self.storage_manager.save_final_result("module_tree.json", module_tree.to_json(), *path_parts)
         
         return profile
     
