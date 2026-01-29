@@ -135,3 +135,13 @@ for repo_dir in "$ROOT_DIR"/*; do
     echo "=== Skipping (not a git repo): $repo_dir ==="
   fi
 done
+
+
+# software-profile   --repo-name ms-swift   --llm-provider openai --llm-name deepseek-chat      --enable-deep-analysis  --output-dir ./repo-profiles/ --enable-deep-analysis
+
+# software-profile   --repo-name llama_index   --llm-provider openai --llm-name deepseek-chat     --enable-deep-analysis  --output-dir ./repo-profiles/ --enable-deep-analysis
+
+# software-profile   --repo-name langchain   --llm-provider openai --llm-name deepseek-chat     --enable-deep-analysis  --output-dir ./repo-profiles/ --enable-deep-analysis
+
+# software-profile   --repo-name llama_index   --llm-provider openai --llm-name deepseek-chat     --enable-deep-analysis  --output-dir ./repo-profiles/ --enable-deep-analysis
+

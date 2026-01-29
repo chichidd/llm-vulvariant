@@ -219,7 +219,6 @@ class SkillModuleAnalyzer:
                 "name": name,
                 "category": coarse,
                 "description": description,
-                "paths": sorted(files),
                 "key_functions": [],
                 "dependencies": [],
                 "files": sorted(files),
