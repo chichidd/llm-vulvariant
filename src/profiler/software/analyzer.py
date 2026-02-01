@@ -17,7 +17,6 @@ from profiler.profile_storage import ProfileStorageManager
 from utils.git_utils import get_git_commit, checkout_commit, get_diff_stats, get_changed_files_with_status
 from utils.logger import get_logger
 from utils.path_utils import to_relative_path
-# from utils.agent_conversation import make_serializable
 
 from .models import SoftwareProfile, ModuleInfo, ModuleTree, DataFlowPattern
 from .repo_collector import RepoInfoCollector
@@ -25,7 +24,7 @@ from .basic_info_analyzer import BasicInfoAnalyzer
 from .module_analyzer import ModuleAnalyzer, SkillModuleAnalyzer
 
 from .file_summarizer import FileSummarizer
-from .deep_analyzer import DeepAnalyzer
+from .repo_analyzer import RepoAnalyzer
 
 logger = get_logger(__name__)
 
@@ -45,13 +44,12 @@ class SoftwareProfiler:
                 return cls._detection_rules
             
             if rules_path is None:
+                rules_path = _path_config['repo_root'] / "config" / "software_profile_rule.yaml"
                 if output_dir and Path(output_dir).exists():
                     save_config_path = Path(output_dir) / "software_profile_rule.yaml"
-                    logger.info(f"Loading saved config from: {save_config_path}")
-                    rules_path = save_config_path
-                else:
-                    rules_path = _path_config['repo_root'] / "config" / "software_profile_rule.yaml"
-            
+                    if save_config_path.exists():
+                        logger.info(f"Loading saved config from: {save_config_path}")
+                        rules_path = save_config_path
             try:
                 if rules_path.exists():
                     with open(rules_path, 'r', encoding='utf-8') as f:
@@ -194,15 +192,6 @@ class SoftwareProfiler:
         # 文件摘要器
         summary_llm = self.file_summary_llm_client or self.llm_client
         self.file_summarizer = FileSummarizer(llm_client=summary_llm)
-        
-        # 深度分析器
-
-        self.deep_analyzer = DeepAnalyzer(
-            language=self.repo_analyzer_config.get('language'),
-            max_slice_depth=self.repo_analyzer_config.get('max_slice_depth'),
-            max_slice_files=self.repo_analyzer_config.get('max_slice_files'),
-            rebuild_cache=self.repo_analyzer_config.get('rebuild_cache')
-        )
 
     
     def generate_profile(
@@ -306,6 +295,7 @@ class SoftwareProfiler:
         if target_version and original_version != target_version:
             # restore the cur
             checkout_commit(str(repo_path), original_version)
+            logger.info(f"Restored repository to original version: {original_version[:8]}...")
         return profile
     
     def _generate_profile_full(self, repo_path: Path, repo_name: str, version: str) -> SoftwareProfile:
@@ -338,12 +328,21 @@ class SoftwareProfiler:
             else:
                 repo_info['file_summaries'] = {}
             
-            # 深度分析
-            if self.deep_analyzer:
-                logger.info("Performing deep static analysis...")
-                cache_dir = self.output_dir / repo_name / ".cache" / "repo_analyzer" if self.output_dir else None
-                deep_analysis = self.deep_analyzer.analyze(repo_path, cache_dir=cache_dir)
-                repo_info['deep_analysis'] = deep_analysis
+            # CodeQL分析
+            
+            logger.info("Performing deep static analysis...")
+            cache_dir = self.output_dir / repo_name / ".cache" / "repo_analyzer" if self.output_dir else None
+                
+            self.repo_analyzer = RepoAnalyzer(
+                repo_path=str(repo_path),
+                language=self.repo_analyzer_config.get('language'),
+                cache_dir=str(cache_dir) if cache_dir else None,
+                max_slice_depth=self.repo_analyzer_config.get('max_slice_depth'),
+                max_slice_files=self.repo_analyzer_config.get('max_slice_files'),
+                rebuild_cache=self.repo_analyzer_config.get('rebuild_cache')
+            )
+
+            repo_info['repo_analysis'] = self.repo_analyzer.get_info()
             
             if self.storage_manager:
                 self.storage_manager.save_checkpoint("repo_info", repo_info, *path_parts)
@@ -391,14 +390,14 @@ class SoftwareProfiler:
             modules=modules_result.get('modules', []) if modules_result else [],
         )
         
-        # 如果有深度分析，增强profile
-        if repo_info.get('deep_analysis'):
-            logger.info("Enhancing profile with deep analysis...")
+        # 如果有 CodeQL 静态分析结果，增强profile
+        if repo_info.get('repo_analysis'):
+            logger.info("Enhancing profile with repo analysis...")
 
             
             base_modules = modules_result.get('modules', []) if modules_result else []
             logger.debug(f"[DEBUG] Base modules: {len(base_modules)}, first type: {type(base_modules[0]).__name__ if base_modules else 'N/A'}")
-            modules = self._enhance_modules_with_deep_analysis(base_modules, repo_info['deep_analysis'])
+            modules = self._enhance_modules_with_repo_analysis(base_modules, repo_info['repo_analysis'])
             logger.debug(f"[DEBUG] Enhanced modules: {len(modules)}, first type: {type(modules[0]).__name__ if modules else 'N/A'}")
             if modules:
                 logger.debug(f"[DEBUG] First module enhanced data - external_deps: {len(modules[0].external_dependencies)}, called_by: {len(modules[0].called_by_modules)}, calls: {len(modules[0].calls_modules)}")
@@ -406,17 +405,16 @@ class SoftwareProfiler:
             logger.debug(f"[DEBUG] Profile.modules after assignment: {len(profile.modules)}, type: {type(profile.modules[0]).__name__ if profile.modules else 'N/A'}")
             
             # 提取数据流模式
-            data_flow_patterns = self._extract_data_flow_patterns(modules, repo_info['deep_analysis'])
+            data_flow_patterns = self._extract_data_flow_patterns(modules, repo_info['repo_analysis'])
             profile.data_flow_patterns = data_flow_patterns
             
-            project_features = self._extract_project_level_features(modules, repo_info['deep_analysis'])
+            project_features = self._extract_project_level_features(modules, repo_info['repo_analysis'])
             profile.common_data_sources = project_features.get('common_data_sources', [])
             profile.common_data_formats = project_features.get('common_data_formats', [])
             profile.third_party_libraries = project_features.get('third_party_libraries', [])
             profile.builtin_libraries = project_features.get('builtin_libraries', [])
             profile.dependency_usage_count = project_features.get('dependency_usage_count', {})
             profile.total_functions = project_features.get('total_functions', 0)
-            profile.entry_point_count = project_features.get('entry_point_count', 0)
         
         # 保存最终画像
         if self.storage_manager:
@@ -428,17 +426,26 @@ class SoftwareProfiler:
         return profile
     
 
-    def _enhance_modules_with_deep_analysis(
+    def _enhance_modules_with_repo_analysis(
         self,
         base_modules: List[Dict],
-        deep_analysis: Dict,
+        repo_analysis: Dict,
     ) -> List[ModuleInfo]:
-        """用深度分析数据增强模块信息"""
+        """用 CodeQL 静态分析数据增强模块信息"""
         modules = []
-        functions_map = {f['file']: f for f in deep_analysis.get('functions', [])}
-        call_graph_edges = deep_analysis.get('call_graph_edges', [])
-        dependencies = deep_analysis.get('dependencies', [])
-        all_files = list(functions_map.keys())
+        
+        # 构建文件到函数列表的映射（一个文件可能包含多个函数）
+        functions_by_file: Dict[str, List[Dict]] = {}
+        for func in repo_analysis.get('functions', []):
+            file_path = func.get('file', '')
+            if file_path:
+                if file_path not in functions_by_file:
+                    functions_by_file[file_path] = []
+                functions_by_file[file_path].append(func)
+        
+        call_graph_edges = repo_analysis.get('call_graph_edges', [])
+        dependencies = repo_analysis.get('dependencies', [])
+        all_files = list(functions_by_file.keys())
         
         # 构建模块名到文件的映射
         module_name_to_files = {}
@@ -498,9 +505,9 @@ class SoftwareProfiler:
             module_call_graph = []
             
             for file_path in module_files:
-                if file_path in functions_map:
-                    func_info = functions_map[file_path]
-                    module_functions.extend(func_info.get('functions', []))
+                # 直接添加该文件中的所有函数
+                if file_path in functions_by_file:
+                    module_functions.extend(functions_by_file[file_path])
                 
                 for edge in call_graph_edges:
                     caller_file = edge.get('caller_file', '')
@@ -568,7 +575,11 @@ class SoftwareProfiler:
         for func in functions:
             func_name = func.get('name', '')
             for pattern_name, pattern_config in rules.items():
-                keywords = pattern_config.get('keywords', [])
+                # 支持两种配置格式：直接是列表，或者是 {keywords: [...]}
+                if isinstance(pattern_config, list):
+                    keywords = pattern_config
+                else:
+                    keywords = pattern_config.get('keywords', [])
                 if any(keyword.lower() in func_name.lower() for keyword in keywords):
                     patterns.add(pattern_name)
         
@@ -577,19 +588,28 @@ class SoftwareProfiler:
     def _extract_data_flow_patterns(
         self,
         modules: List[ModuleInfo],
-        deep_analysis: Dict
+        repo_analysis: Dict
     ) -> List[DataFlowPattern]:
-        """extract data flow patterns from modules and deep analysis"""
+        """extract data flow patterns from modules and repo analysis"""
         patterns = []
-        functions_map = {f['file']: f for f in deep_analysis.get('functions', [])}
-        call_graph_edges = deep_analysis.get('call_graph_edges', [])
+        
+        # 构建文件到函数列表的映射（一个文件可能包含多个函数）
+        functions_by_file: Dict[str, List[Dict]] = {}
+        for func in repo_analysis.get('functions', []):
+            file_path = func.get('file', '')
+            if file_path:
+                if file_path not in functions_by_file:
+                    functions_by_file[file_path] = []
+                functions_by_file[file_path].append(func)
+        
+        call_graph_edges = repo_analysis.get('call_graph_edges', [])
         
         # 构建模块级别的数据流模式
         for module in modules:
             if not module.data_sources or not module.data_formats:
                 continue
             
-            # module.files 已经在 _enhance_modules_with_deep_analysis 中展开过了
+            # module.files 已经在 _enhance_modules_with_repo_analysis 中展开过了
             # 查找源API和汇API
             source_apis = []
             sink_apis = []
@@ -599,9 +619,8 @@ class SoftwareProfiler:
             # 从模块的函数中提取相关API
             module_functions = {}  # {file::func_name: func_info}
             for file_path in module.files:
-                if file_path in functions_map:
-                    func_info = functions_map[file_path]
-                    for func in func_info.get('functions', []):
+                if file_path in functions_by_file:
+                    for func in functions_by_file[file_path]:
                         func_name = func.get('name', '')
                         func_key = f"{file_path}::{func_name}"
                         module_functions[func_key] = func
@@ -609,21 +628,33 @@ class SoftwareProfiler:
                         # 根据数据源识别源API
                         for data_source in module.data_sources:
                             source_rules = self.detection_rules.get('data_sources', {}).get(data_source, {})
-                            keywords = source_rules.get('keywords', [])
+                            # 支持两种配置格式：直接是列表，或者是 {keywords: [...]}
+                            if isinstance(source_rules, list):
+                                keywords = source_rules
+                            else:
+                                keywords = source_rules.get('keywords', [])
                             if any(kw.lower() in func_name.lower() for kw in keywords):
                                 source_apis.append(func_key)
                         
                         # 根据数据格式识别汇API
                         for data_format in module.data_formats:
                             format_rules = self.detection_rules.get('data_formats', {}).get(data_format, {})
-                            keywords = format_rules.get('keywords', [])
+                            # 支持两种配置格式
+                            if isinstance(format_rules, list):
+                                keywords = format_rules
+                            else:
+                                keywords = format_rules.get('keywords', [])
                             if any(kw.lower() in func_name.lower() for kw in keywords):
                                 sink_apis.append(func_key)
                         
                         # 识别中间处理操作
                         for proc_op in module.processing_operations:
                             proc_rules = self.detection_rules.get('processing_operations', {}).get(proc_op, {})
-                            keywords = proc_rules.get('keywords', [])
+                            # 支持两种配置格式
+                            if isinstance(proc_rules, list):
+                                keywords = proc_rules
+                            else:
+                                keywords = proc_rules.get('keywords', [])
                             if any(kw.lower() in func_name.lower() for kw in keywords):
                                 intermediate_ops.append(func_key)
             
@@ -631,9 +662,9 @@ class SoftwareProfiler:
             # 找出源API到汇API之间的中间调用
             for edge in call_graph_edges:
                 caller_file = edge.get('caller_file', '')
-                caller_func = edge.get('caller_function', '')
+                caller_func = edge.get('caller', '')  # 字段名是 'caller' 而非 'caller_function'
                 callee_file = edge.get('callee_file', '')
-                callee_func = edge.get('callee_function', '')
+                callee_func = edge.get('callee', '')  # 字段名是 'callee' 而非 'callee_function'
                 
                 caller_key = f"{caller_file}::{caller_func}"
                 callee_key = f"{callee_file}::{callee_func}"
@@ -680,7 +711,7 @@ class SoftwareProfiler:
     def _extract_project_level_features(
         self,
         modules: List[ModuleInfo],
-        deep_analysis: Dict
+        repo_analysis: Dict
     ) -> Dict[str, Any]:
         """从模块中提取项目级特征"""
         all_data_sources = []
@@ -697,7 +728,7 @@ class SoftwareProfiler:
         common_data_formats = list(set(all_data_formats))
         
         # 依赖统计
-        dependencies = deep_analysis.get('dependencies', [])
+        dependencies = repo_analysis.get('dependencies', [])
         third_party_libraries = []
         builtin_libraries = []
         
@@ -708,9 +739,8 @@ class SoftwareProfiler:
                 elif dep.get('is_builtin'):
                     builtin_libraries.append(dep.get('name', ''))
         
-        # 统计函数和入口点
-        total_functions = len(deep_analysis.get('functions', []))
-        entry_point_count = len(deep_analysis.get('entry_points', []))
+        # 统计函数
+        total_functions = len(repo_analysis.get('functions', []))
         
         # 依赖使用次数
         dependency_usage_count = {}
@@ -727,7 +757,6 @@ class SoftwareProfiler:
             'builtin_libraries': builtin_libraries,
             'dependency_usage_count': dependency_usage_count,
             'total_functions': total_functions,
-            'entry_point_count': entry_point_count,
         }
 
     # def _generate_profile_incremental(

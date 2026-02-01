@@ -39,7 +39,6 @@ class ModuleInfo:
     
     # 功能特征（从 RepoAnalyzer 提取）
     public_apis: List[str] = field(default_factory=list)              # 对外接口（函数/类）
-    entry_points: List[str] = field(default_factory=list)             # 入口点函数
     key_functions: List[str] = field(default_factory=list)            # 关键函数
     
     # 数据流特征
@@ -62,7 +61,6 @@ class ModuleInfo:
             "description": self.description,
             "files": self.files,
             "public_apis": self.public_apis,
-            "entry_points": self.entry_points,
             "key_functions": self.key_functions,
             "data_sources": self.data_sources,
             "data_formats": self.data_formats,
@@ -85,7 +83,6 @@ class ModuleInfo:
             description=data.get("description", ""),
             files=data.get("files", data.get("paths", [])),
             public_apis=data.get("public_apis", []),
-            entry_points=data.get("entry_points", []),
             key_functions=data.get("key_functions", []),
             data_sources=data.get("data_sources", []),
             data_formats=data.get("data_formats", []),
@@ -140,7 +137,6 @@ class SoftwareProfile:
     
     # 调用图特征（可选）
     total_functions: int = 0
-    entry_point_count: int = 0
     
     # 依赖特征详细信息（可选）
     third_party_libraries: List[str] = field(default_factory=list)
@@ -176,7 +172,6 @@ class SoftwareProfile:
         if self.total_functions > 0:
             result["call_graph_stats"] = {
                 "total_functions": self.total_functions,
-                "entry_point_count": self.entry_point_count,
             }
         
         if self.third_party_libraries:
@@ -243,7 +238,6 @@ class SoftwareProfile:
             common_data_sources=data.get("common_data_sources", []),
             common_data_formats=data.get("common_data_formats", []),
             total_functions=call_graph_stats.get("total_functions", 0),
-            entry_point_count=call_graph_stats.get("entry_point_count", 0),
             third_party_libraries=deps_detailed.get("third_party", []),
             builtin_libraries=deps_detailed.get("builtin", []),
             dependency_usage_count=deps_detailed.get("usage_count", {}),

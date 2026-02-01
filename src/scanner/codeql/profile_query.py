@@ -23,7 +23,7 @@ def _build_intent_from_vuln_profile(vulnerability_profile: dict) -> str:
 - Vulnerability Type: {sink_type}
 - Sink Function: {sink_function}
 - Source Type: {source_type}
-- Description: {vuln_desc[:200]}
+- Description: {vuln_desc}
 
 Generate a CodeQL query to detect calls to the sink function '{sink_function}' that could lead to {sink_type} vulnerabilities."""
 

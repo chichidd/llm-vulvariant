@@ -401,7 +401,7 @@ class SkillModuleAnalyzer:
                 return True
         return False
 
-    # === Deep analysis integration ===
+    # === Repo analysis integration ===
     # Uses RepoAnalyzer outputs to attach key functions and module dependencies.
     def _attach_key_functions_and_dependencies(
         self,
@@ -409,9 +409,9 @@ class SkillModuleAnalyzer:
         repo_info: Dict[str, Any],
         repo_path: Path,
     ) -> List[Dict[str, Any]]:
-        deep_analysis = repo_info.get("deep_analysis") or {}
-        functions = deep_analysis.get("functions", [])
-        call_edges = deep_analysis.get("call_graph_edges", [])
+        repo_analysis = repo_info.get("repo_analysis") or {}
+        functions = repo_analysis.get("functions", [])
+        call_edges = repo_analysis.get("call_graph_edges", [])
         if not functions and not call_edges:
             return modules
 
@@ -424,7 +424,7 @@ class SkillModuleAnalyzer:
                 basename = Path(file_path).name
                 basename_to_files.setdefault(basename, []).append(file_path)
 
-        module_functions: Dict[str, Dict[str, List[str]]] = {}
+        module_functions: Dict[str, List[str]] = {}
         for func in functions:
             file_path = self._normalize_file_path(func.get("file", ""), repo_path)
             file_path = self._resolve_file_path(file_path, file_to_module, basename_to_files)
@@ -436,11 +436,7 @@ class SkillModuleAnalyzer:
             name = func.get("name", "")
             if not name:
                 continue
-            bucket = module_functions.setdefault(module_name, {"entry": [], "other": []})
-            if func.get("is_entry_point"):
-                bucket["entry"].append(name)
-            else:
-                bucket["other"].append(name)
+            module_functions.setdefault(module_name, []).append(name)
 
         module_dependencies: Dict[str, set] = {}
         for edge in call_edges:
@@ -458,8 +454,8 @@ class SkillModuleAnalyzer:
 
         for module in modules:
             module_name = module.get("name", "")
-            funcs = module_functions.get(module_name, {})
-            ordered = _unique_preserve_order(funcs.get("entry", []) + funcs.get("other", []))
+            funcs = module_functions.get(module_name, [])
+            ordered = _unique_preserve_order(funcs)
             module["key_functions"] = ordered[: self.max_key_functions]
             deps = sorted(module_dependencies.get(module_name, []))
             module["dependencies"] = deps

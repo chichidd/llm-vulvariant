@@ -25,6 +25,7 @@ dev = [
 [project.scripts]
 software-profile = "cli.software:main"
 vuln-profile = "cli.vulnerability:main"
+scanner = "cli.agent_scanner:main"
 
 [tool.setuptools]
 packages = {find = {where = ["src"]}}

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from llm import BaseLLMClient
 from utils.logger import get_logger
-from utils.agent_conversation import (
+from scanner.agent.utils import (
     clear_reasoning_content,
     compress_iteration_conversation,
     make_serializable,
@@ -31,7 +31,7 @@ class AgenticVulnFinder:
         vulnerability_profile,
         max_iterations: int = 300,
         temperature: float = 1.0,
-        max_tokens: int = 8192,
+        max_tokens: int = 65536,
         verbose: bool = True,
         output_dir: Optional[Path] = None,
     ):

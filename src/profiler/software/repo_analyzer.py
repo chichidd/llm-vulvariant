@@ -21,20 +21,20 @@ Example:
 """
 
 import os
-import json
-import hashlib
 import pickle
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass, field, asdict
-from collections import defaultdict, deque
-import logging
+from collections import defaultdict
 
-from .codeql_native import CodeQLAnalyzer, load_codeql_config, CallGraphEdge, CodeQLFinding
-from .git_utils import get_git_commit
-from .logger import get_logger
+from utils.codeql_native import CodeQLAnalyzer, load_codeql_config, CallGraphEdge
+from utils.git_utils import get_git_commit
 
-# Initialize logger for this module
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+from utils.logger import get_logger
+
 logger = get_logger(__name__)
 
 
@@ -67,7 +67,6 @@ class FunctionInfo:
     start_line: int
     end_line: int
     parameters: List[str] = field(default_factory=list)
-    is_entry_point: bool = False  # Whether it is an entry point (main, HTTP handler, etc.)
     calls: List[str] = field(default_factory=list)  # Functions called by this function
     called_by: List[str] = field(default_factory=list)  # Functions that call this function
     
@@ -157,39 +156,7 @@ class RepoAnalyzer:
         max_slice_files: Max number of files in a slice (default: 10)
     """
     
-    @classmethod
-    def _load_entry_point_patterns(cls, config_path: Optional[Path] = None) -> Dict[str, List[str]]:
-        """Load entry point detection rules.
-        
-        Args:
-            config_path: Config file path; defaults to config/repo_analyzer_rules.yaml
-            
-        Returns:
-            A dict of entry point patterns
-        """
-        import yaml
-        
-        if config_path is None:
-            # Default to config/repo_analyzer_rules.yaml under project root
-            project_root = Path(__file__).parent.parent.parent
-            config_path = project_root / "config" / "repo_analyzer_rules.yaml"
-        
-        try:
-            if config_path.exists():
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = yaml.safe_load(f)
-                return config.get('entry_point_patterns', {})
-            else:
-                logger.warning(f"Config file not found: {config_path}, using default patterns")
-        except Exception as e:
-            logger.error(f"Failed to load entry point patterns: {e}, using defaults")
-        
-        # Default patterns (if config file loading fails)
-        return {
-            "python": ["main", "__main__"],
-            "cpp": ["main"],
-        }
-    
+
     def __init__(
         self,
         repo_path: str,
@@ -256,11 +223,65 @@ class RepoAnalyzer:
         self._call_graph_edges: List[CallGraphEdge] = []
         self._functions: Dict[str, FunctionInfo] = {}
         self._dependencies: Dict[str, DependencyInfo] = {}
-        self._entry_points: List[FunctionInfo] = []
-        self._findings: List[CodeQLFinding] = []
-        
+
         # Load or build analysis data
         self._load_or_build(rebuild_cache)
+    
+    def get_info(self):
+        info = {
+            'call_graph_edges': [],
+            'functions': [],
+            'dependencies': []
+        }
+        
+        # Extract call graph
+
+        call_graph = self._call_graph_edges
+        if call_graph:
+            info['call_graph_edges'] = [
+                {
+                    'caller': edge.caller_name,
+                    'caller_file': edge.caller_file,
+                    'caller_line': edge.caller_line,
+                    'callee': edge.callee_name,
+                    'callee_file': edge.callee_file,
+                    'callee_line': edge.callee_line,
+                    'call_site_line': edge.call_site_line
+                }
+                for edge in call_graph
+            ]
+            logger.info(f"Extracted {len(info['call_graph_edges'])} call graph edges")
+        
+        functions = self._functions
+        if functions:
+            info['functions'] = [
+                {
+                    'name': func.name,
+                    'file': func.file,
+                    'start_line': func.start_line,
+                    'end_line': func.end_line,
+                    'parameters': func.parameters
+                }
+                for func in list(functions.values())
+            ]
+            logger.info(f"Extracted {len(info['functions'])} functions")
+        
+        dependencies = self._dependencies
+        if dependencies:
+            info['dependencies'] = [
+                {
+                    'name': dep.name,
+                    'version': dep.version,
+                    'is_builtin': dep.is_builtin,
+                    'is_third_party': dep.is_third_party,
+                    'import_count': len(dep.import_locations),
+                    'import_files': list(set([loc.file for loc in dep.import_locations]))
+                }
+                for dep in list(dependencies.values())
+            ]
+            logger.info(f"Extracted {len(info['dependencies'])} dependencies")
+        logger.info(f"Deep analysis completed successfully")
+        return info
     
     def _detect_language(self) -> str:
         """Auto-detect the repository's primary language."""
@@ -288,19 +309,11 @@ class RepoAnalyzer:
         else:
             return "python"  # Default
     
-    def _get_cache_key(self) -> str:
-        """Generate a cache key (based on repo path and commit hash)."""
-        key_str = f"{self.repo_path}:{self.commit_hash}:{self.language}"
-        return hashlib.md5(key_str.encode()).hexdigest()
-    
-    def _get_cache_path(self) -> Path:
-        """Get the cache file path."""
-        cache_key = self._get_cache_key()
-        return self.cache_dir / f"{cache_key}.pkl"
-    
-    def _load_or_build(self, rebuild: bool = False):
+
+    def _load_or_build(self, rebuild: bool = False, cache_path: Optional[Path] = None):
         """Load cache or rebuild analysis data."""
-        cache_path = self._get_cache_path()
+        if cache_path is None:
+            cache_path = self.cache_dir / f"{self.repo_path.name}-{self.commit_hash[:8]}-{self.language}.pkl"
         
         # Try loading cache
         if not rebuild and cache_path.exists():
@@ -312,14 +325,11 @@ class RepoAnalyzer:
                 self._call_graph_edges = cache_data['call_graph_edges']
                 self._functions = cache_data['functions']
                 self._dependencies = cache_data['dependencies']
-                self._entry_points = cache_data['entry_points']
-                self._findings = cache_data.get('findings', [])
-                
+
                 logger.info(f"Cache loaded successfully")
                 logger.info(f"  - Functions: {len(self._functions)}")
                 logger.info(f"  - Call graph edges: {len(self._call_graph_edges)}")
                 logger.info(f"  - Dependencies: {len(self._dependencies)}")
-                logger.info(f"  - Entry points: {len(self._entry_points)}")
                 return
             except Exception as e:
                 logger.warning(f"Failed to load cache: {e}, rebuilding...")
@@ -334,8 +344,6 @@ class RepoAnalyzer:
                 'call_graph_edges': self._call_graph_edges,
                 'functions': self._functions,
                 'dependencies': self._dependencies,
-                'entry_points': self._entry_points,
-                'findings': self._findings,
             }
             with open(cache_path, 'wb') as f:
                 pickle.dump(cache_data, f)
@@ -346,8 +354,8 @@ class RepoAnalyzer:
     def _build_analysis(self):
         """Build the full analysis dataset."""
         # Step 1: Create CodeQL database
-        logger.info("[1/5] Creating CodeQL database...")
-        db_name = f"{self.repo_path.name}-{self.commit_hash[:8]}-{self.language}-db"
+        logger.info("[1/4] Creating CodeQL database...")
+        db_name = f"{self.repo_path.name}-{self.commit_hash[:8]}-{self.language}"
         success, db_path = self.codeql_analyzer.create_database(
             source_path=str(self.repo_path),
             language=self.language,
@@ -362,26 +370,22 @@ class RepoAnalyzer:
         logger.info(f"    Database created: {db_path}")
         
         # Step 2: Build call graph
-        logger.info("[2/5] Building call graph...")
+        logger.info("[2/4] Building call graph...")
         self._build_call_graph()
         
         # Step 3: Extract function info
-        logger.info("[3/5] Extracting function information...")
+        logger.info("[3/4] Extracting function information...")
         self._extract_functions()
         
         # Step 4: Analyze dependencies
-        logger.info("[4/5] Analyzing dependencies...")
+        logger.info("[4/4] Analyzing dependencies...")
         self._analyze_dependencies()
-        
-        # Step 5: Detect entry points
-        logger.info("[5/5] Detecting entry points...")
-        self._detect_entry_points()
+
         
         logger.info("[RepoAnalyzer] Analysis complete!")
         logger.info(f"  - Functions: {len(self._functions)}")
         logger.info(f"  - Call graph edges: {len(self._call_graph_edges)}")
         logger.info(f"  - Dependencies: {len(self._dependencies)}")
-        logger.info(f"  - Entry points: {len(self._entry_points)}")
     
     def _build_call_graph(self):
         """Build the call graph (using CodeQL)."""
@@ -401,13 +405,18 @@ class RepoAnalyzer:
 
     
     def _extract_functions(self):
-        """Extract function information from the call graph."""
+        """Extract function information from the call graph.
+        
+        Only includes functions with resolved file paths (excludes builtins,
+        standard library, third-party packages, and unresolved dynamic calls).
+        """
         # Extract functions from call graph edges
         seen_functions = set()
+        skipped_unresolved = 0
         
         for edge in self._call_graph_edges:
-            # Add caller
-            if edge.caller_name not in seen_functions:
+            # Add caller (always has valid file since it's in user code)
+            if edge.caller_name not in seen_functions and edge.caller_file:
                 func = FunctionInfo(
                     name=edge.caller_name,
                     file=edge.caller_file,
@@ -417,22 +426,29 @@ class RepoAnalyzer:
                 self._functions[edge.caller_name] = func
                 seen_functions.add(edge.caller_name)
             
-            # Add callee
+            # Add callee only if it has a valid file path
+            # Skip builtins, stdlib, third-party, and unresolved dynamic calls
             if edge.callee_name not in seen_functions:
-                func = FunctionInfo(
-                    name=edge.callee_name,
-                    file=edge.callee_file,
-                    start_line=edge.callee_line,
-                    end_line=edge.callee_line
-                )
-                self._functions[edge.callee_name] = func
-                seen_functions.add(edge.callee_name)
+                if edge.callee_file and edge.callee_line > 0:
+                    func = FunctionInfo(
+                        name=edge.callee_name,
+                        file=edge.callee_file,
+                        start_line=edge.callee_line,
+                        end_line=edge.callee_line
+                    )
+                    self._functions[edge.callee_name] = func
+                    seen_functions.add(edge.callee_name)
+                else:
+                    skipped_unresolved += 1
             
-            # Build call relationships
+            # Build call relationships (only for resolved functions)
             if edge.caller_name in self._functions:
                 self._functions[edge.caller_name].calls.append(edge.callee_name)
             if edge.callee_name in self._functions:
                 self._functions[edge.callee_name].called_by.append(edge.caller_name)
+        
+        if skipped_unresolved > 0:
+            logger.debug(f"Skipped {skipped_unresolved} unresolved callee references (builtins/stdlib/third-party)")
     
     def _analyze_dependencies(self):
         """Analyze third-party library dependencies."""
@@ -490,27 +506,6 @@ class RepoAnalyzer:
         except Exception as e:
             logger.debug(f"Failed to analyze imports in {file}: {e}")
     
-    def _detect_entry_points(self):
-        """Detect entry point functions."""
-        entry_point_patterns = self._load_entry_point_patterns()
-        patterns = entry_point_patterns.get(self.language, [])
-        
-        for func in self._functions.values():
-            # Check whether the function name matches entry point patterns
-            func_name_lower = func.name.lower()
-            
-            for pattern in patterns:
-                if pattern in func_name_lower:
-                    func.is_entry_point = True
-                    self._entry_points.append(func)
-                    break
-            
-            # Special case: functions not called by others may be entry points
-            if not func.called_by and len(func.calls) > 0:
-                if func not in self._entry_points:
-                    func.is_entry_point = True
-                    self._entry_points.append(func)
-    
     # ========== Public properties ==========
     
     @property
@@ -528,11 +523,7 @@ class RepoAnalyzer:
         """Get dependency information."""
         return self._dependencies
     
-    @property
-    def entry_points(self) -> List[FunctionInfo]:
-        """Get entry point functions."""
-        return self._entry_points
-    
+
     # ========== Public methods ==========
     
     def get_function_callers(self, func_name: str) -> List[FunctionInfo]:
@@ -755,45 +746,6 @@ class RepoAnalyzer:
         
         return result
     
-    def find_data_flow(
-        self,
-        source_pattern: str,
-        sink_pattern: str,
-        max_paths: int = 10
-    ) -> List[List[str]]:
-        """
-        Find data-flow paths from source to sink.
-        
-        Args:
-            source_pattern: Source function name pattern (substring match)
-            sink_pattern: Sink function name pattern (substring match)
-            max_paths: Maximum number of paths to return
-        
-        Returns:
-            A list of paths; each path is a list of function names
-        """
-        # Find matching source and sink functions
-        sources = [f for name, f in self._functions.items() 
-                   if source_pattern.lower() in name.lower()]
-        sinks = [f for name, f in self._functions.items() 
-                 if sink_pattern.lower() in name.lower()]
-        
-        if not sources or not sinks:
-            return []
-        
-        # BFS search for paths
-        all_paths = []
-        
-        for source in sources:
-            for sink in sinks:
-                paths = self._find_paths_bfs(source.name, sink.name, max_depth=10)
-                all_paths.extend(paths)
-                
-                if len(all_paths) >= max_paths:
-                    return all_paths[:max_paths]
-        
-        return all_paths[:max_paths]
-    
     def search_pattern(self, pattern: str) -> List[CodeLocation]:
         """
         Search for a code pattern (simple text search).
@@ -832,35 +784,6 @@ class RepoAnalyzer:
         
         return results
     
-    def get_summary(self) -> Dict[str, Any]:
-        """Get an analysis summary."""
-        return {
-            "repo_path": str(self.repo_path),
-            "language": self.language,
-            "commit_hash": self.commit_hash,
-            "statistics": {
-                "total_functions": len(self._functions),
-                "call_graph_edges": len(self._call_graph_edges),
-                "dependencies": {
-                    "total": len(self._dependencies),
-                    "third_party": sum(1 for d in self._dependencies.values() if d.is_third_party),
-                    "builtin": sum(1 for d in self._dependencies.values() if d.is_builtin),
-                },
-                "entry_points": len(self._entry_points),
-            },
-            "entry_points": [
-                {"name": ep.name, "file": ep.file, "line": ep.start_line}
-                for ep in self._entry_points[:10]  # Only show the first 10
-            ],
-            "top_dependencies": [
-                {"name": name, "import_count": len(dep.import_locations)}
-                for name, dep in sorted(
-                    self._dependencies.items(),
-                    key=lambda x: len(x[1].import_locations),
-                    reverse=True
-                )[:10]
-            ]
-        }
     
     # ========== Helper methods ==========
     
@@ -886,38 +809,3 @@ class RepoAnalyzer:
         
         return results
     
-    def _find_paths_bfs(
-        self,
-        start: str,
-        end: str,
-        max_depth: int
-    ) -> List[List[str]]:
-        """BFS search for function call paths."""
-        if start not in self._functions or end not in self._functions:
-            return []
-        
-        paths = []
-        queue = deque([(start, [start])])
-        visited = set()
-        
-        while queue:
-            current, path = queue.popleft()
-            
-            if len(path) > max_depth:
-                continue
-            
-            if current == end:
-                paths.append(path)
-                continue
-            
-            if current in visited:
-                continue
-            visited.add(current)
-            
-            # Get called functions
-            if current in self._functions:
-                for callee in self._functions[current].calls:
-                    if callee not in path:  # Avoid cycles
-                        queue.append((callee, path + [callee]))
-        
-        return paths

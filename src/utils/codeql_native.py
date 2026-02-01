@@ -335,7 +335,7 @@ class CodeQLAnalyzer:
         
         # Determine database path
         if not database_name:
-            database_name = os.path.basename(source_path) + f"-{normalized_lang}-db"
+            database_name = os.path.basename(source_path) + f"-{normalized_lang}"
         
         db_path = os.path.join(self.config['database_dir'], database_name)
         

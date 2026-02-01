@@ -64,22 +64,22 @@ def extract_readable_text_from_markdown(markdown_content: str) -> str:
     return text
 
 
-def truncate_text(text: str, max_length: int = 60000, suffix: str = "\n\n...(truncated)") -> str:
-    """
-    Truncate text to a maximum length.
+# def truncate_text(text: str, max_length: int = 60000, suffix: str = "\n\n...(truncated)") -> str:
+#     """
+#     Truncate text to a maximum length.
 
-    Args:
-        text: Raw text.
-        max_length: Maximum length.
-        suffix: Suffix appended after truncation.
+#     Args:
+#         text: Raw text.
+#         max_length: Maximum length.
+#         suffix: Suffix appended after truncation.
 
-    Returns:
-        Truncated text.
-    """
-    if not text or len(text) <= max_length:
-        return text
+#     Returns:
+#         Truncated text.
+#     """
+#     if not text or len(text) <= max_length:
+#         return text
     
-    return text[:max_length - len(suffix)] + suffix
+#     return text[:max_length - len(suffix)] + suffix
 
 
 def clean_readme_for_llm(readme_content: str, max_length: int = 60000) -> str:
@@ -99,5 +99,7 @@ def clean_readme_for_llm(readme_content: str, max_length: int = 60000) -> str:
     # Extract readable text
     cleaned = extract_readable_text_from_markdown(readme_content)
     
-    # Truncate to a reasonable length
-    return truncate_text(cleaned, max_length)
+    # # Truncate to a reasonable length
+    # return truncate_text(cleaned, max_length)
+
+    return cleaned

@@ -24,7 +24,7 @@ from .repo_collector import RepoInfoCollector
 from .basic_info_analyzer import BasicInfoAnalyzer
 from .module_analyzer import ModuleAnalyzer
 from .file_summarizer import FileSummarizer
-from .deep_analyzer import DeepAnalyzer
+from .repo_analyzer import RepoAnalyzer
 
 __all__ = [
     # Configuration
@@ -42,5 +42,5 @@ __all__ = [
     "BasicInfoAnalyzer",
     "ModuleAnalyzer",
     "FileSummarizer",
-    "DeepAnalyzer",
+    "RepoAnalyzer",
 ]

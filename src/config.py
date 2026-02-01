@@ -37,6 +37,7 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
                 'vuln_data_path': Path(paths.get('vuln_data_path', '~/vuln/data/vuln.json')).expanduser(),
                 'repo_base_path': Path(paths.get('repo_base_path', '~/vuln/data/repos')).expanduser(),
                 'codeql_db_path': Path(paths.get('codeql_db_path', '~/vuln/codeql_dbs')).expanduser(),
+                'embedding_model_path': Path(paths.get('embedding_model_path', '~/vuln/models')).expanduser(),
             }
     except Exception as e:
         import logging
@@ -53,7 +54,7 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
         'vuln_data_path': project_root / "data" / "vuln.json",
         'repo_base_path': project_root / "data" / "repos",
         'codeql_db_path': project_root / "codeql_dbs",
-        
+        'embedding_model_path': project_root / "models",
     }
 
 
