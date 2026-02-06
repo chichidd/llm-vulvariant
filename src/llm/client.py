@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from utils.logger import get_logger
 
+from utils import DSTokenizerCompute
+
 logger = get_logger(__name__)
 
 
@@ -373,7 +375,9 @@ class DeepSeekClient(BaseLLMClient):
     
     def __init__(self, config: LLMConfig):
         super().__init__(config)
-    
+        self.token_compute = DSTokenizerCompute()
+        self.context_limit = 131072  # DeepSeek context limit
+
     def _process_extra_body(self, kwargs) -> Dict[str, Any]:
         if not self.config.enable_thinking:
             return {}

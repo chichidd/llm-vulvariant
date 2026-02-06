@@ -7,7 +7,7 @@ set -euo pipefail
 #   ./run_profiles.sh
 #   ./run_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir ./repo-profiles --verbose
 #   ./run_profiles.sh -- --verbose --some-other-flag 123
-#
+#.  under llm-vulvariant: ./scripts/run_all_software_profiles.sh  --llm-provider lab --llm-name DeepSeek-V3.2 --output-dir ./repo-profiles-0131  --force-full-analysis
 # Notes:
 # - Repo name A is the folder name under data/repos (first level only).
 # - You can pass any extra args; they will be forwarded to the command.

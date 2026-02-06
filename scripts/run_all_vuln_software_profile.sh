@@ -3,10 +3,11 @@
 # Script to generate software profiles for all vulnerabilities in vuln.json
 # Usage: ./run_all_vuln_software_profile.sh
 # Run sth like: software-profile --repo-name Megatron-LM --target-version a845aa7e12b3a117e24c2352b9e3e60bad2e3a17 --llm-provider lab --llm-name DeepSeek-V3.2 --output-dir ./repo-profiles-0131  --force-full-analysis
+# under llm-vulvariant: ./scripts/run_all_vuln_software_profile.sh
 set -e  # Exit on error
 
 VULN_JSON="$HOME/vuln/data/vuln.json"
-OUTPUT_DIR="./repo-profiles-0131"
+OUTPUT_DIR="./repo-profiles"
 
 echo "=========================================="
 echo "Software Profile Batch Generator"

@@ -8,6 +8,13 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+def _to_dict(obj: Any) -> Dict[str, Any]:
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    if isinstance(obj, dict):
+        return obj
+    return {}
+
 
 def clear_reasoning_content(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Drop provider-specific reasoning fields so histories stay serializable."""
@@ -52,32 +59,34 @@ def make_serializable(obj: Any):
         return f"<non-serializable: {type(obj).__name__}>"
 
 
-DEFAULT_COMPRESSION_PROMPT = """You are a professional conversation analysis and compression expert. Please analyze and compress the assistant's scan logs from the following vulnerability scanning process, extracting all key information.
+DEFAULT_COMPRESSION_PROMPT = """You are a professional conversation analysis and compression expert. Please analyze and compress the assistant's scan logs from the following vulnerability scanning process, extracting key REASONING information only.
 
-**Compression requirements (information must be complete):**
+**Important**: Do NOT include information about:
+- Which files/modules were checked (this is tracked separately)
+- Which files/modules are pending (this is tracked separately)
+- Reported vulnerability details (this is tracked separately)
+
+**Focus on extracting REASONING and INSIGHTS that are NOT tracked elsewhere:**
 
 1. **Reasoning process**: Summarize the analysis approach and reasoning chain
-     - Why these files/modules were checked
-     - What clues were found
-     - What conclusions were reached
+     - Why these files/modules were checked (the motivation/logic)
+     - What clues or patterns were found
+     - What conclusions were reached about the code
      - Which possibilities were ruled out and why
 
-2. **Vulnerability report**: If vulnerabilities were reported, preserve complete information
-     - File path, function name, line numbers
-     - Vulnerability type, description, evidence
-     - Similarity analysis, confidence, attack scenario
+2. **Failed attempts**: Record explorations that did not succeed
+     - What was tried but no vulnerability was found
+     - Why it was a false positive or dead end
+     - Lessons learned for future analysis
 
-3. **Failed attempts**: Record explorations that did not succeed
-     - Which paths were checked but no issues were found
-     - Errors or limitations encountered
-
-4. **Next-step plan**: If future analysis directions were mentioned
-     - Modules that still need to be checked
-     - Hypotheses to be validated
+3. **Next-step insights**: Hypotheses and strategies to validate
+     - Specific patterns or APIs to look for
+     - Suspected vulnerable code paths not yet confirmed
+     - Analysis strategies for remaining modules
 
 **Key principles:**
-- Do not lose any information that could affect follow-up analysis
-- Preserve enough context so later iterations can understand what was done
+- Only include information that helps understand the REASONING, not raw facts
+- Be concise - avoid redundancy with tracked progress data
 
 **Output format (JSON; ensure the object is wrapped by ```json and ```):**
 ```json
@@ -86,21 +95,16 @@ DEFAULT_COMPRESSION_PROMPT = """You are a professional conversation analysis and
     "summary": "<one-sentence summary of what this iteration did>",
     "reasoning": {
         "motivation": "<why these checks were performed>",
-        "analysis": "<analysis approach and logic>",
+        "analysis": "<key insights and analysis logic>",
         "conclusions": ["<conclusion_1>", "<conclusion_2>"]
     },
-    "vulnerabilities_reported": [
-        {<full vulnerability report details>}
-    ],
     "failed_attempts": [
         {
             "what": "<what was tried>",
             "why_failed": "<why it failed or why no issue was found>"
         }
     ],
-    "next_steps": ["<plan_1>", "<plan_2>"],
-    "modules_checked": ["<list_of_checked_modules_or_files>"],
-    "modules_pending": ["<list_of_pending_modules>" ]
+    "next_step_insights": ["<hypothesis or strategy to validate>"]
 }
 ```
 

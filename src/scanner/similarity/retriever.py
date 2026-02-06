@@ -12,7 +12,7 @@ repo_info['readme_content']
 
 from scanner.similarity.embedding import EmbeddingRetriever, EmbeddingRetrievalConfig
 from profiler.software.models import SoftwareProfile, ModuleInfo
-
+from typing import Tuple
 from pathlib import Path
 
 
@@ -85,6 +85,33 @@ class SimilarityRetriever:
 
 
 
+# from scanner.similarity.retriever import find_similar_modules_across_repos
+# # Example usage: Find similar modules for the first repository
+# source_repo_key = list(repo_similarity_dict.keys())[3]
+# print(f"\nAnalyzing: {source_repo_key}\n")
+
+# results = find_similar_modules_across_repos(
+#     source_repo_label=source_repo_key,
+#     repo_similarity_dict=repo_similarity_dict,
+#     all_profiles=all_profiles,
+#     text_retriever=text_retriever,
+#     top_k=3,
+#     module_similarity_threshold=0.7
+# )
+
+# print("\n" + "="*100)
+# print("SUMMARY OF MODULE SIMILARITY RESULTS")
+# print("="*100)
+# for target_label, data in results.items():
+#     print(f"\n{target_label}:")
+#     print(f"  Repository Similarity (avg): {data['repo_info']['repo_similarity']['avg']:.4f}")
+#     print(f"  Similar Module Pairs Found: {data['num_pairs']}")
+#     if data['num_pairs'] > 0:
+#         top_pair = data['similar_pairs'][0]
+#         print(f"  Top Module Match: {top_pair['source_module'].name} <-> {top_pair['target_module'].name} ({top_pair['similarity']:.4f})")
+
+
+
 def find_similar_modules_across_repos(
     source_repo_label: str,
     repo_similarity_dict: dict,
@@ -148,7 +175,7 @@ def find_similar_modules_across_repos(
     # Compare with each similar repo
     all_results = {}
     
-    for rank, (target_repo_label, desc_sim, apps_sim, users_sim) in enumerate(similar_repos, 1):
+    for rank, (target_repo_label, desc_sim, apps_sim, users_sim, jaccard_sim) in enumerate(similar_repos, 1):
         # Format: repo-name-commit[:12], commit is always 12 chars
         target_commit = target_repo_label[-12:]
         target_repo_name = target_repo_label[:-13]  # Remove '-commit' (13 chars)
@@ -220,4 +247,3 @@ def find_similar_modules_across_repos(
         }
     
     return all_results
-

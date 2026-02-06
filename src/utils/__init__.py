@@ -17,7 +17,7 @@ from .git_utils import (
 
 from .vuln_utils import read_vuln_data
 from .logger import get_logger
-
+from .ds_token import DSTokenizerCompute
 __all__ = [
     "get_git_commit",
     "checkout_commit",
@@ -32,4 +32,5 @@ __all__ = [
     "get_changed_files_with_status",
     "read_vuln_data",
     "get_logger",
+    "DSTokenizerCompute",
 ]

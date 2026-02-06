@@ -1,0 +1,5 @@
+name: llm-vulvariant-queries
+version: 1.0.0
+description: CodeQL queries for LLM vulnerability variant analysis
+dependencies:
+  codeql/python-all: "*"

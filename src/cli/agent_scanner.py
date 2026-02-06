@@ -12,7 +12,7 @@ from utils.git_utils import checkout_commit, get_git_commit
 from utils.logger import get_logger
 
 from scanner.agent import AgenticVulnFinder, load_software_profile, load_vulnerability_profile
-from scanner.agent.utils import clear_reasoning_content, make_serializable
+from scanner.agent.utils import make_serializable
 from config import _path_config
 
 logger = get_logger(__name__)
@@ -66,7 +66,7 @@ def main() -> None:
     logger.info(f"Will scan target commit: {args.target_commit[:12]} (different from current commit)")
 
     logger.info(f"Loading software profile from target commit {args.target_repo}@{args.target_commit[:12]}...")
-    software_profile, repo_analyzer = load_software_profile(args.target_repo, args.target_commit, base_dir=_path_config['repo_root'] / 'repo-profiles')
+    software_profile = load_software_profile(args.target_repo, args.target_commit, base_dir=_path_config['repo_root'] / 'repo-profiles')
     if not software_profile:
         logger.error(f"Failed to load software profile for target commit {args.target_commit[:12]}")
         return
@@ -77,6 +77,12 @@ def main() -> None:
     output_dir = resolve_output_dir(args)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Compute CodeQL database name based on repo and commit
+    # Format: {repo_name}-{commit_hash_short}-python
+    commit_short = args.target_commit[:8] if args.target_commit else "unknown"
+    codeql_database_name = f"{args.target_repo}-{commit_short}-python"
+    logger.info(f"Using CodeQL database: {codeql_database_name}")
+
     finder = AgenticVulnFinder(
         llm_client=llm_client,
         repo_path=target_repo_path,
@@ -85,6 +91,7 @@ def main() -> None:
         max_iterations=args.max_iterations,
         verbose=args.verbose,
         output_dir=output_dir,
+        codeql_database_name=codeql_database_name,
     )
 
     results = finder.run()
