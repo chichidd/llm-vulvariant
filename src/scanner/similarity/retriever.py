@@ -366,7 +366,9 @@ def _normalize_token(value: str) -> str:
 def _tokenize_text(value: str) -> Set[str]:
     if not value:
         return set()
-    return set(re.findall(r"[a-zA-Z0-9_\\.\\-/]+", value.lower()))
+    # Keep `-` at the end of the character class to avoid range parsing issues
+    # across Python regex engines (e.g. 3.13).
+    return set(re.findall(r"[a-zA-Z0-9_./-]+", value.lower()))
 
 
 def _jaccard_similarity(left: Set[str], right: Set[str]) -> float:
