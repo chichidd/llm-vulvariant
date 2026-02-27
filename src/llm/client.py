@@ -3,7 +3,6 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import os
 import time
-import logging
 import yaml
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,23 +11,6 @@ from utils.logger import get_logger
 from utils import DSTokenizerCompute
 
 logger = get_logger(__name__)
-
-
-# Logging
-logger = logging.getLogger(__name__)
-
-
-# DS_THINK_TOKENS = ('<think>', '</think>')
-
-
-# def concat_ds_think_content(reasoning: str, output: str) -> str:
-#     """Combine DeepSeek reasoning content and the final output content."""
-#     think_start, think_end = DS_THINK_TOKENS
-#     # Handle output=None (e.g., tool_calls present but no content)
-#     output = output or ''
-#     # Handle reasoning=None
-#     reasoning = reasoning or ''
-#     return ''.join([think_start, reasoning, think_end, output])
 
 
 def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -154,18 +136,6 @@ class LLMConfig:
                 self.base_url = "https://ai.nengyongai.cn/v1"
                 self.model = "gpt-5.1"
                 self.max_tokens = 65536
-
-
-
-
-# class LLMAPIError(Exception):
-#     """LLM API call error."""
-#     def __init__(self, message: str, status_code: int = None, response: Any = None):
-#         super().__init__(message)
-#         self.status_code = status_code
-#         self.response = response
-
-
 class LLMRetryExhaustedError(Exception):
     """Raised when LLM retries are exhausted."""
     def __init__(self, message: str, last_error: Exception = None):
@@ -206,7 +176,6 @@ class BaseLLMClient(ABC):
         # Import OpenAI exceptions if available
         try:
             from openai import (
-                APIError,
                 APIConnectionError,
                 RateLimitError,
                 APITimeoutError,

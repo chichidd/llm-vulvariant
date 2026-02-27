@@ -154,16 +154,6 @@ def get_glob_patterns(language: str, recursive: bool = True) -> List[str]:
     return [f"{prefix}*{ext}" for ext in sorted(exts)]
 
 
-def get_docker_base(language: str) -> str:
-    """Return the Docker base image for *language*."""
-    return LANGUAGE_CONFIG[language]["docker_base"]
-
-
-def get_build_cmd(language: str) -> str:
-    """Return the default Docker build command for *language*."""
-    return LANGUAGE_CONFIG[language]["build_cmd"]
-
-
 def get_run_cmd(language: str) -> str:
     """Return the default Docker run command for executing the PoC."""
     return LANGUAGE_CONFIG[language]["run_cmd"]
@@ -205,8 +195,3 @@ def detect_language(repo_path: Path) -> str:
     if scores[best] == 0:
         return "python"  # truly empty / unrecognised → safe fallback
     return best
-
-
-def supported_languages() -> List[str]:
-    """Return the list of supported language identifiers."""
-    return list(LANGUAGE_CONFIG.keys())

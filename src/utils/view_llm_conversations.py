@@ -86,60 +86,13 @@ find profiles/NeMo/*/conversations -name "*.json" -mtime +7 -delete
 
 """
 
-### Python script analysis
-# ```python
-# import json
-# from pathlib import Path
-
-# # Load conversation history
-# conversation_dir = Path("output_dir/NeMo/{version}/conversations")
-
-# # Count conversations
-# conversations = list(conversation_dir.glob("*.json"))
-# print(f"Total conversations: {len(conversations)}")
-
-# # Group by type
-# from collections import Counter
-# steps = [c.stem.split('_')[3] for c in conversations]
-# print(Counter(steps))
-
-# # Read a specific conversation
-# with open(conversations[0]) as f:
-#     conv = json.load(f)
-#     print(f"Step: {conv['step']}")
-#     print(f"Timestamp: {conv['timestamp']}")
-# ```
-
-# ## Configuration and controls
-
-# ### Disable conversation saving
-# If you do not need to save conversations (e.g., in production), you can add a check in the function:
-# ```python
-# # Add at the beginning of _save_llm_conversation
-# if not self.config.save_conversations:  # Requires adding this option to config
-#     return
-# ```
-
-# ### Limit number of saved conversations
-# You can implement automatic cleanup of old conversations:
-# ```python
-# def _cleanup_old_conversations(self, repo_name: str, version: str, keep_last: int = 100):
-#     """Keep the newest N conversations and delete older ones."""
-#     conversations_dir = self._get_result_dir(repo_name, version) / "conversations"
-#     conversations = sorted(conversations_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
-    
-#     if len(conversations) > keep_last:
-#         for old_conv in conversations[:-keep_last]:
-#             old_conv.unlink()
-# ```
 import json
 import sys
 from pathlib import Path
-from collections import Counter, defaultdict
-from datetime import datetime
+from collections import defaultdict
 
 from transformers import AutoTokenizer
-from typing import List, Dict, Union, Any
+from typing import List, Dict
 from .logger import get_logger
 
 logger = get_logger(__name__)

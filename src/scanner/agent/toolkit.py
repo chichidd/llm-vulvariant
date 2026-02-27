@@ -13,12 +13,9 @@ from typing import Any, Dict, List, Optional
 from config import _path_config
 from utils.codeql_native import CodeQLAnalyzer
 from utils.language import (
-    LANGUAGE_CONFIG,
-    ALL_SOURCE_EXTENSIONS,
     detect_language as detect_repo_language,
     get_codeql_pack,
     get_extensions,
-    get_glob_patterns,
 )
 from utils.logger import get_logger
 from utils.tree_utils import build_path_tree, format_file_size, render_tree
@@ -349,24 +346,6 @@ dependencies:
                     },
                 },
             },
-            # {
-            #     "type": "function",
-            #     "function": {
-            #         "name": "find_dangerous_patterns",
-            #         "description": "Search for potentially dangerous patterns in a file or folder (e.g., subprocess calls, eval, exec, pickle).",
-            #         "parameters": {
-            #             "type": "object",
-            #             "properties": {
-            #                 "path": {"type": "string", "description": "Relative path to the file or folder to analyze."},
-            #                 "pattern": {
-            #                     "type": "string",
-            #                     "description": "Optional: explicit pattern to search for. If omitted, a default set of dangerous patterns is used.",
-            #                 },
-            #             },
-            #             "required": ["path"],
-            #         },
-            #     },
-            # },
             {
                 "type": "function",
                 "function": {
@@ -555,8 +534,6 @@ dependencies:
                 return self._get_function_code(**parameters)
             if tool_name == "get_imports":
                 return self._get_imports(**parameters)
-            # if tool_name == "find_dangerous_patterns":
-            #     return self._find_dangerous_patterns(**parameters)
             if tool_name == "analyze_data_flow":
                 return self._analyze_data_flow(**parameters)
             if tool_name == "report_vulnerability":
@@ -800,74 +777,6 @@ dependencies:
             return ToolResult(success=True, content="\n".join(imports))
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
-
-    # def _find_dangerous_patterns(self, path: str, pattern: str = None) -> ToolResult:
-    #     default_patterns = [
-    #         r"subprocess\.(run|call|Popen|check_output|check_call)",
-    #         r"os\.(system|popen|spawn|exec)",
-    #         r"eval\s*\(",
-    #         r"exec\s*\(",
-    #         r"pickle\.(load|loads)",
-    #         r"yaml\.(load|unsafe_load)",
-    #         r"__import__\s*\(",
-    #         r"compile\s*\(",
-    #         r"marshal\.(load|loads)",
-    #         r"shelve\.",
-    #         r"shell\s*=\s*True",
-    #         r"codecs\.(decode|encode)",
-    #         r"ctypes\.",
-    #         r"cffi\.",
-    #         r"multiprocessing\.(Pool|Process)",
-    #     ]
-    #     search_patterns = [pattern] if pattern else default_patterns
-    #     full_path = self.repo_path / path
-    #     if not full_path.exists():
-    #         return ToolResult(success=False, content="", error=f"Path not found: {path}")
-    #     try:
-    #         results: List[Dict[str, Any]] = []
-    #         files = [full_path] if full_path.is_file() else list(full_path.rglob("*.py"))
-    #         for py_file in files:
-    #             try:
-    #                 content = py_file.read_text(encoding="utf-8", errors="ignore")
-    #                 lines = content.split("\n")
-    #                 rel_path = str(py_file.relative_to(self.repo_path))
-    #                 for pattern in search_patterns:
-    #                     regex = re.compile(pattern, re.IGNORECASE)
-    #                     for i, line in enumerate(lines):
-    #                         if regex.search(line):
-    #                             results.append(
-    #                                 {
-    #                                     "file": rel_path,
-    #                                     "line": i + 1,
-    #                                     "pattern": pattern,
-    #                                     "code": line.strip(),
-    #                                 }
-    #                             )
-    #             except Exception:  # pylint: disable=broad-except
-    #                 continue
-    #         if not results:
-    #             return ToolResult(success=True, content="No dangerous patterns found")
-    #         file_groups: Dict[str, List[Dict[str, Any]]] = {}
-    #         for item in results:
-    #             file_groups.setdefault(item["file"], []).append(item)
-    #         result_lines = [f"Found {len(results)} potentially dangerous patterns in {len(file_groups)} files:\n"]
-    #         for file_path in sorted(file_groups.keys())[:30]:
-    #             file_matches = file_groups[file_path]
-    #             result_lines.append(f"\n{file_path}:")
-    #             for entry in file_matches[:5]:
-    #                 result_lines.append(f"  L{entry['line']}: {entry['code'][:80]}")
-    #                 result_lines.append(f"    → Pattern: {entry['pattern']}")
-    #             if len(file_matches) > 5:
-    #                 result_lines.append(
-    #                     f"  ... and {len(file_matches) - 5} more patterns in this file"
-    #                 )
-    #         if len(file_groups) > 30:
-    #             result_lines.append(
-    #                 f"\n... and {len(file_groups) - 30} more files with dangerous patterns"
-    #             )
-    #         return ToolResult(success=True, content="\n".join(result_lines))
-    #     except Exception as exc:  # pylint: disable=broad-except
-    #         return ToolResult(success=False, content="", error=str(exc))
 
     def _analyze_data_flow(self, file_path: str, function_name: str) -> ToolResult:
         full_path = self.repo_path / file_path

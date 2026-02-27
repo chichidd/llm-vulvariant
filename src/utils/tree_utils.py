@@ -1,7 +1,6 @@
 """Directory tree building and rendering utilities."""
 
 from typing import Dict, List, Tuple, Any, Optional, Callable
-from pathlib import Path
 
 
 def build_path_tree(paths_with_values: List[Tuple[str, Any]]) -> Dict:
@@ -124,35 +123,3 @@ def format_file_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024:.1f}KB"
     else:
         return f"{size_bytes / (1024 * 1024):.1f}MB"
-
-
-def build_directory_structure_with_sizes(
-    paths_with_sizes: List[Tuple[str, int]], 
-    max_depth: Optional[int] = None
-) -> str:
-    """
-    Build a directory tree from file paths and sizes.
-
-    Args:
-        paths_with_sizes: [(path, size_in_bytes), ...]
-        max_depth: Maximum display depth.
-
-    Returns:
-        A formatted tree string (with file sizes).
-    """
-    if not paths_with_sizes:
-        return "Empty directory"
-    
-    # Build the path tree.
-    tree = build_path_tree(paths_with_sizes)
-    
-    # Render the tree (format file sizes).
-    lines = render_tree(tree, value_formatter=format_file_size, max_depth=max_depth)
-    
-    # Add stats.
-    total_size = sum(size for _, size in paths_with_sizes)
-    header = f"Total files: {len(paths_with_sizes)} ({format_file_size(total_size)})\n"
-    if max_depth:
-        header += f"(Showing depth: {max_depth})\n"
-    
-    return header + "\n".join(lines)

@@ -24,10 +24,6 @@ from .vulnerability import (
 # Storage manager
 from .profile_storage import ProfileStorageManager
 
-# Keep backward compatibility from legacy locations (gradually deprecating)
-# from .software_profile import SoftwareProfiler  # Moved to software/analyzer.py
-# from .vuln_profile import VulnerabilityProfiler  # Moved to vulnerability/analyzer.py
-
 __all__ = [
     # Software profiling
     "SoftwareProfiler",

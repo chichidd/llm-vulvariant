@@ -11,12 +11,11 @@ for submission to project maintainers.
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from utils.language import get_docker_base, get_run_cmd
+from utils.language import get_run_cmd
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -66,7 +65,6 @@ class ReportGenerator:
     def generate_all(
         self,
         exploitability_results: Dict[str, Any],
-        docker_verification: Optional[Dict[str, Any]] = None,
         output_dir: Optional[Path] = None,
         cve_id: Optional[str] = None,
     ) -> Dict[str, str]:
@@ -74,7 +72,6 @@ class ReportGenerator:
 
         Args:
             exploitability_results: Content of exploitability.json.
-            docker_verification: Content of docker_verification.json (optional).
             output_dir: Directory to write reports. If None, only returns content.
             cve_id: CVE ID if assigned.
 
@@ -84,15 +81,11 @@ class ReportGenerator:
         reports = {}
 
         # Generate GHSA report for each exploitable finding
-        ghsa_reports = self.generate_ghsa_reports(
-            exploitability_results, docker_verification, cve_id
-        )
+        ghsa_reports = self.generate_ghsa_reports(exploitability_results, cve_id)
         reports["ghsa_reports"] = ghsa_reports
 
         # Generate comprehensive research report
-        full_report = self.generate_full_report(
-            exploitability_results, docker_verification, cve_id
-        )
+        full_report = self.generate_full_report(exploitability_results, cve_id)
         reports["full_report"] = full_report
 
         # Write to files if output_dir specified
@@ -136,7 +129,6 @@ class ReportGenerator:
     def generate_ghsa_reports(
         self,
         exploitability_results: Dict[str, Any],
-        docker_verification: Optional[Dict[str, Any]] = None,
         cve_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Generate GitHub Security Advisory reports for exploitable findings.
@@ -148,12 +140,7 @@ class ReportGenerator:
         """
         reports = []
         results = exploitability_results.get("results", [])
-
-        # Build verification lookup
-        verifications = {}
-        if docker_verification:
-            for v in docker_verification.get("verifications", []):
-                verifications[v.get("finding_id", "")] = v
+        verifications = self._extract_finding_verifications(exploitability_results)
 
         for result in results:
             verdict = result.get("verdict", "").upper()
@@ -162,7 +149,7 @@ class ReportGenerator:
 
             finding_id = result.get("finding_id", "unknown")
             vuln_info = result.get("original_finding", {})
-            docker_v = verifications.get(finding_id)
+            docker_v = verifications.get(finding_id) or result.get("docker_verification")
 
             report = self._build_ghsa_report(
                 finding_id=finding_id,
@@ -220,7 +207,7 @@ class ReportGenerator:
 
         # Docker verification section
         docker_section = ""
-        if docker_verification and docker_verification.get("verification_verdict") == "VERIFIED_EXPLOITABLE":
+        if self._docker_verification_verdict(docker_verification) == "VERIFIED_EXPLOITABLE":
             docker_section = self._build_docker_evidence_section(docker_verification)
 
         # Build the GHSA content
@@ -409,6 +396,17 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                     lines.append(stdout[:1500])
                     lines.append("```")
                 lines.append("")
+        else:
+            execution_output = docker_verification.get("execution_output", "").strip()
+            if execution_output:
+                lines.extend([
+                    "### Execution Log",
+                    "",
+                    "```",
+                    execution_output[:1500],
+                    "```",
+                    "",
+                ])
 
         # PoC generation info
         poc_gen = docker_verification.get("poc_generation", {})
@@ -431,6 +429,13 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                 for f in files:
                     lines.append(f"- `{f}`")
                 lines.append("")
+        elif docker_verification.get("poc_script_path"):
+            lines.extend([
+                "### Evidence Files",
+                "",
+                f"- `{docker_verification['poc_script_path']}`",
+                "",
+            ])
 
         # Screenshot placeholder
         lines.extend([
@@ -450,7 +455,6 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
     def generate_full_report(
         self,
         exploitability_results: Dict[str, Any],
-        docker_verification: Optional[Dict[str, Any]] = None,
         cve_id: Optional[str] = None,
     ) -> str:
         """Generate a comprehensive security research report.
@@ -461,12 +465,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         results = exploitability_results.get("results", [])
         summary = exploitability_results.get("summary", {})
         metadata = exploitability_results.get("metadata", {})
-
-        # Build verification lookup
-        verifications = {}
-        if docker_verification:
-            for v in docker_verification.get("verifications", []):
-                verifications[v.get("finding_id", "")] = v
+        verifications = self._extract_finding_verifications(exploitability_results)
 
         lines = [
             f"# Security Research Report: {self.repo_name}",
@@ -493,8 +492,8 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         ]
 
         # Docker verification summary
-        if docker_verification:
-            docker_summary = docker_verification.get("summary", {})
+        if verifications:
+            docker_summary = self._summarize_docker_verifications(verifications)
             lines.extend([
                 "### Docker Verification Results",
                 "",
@@ -620,7 +619,6 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         verdict = result.get("verdict", "UNKNOWN")
 
         source_analysis = result.get("source_analysis", {})
-        sink_analysis = result.get("sink_analysis", {})
         attack_path = source_analysis.get("attack_path", []) if source_analysis else []
 
         lines = [
@@ -656,7 +654,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
 
         # Docker verification results
         if docker_verification:
-            dv_verdict = docker_verification.get("verification_verdict", "N/A")
+            dv_verdict = self._docker_verification_verdict(docker_verification) or "N/A"
             lines.append(f"**Docker Verification**: {dv_verdict}")
             lines.append("")
 
@@ -678,12 +676,76 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                                 "",
                             ])
                         break
+                else:
+                    execution_output = docker_verification.get("execution_output", "").strip()
+                    if execution_output:
+                        lines.extend([
+                            "**PoC Output**:",
+                            "```",
+                            execution_output[:1500],
+                            "```",
+                            "",
+                        ])
 
         lines.append("---")
         lines.append("")
         return "\n".join(lines)
 
     # ---- Helpers ----
+
+    def _extract_finding_verifications(
+        self, exploitability_results: Dict[str, Any]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Extract docker verification records keyed by finding_id."""
+        verifications: Dict[str, Dict[str, Any]] = {}
+        for result in exploitability_results.get("results", []):
+            finding_id = result.get("finding_id")
+            docker_v = result.get("docker_verification")
+            if finding_id and isinstance(docker_v, dict):
+                verifications[finding_id] = docker_v
+        return verifications
+
+    @staticmethod
+    def _docker_verification_verdict(
+        docker_verification: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """Normalize docker verification verdict for old/new result schemas."""
+        if not isinstance(docker_verification, dict):
+            return None
+
+        explicit_verdict = str(docker_verification.get("verification_verdict", "")).strip().upper()
+        if explicit_verdict:
+            return explicit_verdict
+        if docker_verification.get("exploit_confirmed"):
+            return "VERIFIED_EXPLOITABLE"
+        if docker_verification.get("run_success"):
+            return "VERIFICATION_FAILED"
+        if docker_verification.get("build_success"):
+            return "PARTIAL_VERIFICATION"
+        return "GENERATION_FAILED"
+
+    def _summarize_docker_verifications(
+        self, verifications: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """Summarize docker verification outcomes across findings."""
+        summary = {
+            "verified_exploitable": 0,
+            "partial_verification": 0,
+            "verification_failed": 0,
+            "generation_failed": 0,
+        }
+
+        for docker_v in verifications.values():
+            verdict = self._docker_verification_verdict(docker_v)
+            if verdict == "VERIFIED_EXPLOITABLE":
+                summary["verified_exploitable"] += 1
+            elif verdict == "PARTIAL_VERIFICATION":
+                summary["partial_verification"] += 1
+            elif verdict in {"VERIFICATION_FAILED", "NOT_VERIFIED"}:
+                summary["verification_failed"] += 1
+            else:
+                summary["generation_failed"] += 1
+        return summary
 
     def _determine_severity(
         self, vuln_type: str, verdict: str, exploitability: Dict[str, Any]

@@ -5,21 +5,12 @@ import logging
 from pathlib import Path
 import argparse
 
-logger = logging.getLogger(__name__)
+try:
+    from cli.common import setup_logging
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from common import setup_logging
 
-def setup_logging(verbose: bool = False):
-    """Configure logging output."""
-    from utils.logger import set_global_log_level
-    
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        stream=sys.stderr
-    )
-    # Set the global log level; affects all loggers created via get_logger().
-    set_global_log_level(level)
+logger = logging.getLogger(__name__)
 
 
 def parse_args():

@@ -60,7 +60,7 @@ Key point:
 
 2. For each candidate module, you can use the following tools depending on your needs:
     - Use list_files_in_folder to quickly understand the module
-    - Use find_dangerous_patterns to locate potential sinks
+    - Use search_in_file/search_in_folder to locate potential sinks
     - Use search_in_folder to identify sources (config parsing, user input, file reads, etc.)
     - Use read_file or get_function_code to inspect suspicious code in depth
     - Use analyze_data_flow to trace data flow from source to sink

@@ -14,18 +14,10 @@ from datetime import datetime
 from llm import BaseLLMClient, create_llm_client, LLMConfig
 from config import _path_config
 from profiler.profile_storage import ProfileStorageManager
-from utils.git_utils import get_git_commit, checkout_commit, get_diff_stats, get_changed_files_with_status
+from utils.git_utils import get_git_commit, checkout_commit
 from utils.logger import get_logger
-# from utils.path_utils import to_relative_path
 
-# def to_relative_path(file_path: str, repo_path: Path) -> str:
-#     """transform absolute path to relative path from repo root"""
-#     try:
-#         return str(Path(file_path).relative_to(repo_path))
-#     except ValueError:
-#         return file_path
-
-from .models import SoftwareProfile, ModuleInfo, ModuleTree, DataFlowPattern
+from .models import SoftwareProfile, ModuleInfo, DataFlowPattern
 from .repo_collector import RepoInfoCollector
 from .basic_info_analyzer import BasicInfoAnalyzer
 from .module_analyzer import ModuleAnalyzer, SkillModuleAnalyzer
@@ -216,94 +208,82 @@ class SoftwareProfiler:
         
         # 获取版本信息
         original_version = get_git_commit(str(repo_path))
+        changed_commit = False
         if target_version:
             logger.info(f"Target version: {target_version[:8]}...")
             if original_version != target_version:
                 logger.info(f"Checking out to target version...")
                 if not checkout_commit(str(repo_path), target_version):
                     raise RuntimeError(f"Failed to checkout to: {target_version}")
-        version = target_version if target_version else original_version
-        
-        if version:
-            logger.info(f"Git commit hash: {version[:8]}...")
-        else:
-            logger.warning("Could not get git commit hash, using 'unknown'")
-            version = "unknown"
-        
-        # 加载或创建 profile_info
-        profile_info = self.storage_manager.load_profile_info(repo_name) if self.storage_manager else None
-        is_first_run = (profile_info is None)
-        
-        if is_first_run:
-            logger.info("First run detected, performing full analysis")
-            profile_info = {
-                "repo_name": repo_name,
-                "base_commit": version,
-                "first_analysis_date": datetime.now().isoformat(),
-                "llm_config": {
-                    "model": self.llm_client.config.model if self.llm_client else "none",
-                    "temperature": self.llm_client.config.temperature if self.llm_client else 0.0,
-                } if self.llm_client else {},
-                "analysis_history": [{
+                changed_commit = True
+        try:
+            version = target_version if target_version else original_version
+            
+            if version:
+                logger.info(f"Git commit hash: {version[:8]}...")
+            else:
+                logger.warning("Could not get git commit hash, using 'unknown'")
+                version = "unknown"
+            
+            # 加载或创建 profile_info
+            profile_info = self.storage_manager.load_profile_info(repo_name) if self.storage_manager else None
+            is_first_run = (profile_info is None)
+            
+            if is_first_run:
+                logger.info("First run detected, performing full analysis")
+                profile_info = {
+                    "repo_name": repo_name,
+                    "base_commit": version,
+                    "first_analysis_date": datetime.now().isoformat(),
+                    "llm_config": {
+                        "model": self.llm_client.config.model if self.llm_client else "none",
+                        "temperature": self.llm_client.config.temperature if self.llm_client else 0.0,
+                    } if self.llm_client else {},
+                    "analysis_history": [{
+                        "version": version,
+                        "date": datetime.now().isoformat(),
+                        "type": "full_analysis"
+                    }]
+                }
+                if self.storage_manager:
+                    self.storage_manager.save_profile_info(profile_info, repo_name)
+            else:
+                base_commit = profile_info.get("base_commit")
+                logger.info(f"Found existing profile. Base commit: {base_commit[:8] if base_commit else 'N/A'}...")
+            
+            # 检查是否已有完成的画像
+            if self.storage_manager and not force_full_analysis:
+                path_parts = (repo_name, version) if version else (repo_name,)
+                existing_profile_json = self.storage_manager.load_final_result("software_profile.json", *path_parts)
+                if existing_profile_json:
+                    logger.info(f"Found completed profile, loading from cache...")
+                    existing_profile = json.loads(existing_profile_json)
+                    return SoftwareProfile.from_dict(existing_profile)
+            
+            logger.info("Performing full analysis...")
+            profile = self._generate_profile_full(repo_path, repo_name, version)
+            
+            # 更新分析历史
+            if not is_first_run:
+                if "analysis_history" not in profile_info:
+                    profile_info["analysis_history"] = []
+                profile_info["analysis_history"].append({
                     "version": version,
                     "date": datetime.now().isoformat(),
                     "type": "full_analysis"
-                }]
-            }
-            if self.storage_manager:
-                self.storage_manager.save_profile_info(profile_info, repo_name)
-        else:
-            base_commit = profile_info.get("base_commit")
-            logger.info(f"Found existing profile. Base commit: {base_commit[:8] if base_commit else 'N/A'}...")
-        
-        # 检查是否已有完成的画像
-        if self.storage_manager and not force_full_analysis:
-            path_parts = (repo_name, version) if version else (repo_name,)
-            existing_profile_json = self.storage_manager.load_final_result("software_profile.json", *path_parts)
-            if existing_profile_json:
-                logger.info(f"Found completed profile, loading from cache...")
-                existing_profile = json.loads(existing_profile_json)
-                return SoftwareProfile.from_dict(existing_profile)
-        
-        # 决定分析策略
-        # use_incremental = (
-        #     not is_first_run and 
-        #     not force_full_analysis and 
-        #     version != profile_info.get("base_commit") and
-        #     version != "unknown" and
-        #     profile_info.get("base_commit") != "unknown"
-        # )
-        
-        # if use_incremental:
-        #     logger.info("Performing incremental analysis...")
-        #     profile = self._generate_profile_incremental(repo_path, repo_name, version, profile_info)
-        # else:
-        #     logger.info("Performing full analysis...")
-        #     profile = self._generate_profile_full(repo_path, repo_name, version)
+                })
+                if self.storage_manager:
+                    self.storage_manager.save_profile_info(profile_info, repo_name)
             
-        logger.info("Performing full analysis...")
-        profile = self._generate_profile_full(repo_path, repo_name, version)
-        
-        # 更新分析历史
-        if not is_first_run:
-            if "analysis_history" not in profile_info:
-                profile_info["analysis_history"] = []
-            profile_info["analysis_history"].append({
-                "version": version,
-                "date": datetime.now().isoformat(),
-                # "type": "incremental_analysis" if use_incremental else "full_analysis"
-                "type": "full_analysis"
-            })
-            if self.storage_manager:
-                self.storage_manager.save_profile_info(profile_info, repo_name)
-        
-        logger.info(f"Profile generation completed for: {repo_name}")
-        
-        if target_version and original_version != target_version:
-            # restore the cur
-            checkout_commit(str(repo_path), original_version)
-            logger.info(f"Restored repository to original version: {original_version[:8]}...")
-        return profile
+            logger.info(f"Profile generation completed for: {repo_name}")
+            return profile
+        finally:
+            if changed_commit and original_version:
+                restored = checkout_commit(str(repo_path), original_version)
+                if restored:
+                    logger.info(f"Restored repository to original version: {original_version[:8]}...")
+                else:
+                    logger.error(f"Failed to restore repository to original version: {original_version[:8]}...")
     
     def _generate_profile_full(self, repo_path: Path, repo_name: str, version: str) -> SoftwareProfile:
         """执行完整的profile分析"""
@@ -767,141 +747,3 @@ class SoftwareProfiler:
             'dependency_usage_count': dependency_usage_count,
             'total_functions': total_functions,
         }
-
-    # def _generate_profile_incremental(
-    #     self,
-    #     repo_path: Path,
-    #     repo_name: str,
-    #     version: str,
-    #     profile_info: Dict
-    # ) -> SoftwareProfile:
-    #     """执行增量profile分析: TODO"""
-    #     base_commit = profile_info.get("base_commit")
-    #     logger.info(f"Analyzing changes from {base_commit[:8]}... to {version[:8]}...")
-        
-    #     # 获取变更的文件
-    #     changed_files_with_status = get_changed_files_with_status(str(repo_path), base_commit, version)
-    #     changed_files = [f for _, f in changed_files_with_status]
-    #     logger.info(f"Found {len(changed_files)} changed files")
-        
-    #     diff_stats = get_diff_stats(str(repo_path), base_commit, version)
-    #     if diff_stats:
-    #         logger.info(f"Diff statistics:\n{diff_stats}")
-        
-    #     base_path_parts = (repo_name, base_commit) if base_commit else (repo_name,)
-    #     base_repo_info = self.storage_manager.load_checkpoint("repo_info", *base_path_parts) if self.storage_manager else None
-    #     base_file_summaries = base_repo_info.get('file_summaries', {}) if base_repo_info else {}
-        
-    #     # 收集当前版本的仓库信息
-    #     logger.info("Step 1/4: Collecting repo info (incremental)...")
-    #     repo_info = self.repo_collector.collect(repo_path)
-    #     repo_info['commit_hash'] = version
-    #     repo_info['base_commit'] = base_commit
-    #     repo_info['changed_files'] = changed_files
-    #     repo_info['diff_stats'] = diff_stats
-        
-    #     # 文件摘要（复用未变更文件的摘要）
-    #     if self.enable_llm_file_summary:
-    #         logger.info("Processing file summaries (incremental)...")
-    #         new_file_summaries = {}
-    #         reused_count = 0
-    #         new_analysis_count = 0
-            
-    #         changed_files_set = set(to_relative_path(str(repo_path / f), repo_path) for f in changed_files)
-            
-    #         # 复用未变更文件的摘要
-    #         for file_path in repo_info['files']:
-    #             if file_path not in changed_files_set and file_path in base_file_summaries:
-    #                 new_file_summaries[file_path] = base_file_summaries[file_path]
-    #                 reused_count += 1
-    #             else:
-    #                 new_analysis_count += 1
-            
-    #         logger.info(f"Reused {reused_count} summaries, analyzing {new_analysis_count} new/changed files")
-            
-    #         # 分析新文件或变更文件
-    #         changed_or_new_files = [f for f in repo_info['files'] if f not in new_file_summaries]
-    #         if changed_or_new_files:
-    #             summaries_for_changed = self.file_summarizer.summarize_files(
-    #                 repo_path,
-    #                 changed_or_new_files,
-    #                 storage_manager=self.storage_manager,
-    #                 repo_name=repo_name,
-    #                 version=version,
-    #             )
-    #             new_file_summaries.update(summaries_for_changed)
-            
-    #         repo_info['file_summaries'] = new_file_summaries
-    #     else:
-    #         repo_info['file_summaries'] = {}
-        
-    #     # 深度分析（如果启用）
-    #     if self.deep_analyzer:
-    #         logger.info("Performing deep static analysis (incremental)...")
-    #         cache_dir = self.output_dir / repo_name / ".cache" / "repo_analyzer" if self.output_dir else None
-    #         deep_analysis = self.deep_analyzer.analyze(repo_path, cache_dir=cache_dir)
-    #         repo_info['deep_analysis'] = deep_analysis
-        
-    #     # 保存当前版本的repo_info
-    #     path_parts = (repo_name, version) if version else (repo_name,)
-    #     if self.storage_manager:
-    #         self.storage_manager.save_checkpoint("repo_info", repo_info, *path_parts)
-        
-    #     # Step 2-4: 完整分析基本信息和模块（增量时也需要重新分析）
-    #     logger.info("Step 2/4: Analyzing basic info...")
-    #     basic_info = self.basic_info_analyzer.analyze(
-    #         repo_path, repo_info, repo_name, version, storage_manager=self.storage_manager
-    #     )
-    #     if self.storage_manager:
-    #         self.storage_manager.save_checkpoint("basic_info", basic_info, *path_parts)
-        
-    #     logger.info("Step 3/4: Analyzing modules...")
-    #     modules_result = self.module_analyzer.analyze(
-    #         repo_info, 
-    #         repo_path,
-    #         storage_manager=self.storage_manager,
-    #         repo_name=repo_name,
-    #         version=version
-    #     )
-    #     if self.storage_manager:
-    #         self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
-        
-    #     logger.info("Step 4/4: Building software profile...")
-    #     profile = SoftwareProfile(
-    #         name=repo_name,
-    #         version=version,
-    #         description=basic_info.get("description", ""),
-    #         target_application=basic_info.get("target_application", []),
-    #         target_user=basic_info.get("target_user", []),
-    #         repo_info=repo_info,
-    #         modules=modules_result.get('modules', []) if modules_result else [],
-    #     )
-        
-    #     # 如果有深度分析，增强profile
-    #     if repo_info.get('deep_analysis'):
-    #         logger.info("Enhancing profile with deep analysis...")
-    #         deep_analysis = repo_info['deep_analysis']
-            
-    #         base_modules = modules_result.get('modules', []) if modules_result else []
-    #         modules = self._enhance_modules_with_deep_analysis(base_modules, deep_analysis)
-    #         profile.modules = modules
-            
-    #         # 提取数据流模式
-    #         data_flow_patterns = self._extract_data_flow_patterns(modules, deep_analysis)
-    #         profile.data_flow_patterns = data_flow_patterns
-            
-    #         project_features = self._extract_project_level_features(modules, deep_analysis)
-    #         profile.common_data_sources = project_features.get('common_data_sources', [])
-    #         profile.common_data_formats = project_features.get('common_data_formats', [])
-    #         profile.third_party_libraries = project_features.get('third_party_libraries', [])
-    #         profile.builtin_libraries = project_features.get('builtin_libraries', [])
-    #         profile.dependency_usage_count = project_features.get('dependency_usage_count', {})
-    #         profile.total_functions = project_features.get('total_functions', 0)
-    #         profile.entry_point_count = project_features.get('entry_point_count', 0)
-        
-    #     # 保存最终画像
-    #     if self.storage_manager:
-    #         self.storage_manager.save_final_result("software_profile.json", profile.to_json(), *path_parts)
-        
-    #     return profile
-    

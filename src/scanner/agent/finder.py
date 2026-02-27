@@ -301,10 +301,9 @@ class AgenticVulnFinder:
         self.conversation_history = [
             {"role": "system", "content": build_system_prompt(self.vulnerability_profile, self.toolkit)}
         ]
-        iteration = 0 # essentailly is the repetition
-        
-        
-        while True:
+        iteration = 0  # iteration index
+
+        while iteration < self.max_iterations:
             if self.verbose:
                 logger.info(f"\n[ITERATION {iteration + 1}/{self.max_iterations}]")
             self.conversation_history.append(
@@ -313,12 +312,12 @@ class AgenticVulnFinder:
             prev_conv_length = len(self.conversation_history)
             _ = self._run_turn(iteration)
             response = self.conversation_history[-1].content if hasattr(self.conversation_history[-1], "content") else self.conversation_history[-1].get("content")
-            completion_keywords = ["analysis complete"] # currently only "analysis complete" as stop words
-            if response and any(keyword in response.lower() for keyword in completion_keywords):
-                if self.verbose:
-                    logger.info("- LLM indicates analysis is complete")
-                    # break
-                # some logic to add about how to finalize the conversation
+            completion_keywords = ["analysis complete"]  # currently only "analysis complete" as stop words
+            should_stop = bool(
+                response and any(keyword in response.lower() for keyword in completion_keywords)
+            )
+            if should_stop and self.verbose:
+                logger.info("- LLM indicates analysis is complete")
 
             if self.output_dir:
                 conversations_dir = self.output_dir / "conversations"
@@ -342,17 +341,18 @@ class AgenticVulnFinder:
                 )
             
             iteration += 1
-            if iteration >= self.max_iterations:
-                if self.verbose:
-                    logger.warning(f"Reached maximum iterations ({self.max_iterations})")
+            if should_stop:
                 break
+
+        if iteration >= self.max_iterations and self.verbose:
+            logger.warning(f"Reached maximum iterations ({self.max_iterations})")
         
         # Finalize memory
         self._finalize_memory()
         
         return {
             "vulnerabilities": self.found_vulnerabilities,
-            "iterations": iteration + 1,
+            "iterations": iteration,
             "conversation_length": len(self.conversation_history),
         }
     
