@@ -18,17 +18,17 @@ logger = get_logger(__name__)
 logger = logging.getLogger(__name__)
 
 
-DS_THINK_TOKENS = ('<think>', '</think>')
+# DS_THINK_TOKENS = ('<think>', '</think>')
 
 
-def concat_ds_think_content(reasoning: str, output: str) -> str:
-    """Combine DeepSeek reasoning content and the final output content."""
-    think_start, think_end = DS_THINK_TOKENS
-    # Handle output=None (e.g., tool_calls present but no content)
-    output = output or ''
-    # Handle reasoning=None
-    reasoning = reasoning or ''
-    return ''.join([think_start, reasoning, think_end, output])
+# def concat_ds_think_content(reasoning: str, output: str) -> str:
+#     """Combine DeepSeek reasoning content and the final output content."""
+#     think_start, think_end = DS_THINK_TOKENS
+#     # Handle output=None (e.g., tool_calls present but no content)
+#     output = output or ''
+#     # Handle reasoning=None
+#     reasoning = reasoning or ''
+#     return ''.join([think_start, reasoning, think_end, output])
 
 
 def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -158,12 +158,12 @@ class LLMConfig:
 
 
 
-class LLMAPIError(Exception):
-    """LLM API call error."""
-    def __init__(self, message: str, status_code: int = None, response: Any = None):
-        super().__init__(message)
-        self.status_code = status_code
-        self.response = response
+# class LLMAPIError(Exception):
+#     """LLM API call error."""
+#     def __init__(self, message: str, status_code: int = None, response: Any = None):
+#         super().__init__(message)
+#         self.status_code = status_code
+#         self.response = response
 
 
 class LLMRetryExhaustedError(Exception):

@@ -4,6 +4,14 @@
 
 LLM-VulVariant 利用大语言模型（LLM）、原生工具调用以及 CodeQL，将“已知漏洞画像”迁移到新版本或相似代码中，自动发现潜在的漏洞变种。系统围绕“画像生成→智能体推理→静态验证”三步构建，支持深度静态分析、模块级推理、以及可重复的 CLI 工作流。
 
+## 更新（2026-02-19）
+
+- 🐳 Exploitability Checker 新增 **Docker PoC 验证**：对 EXPLOITABLE 漏洞自动构建 Docker 环境、生成 PoC 脚本（Claude CLI）、在隔离容器中执行验证
+- 🔄 Docker 验证支持 **PoC 自动 refinement**：执行失败后根据 stderr 反馈让 Claude 修正 PoC，最多重试 N 轮
+- 📋 新增 **安全报告生成器**：同时生成 GitHub GHSA 格式报告和完整安全研究报告（Markdown），含可复现步骤和截图 placeholder
+- 🎯 新增 Claude Skill **generate-poc**：指导 Claude 生成结构化、自包含的 PoC exploit 脚本
+- 🔧 CLI 新增参数：`--docker-verify`、`--generate-report`、`--report-repo-url`、`--cve-id`
+
 ## 更新（2026-01-16）
 
 - 🧭 软件画像模块分析新增 **SkillModuleAnalyzer**：使用 `.claude/skills/ai-infra-module-modeler` 的 taxonomy + LLM 语义判断，替代原 module analyzer
@@ -85,6 +93,52 @@ python -m scanner.agentic_vuln_scanner \
   --provider deepseek
 # 输出：scan-results/<repo>_<commit>_<cve>/agentic_vuln_findings.json
 ```
+
+6) 可利用性分析 + Docker PoC 验证 + 报告生成（完整流程）：
+
+```bash
+# 仅可利用性分析（原有功能）
+python -m cli.exploitability \
+  --scan-results-dir scan-results \
+  --folder CVE-2025-53002/Megatron-LM-a845aa7e12b3 \
+  --repo-profile-dir repo-profiles
+
+# 完整流程：可利用性分析 → Docker PoC 验证 → 安全报告
+python -m cli.exploitability \
+  --scan-results-dir scan-results \
+  --folder CVE-2025-53002/Megatron-LM-a845aa7e12b3 \
+  --repo-profile-dir repo-profiles \
+  --docker-verify \
+  --generate-report \
+  --report-repo-url https://github.com/NVIDIA/Megatron-LM \
+  --cve-id CVE-2025-53002
+
+# 输出：
+# - exploitability.json（可利用性分析）
+# - docker_verification.json（Docker PoC 验证结果）
+# - reports/security_report.md（完整安全研究报告）
+# - reports/ghsa_vuln_*.md（GitHub GHSA 格式报告）
+# - docker_verification/evidence/（PoC 执行证据）
+```
+
+---
+
+## Docker PoC 验证流水线
+
+新增的 Docker 验证功能在可利用性静态分析之后运行，仅针对被判定为 **EXPLOITABLE** 的漏洞：
+
+1. **PoC 生成**（`scanner/checker/poc_generator.py`）：调用 `claude -p` 基于漏洞上下文生成 Python exploit 脚本。
+2. **Docker 环境构建**（`scanner/checker/docker_env.py`）：自动检测项目类型、生成 Dockerfile、构建镜像（目标 repo@commit）。
+3. **PoC 执行**（`scanner/checker/docker_verifier.py`）：在隔离 Docker 容器中执行 PoC，捕获输出和证据。
+4. **自动 Refinement**：若 PoC 执行失败，将 stderr 反馈给 Claude 修正脚本，最多重试 N 轮。
+5. **证据收集**：保存 PoC 脚本、执行日志、环境信息、exploitation marker。
+
+### 安全报告生成
+
+报告生成器（`scanner/checker/report_generator.py`）支持两种格式：
+
+- **GitHub GHSA 格式**：适配 GitHub Private Vulnerability Reporting，包含 Summary/CWE/CVSS/Reproduction Steps
+- **完整安全研究报告**：详细 Markdown 报告，包含所有发现、Docker 验证结果、可复现步骤和截图 checklist
 
 ---
 

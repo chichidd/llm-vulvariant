@@ -4,7 +4,7 @@ from .finder import AgenticVulnFinder
 from .toolkit import AgenticToolkit, ToolResult
 from .loaders import load_software_profile, load_vulnerability_profile
 from .memory import AgentMemoryManager, ScanMemory
-from .priority import calculate_module_priorities, get_prioritized_files
+from .priority import calculate_module_priorities # get_prioritized_files
 
 __all__ = [
     "AgenticVulnFinder",
@@ -15,5 +15,5 @@ __all__ = [
     "AgentMemoryManager",
     "ScanMemory",
     "calculate_module_priorities",
-    "get_prioritized_files",
+    # "get_prioritized_files",
 ]

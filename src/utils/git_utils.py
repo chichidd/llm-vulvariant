@@ -233,11 +233,13 @@ def categorize_changed_files(changed_files: List[str]) -> Dict[str, List[str]]:
     Returns:
         Dictionary with categories as keys and file lists as values
     """
+    from utils.language import ALL_SOURCE_EXTENSIONS
+
     categories = {
         'added': [],
         'modified': [],
         'deleted': [],
-        'python': [],
+        'source': [],
         'test': [],
         'config': [],
         'docs': [],
@@ -245,14 +247,15 @@ def categorize_changed_files(changed_files: List[str]) -> Dict[str, List[str]]:
     }
     
     for file_path in changed_files:
+        ext = os.path.splitext(file_path)[1].lower()
         # Categorize by file extension/type
-        if file_path.endswith('.py'):
-            categories['python'].append(file_path)
+        if ext in ALL_SOURCE_EXTENSIONS:
+            categories['source'].append(file_path)
             if 'test' in file_path.lower():
                 categories['test'].append(file_path)
-        elif file_path.endswith(('.md', '.rst', '.txt')):
+        elif ext in ('.md', '.rst', '.txt'):
             categories['docs'].append(file_path)
-        elif file_path.endswith(('.json', '.yaml', '.yml', '.toml', '.cfg', '.ini')):
+        elif ext in ('.json', '.yaml', '.yml', '.toml', '.cfg', '.ini'):
             categories['config'].append(file_path)
         else:
             categories['other'].append(file_path)

@@ -22,6 +22,7 @@ Example:
 
 import os
 import pickle
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass, field, asdict
@@ -113,7 +114,7 @@ class SliceResult:
         md += f"**Target location**: `{self.target.file}:{self.target.line}`\n\n"
         
         if self.target.code:
-            md += f"```python\n{self.target.code}\n```\n\n"
+            md += f"```{self.language if hasattr(self, 'language') else 'python'}\n{self.target.code}\n```\n\n"
         
         md += f"**Analysis depth**: {self.depth}\n"
         md += f"**Files involved**: {len(self.files_involved)}\n"
@@ -131,7 +132,8 @@ class SliceResult:
                 md += f"#### {loc['file']}:{loc['start_line']}-{loc['end_line']}\n"
                 md += f"**Relationship**: {loc['relationship']}\n\n"
                 if loc.get('code'):
-                    md += f"```python\n{loc['code']}\n```\n\n"
+                    lang_hint = getattr(self, 'language', 'python') if hasattr(self, 'language') else 'python'
+                    md += f"```{lang_hint}\n{loc['code']}\n```\n\n"
         
         return md
 
@@ -285,29 +287,8 @@ class RepoAnalyzer:
     
     def _detect_language(self) -> str:
         """Auto-detect the repository's primary language."""
-        # Count file extensions
-        extensions = defaultdict(int)
-        
-        for root, dirs, files in os.walk(self.repo_path):
-            # Skip common ignored directories
-            dirs[:] = [d for d in dirs if d not in {'.git', 'node_modules', '__pycache__', 'build', 'dist'}]
-            
-            for file in files:
-                ext = Path(file).suffix.lower()
-                if ext in {'.py', '.c', '.cpp', '.cc', '.h', '.hpp'}:
-                    extensions[ext] += 1
-        
-        # Decide primary language
-        total_py = extensions.get('.py', 0)
-        total_cpp = extensions.get('.cpp', 0) + extensions.get('.cc', 0) + \
-                    extensions.get('.c', 0) + extensions.get('.h', 0) + extensions.get('.hpp', 0)
-        
-        if total_py > total_cpp:
-            return "python"
-        elif total_cpp > 0:
-            return "cpp"
-        else:
-            return "python"  # Default
+        from utils.language import detect_language
+        return detect_language(self.repo_path)
     
 
     def _load_or_build(self, rebuild: bool = False, cache_path: Optional[Path] = None):
@@ -452,23 +433,59 @@ class RepoAnalyzer:
     
     def _analyze_dependencies(self):
         """Analyze third-party library dependencies."""
-        # Scan import statements
+        from utils.language import get_extensions, ALL_SOURCE_EXTENSIONS
+
+        # Build set of extensions to scan for this language
+        lang_exts = get_extensions(self.language)
+
+        # Regex patterns for import extraction per extension group
+        import_patterns = {
+            '.py': re.compile(r'^\s*(import |from )'),
+            '.go': re.compile(r'^\s*import\s'),
+            '.java': re.compile(r'^\s*import\s'),
+            '.rs': re.compile(r'^\s*(use |extern crate )'),
+            '.rb': re.compile(r'^\s*require'),
+        }
+        # C/C++ headers
+        c_family = {'.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh'}
+        # JS/TS
+        js_family = {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'}
+
         for root, dirs, files in os.walk(self.repo_path):
             dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__', 'node_modules'}]
-            
+
             for file in files:
-                if file.endswith('.py'):
-                    file_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(file_path, self.repo_path)
-                    
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            for line_num, line in enumerate(f, 1):
-                                line = line.strip()
-                                if line.startswith('import ') or line.startswith('from '):
-                                    self._extract_import(line, rel_path, line_num)
-                    except Exception:
-                        continue
+                ext = Path(file).suffix.lower()
+                if ext not in lang_exts:
+                    continue
+
+                file_path = os.path.join(root, file)
+                rel_path = os.path.relpath(file_path, self.repo_path)
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        for line_num, line in enumerate(f, 1):
+                            stripped = line.strip()
+                            # Python
+                            if ext == '.py' and (stripped.startswith('import ') or stripped.startswith('from ')):
+                                self._extract_import(stripped, rel_path, line_num)
+                            # C/C++
+                            elif ext in c_family and stripped.startswith('#include'):
+                                self._extract_import(stripped, rel_path, line_num)
+                            # Go / Java
+                            elif ext in {'.go', '.java'} and stripped.startswith('import '):
+                                self._extract_import(stripped, rel_path, line_num)
+                            # JS/TS
+                            elif ext in js_family and ('require(' in stripped or 'import ' in stripped):
+                                self._extract_import(stripped, rel_path, line_num)
+                            # Rust
+                            elif ext == '.rs' and (stripped.startswith('use ') or stripped.startswith('extern crate ')):
+                                self._extract_import(stripped, rel_path, line_num)
+                            # Ruby
+                            elif ext == '.rb' and stripped.startswith('require'):
+                                self._extract_import(stripped, rel_path, line_num)
+                except Exception:
+                    continue
     
     def _extract_import(self, line: str, file: str, line_num: int):
         """Extract dependencies from an import statement."""

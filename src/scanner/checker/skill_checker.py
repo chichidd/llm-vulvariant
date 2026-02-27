@@ -54,16 +54,20 @@ class SkillExploitabilityChecker:
         repo_path: Path,
         output_path: Path,
         software_profile_path: Optional[Path] = None,
+        commit_hash: str = "",
     ) -> Dict[str, Any]:
         """Check exploitability of vulnerabilities in a findings file.
         
         Processes each vulnerability individually and saves progress.
+        For EXPLOITABLE findings, Phase 5 Docker PoC verification is always
+        performed by the skill (Claude uses bash to docker build/run).
         
         Args:
             findings_path: Path to agentic_vuln_findings.json
             repo_path: Path to the target repository
             output_path: Path to write exploitability.json
             software_profile_path: Optional path to software_profile.json
+            commit_hash: Full or prefix commit hash for reproducible Docker builds.
             
         Returns:
             Dictionary with analysis results and metadata
@@ -109,12 +113,18 @@ class SkillExploitabilityChecker:
             
             logger.info(f"[{idx+1}/{len(vulnerabilities)}] Analyzing {finding_id}: {vuln.get('file_path', 'unknown')}")
             
+            # Prepare evidence directory for Docker PoC verification
+            evidence_dir = output_path.parent / "evidence" / finding_id
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            
             # Analyze single vulnerability
             vuln_result = self._analyze_single_vuln(
                 vuln=vuln,
                 finding_id=finding_id,
                 repo_path=repo_path,
                 software_profile_path=software_profile_path,
+                commit_hash=commit_hash,
+                evidence_dir=evidence_dir,
             )
             
             # Append result and save
@@ -143,6 +153,8 @@ class SkillExploitabilityChecker:
         finding_id: str,
         repo_path: Path,
         software_profile_path: Optional[Path],
+        commit_hash: str = "",
+        evidence_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Analyze a single vulnerability using Claude.
         
@@ -151,37 +163,66 @@ class SkillExploitabilityChecker:
             finding_id: Unique ID for this vulnerability
             repo_path: Path to the repository
             software_profile_path: Optional path to software profile
+            commit_hash: Commit hash to check out inside Docker
+            evidence_dir: Directory for PoC script and Docker build artefacts
             
         Returns:
             Analysis result dictionary
         """
-        prompt = self._build_prompt(vuln, repo_path, software_profile_path)
+        prompt = self._build_prompt(
+            vuln, repo_path, software_profile_path,
+            commit_hash=commit_hash,
+            evidence_dir=evidence_dir,
+        )
         
         # Run Claude and get JSON result
         success, claude_result = self._run_claude(prompt)
-        
+
+        analysis: Optional[Dict[str, Any]] = None
         if success and claude_result:
             # Parse the result text from Claude's JSON output
             analysis = self._parse_claude_result(claude_result)
-            if analysis:
-                analysis["finding_id"] = finding_id
-                analysis["original_finding"] = vuln
-                return analysis
-        
-        return self._create_error_vuln_result(vuln, finding_id, "Claude analysis failed")
+
+        if not analysis:
+            analysis = self._create_error_vuln_result(vuln, finding_id, "Claude analysis failed")
+
+        analysis["finding_id"] = finding_id
+        analysis["original_finding"] = vuln
+
+        # Recover and normalize docker verification using on-disk evidence.
+        # This makes results robust when Claude returns non-JSON output,
+        # or when Docker verification only partially completes.
+        analysis = self._recover_docker_verification(
+            analysis=analysis,
+            evidence_dir=evidence_dir,
+            commit_hash=commit_hash,
+        )
+
+        return analysis
 
     def _build_prompt(
         self,
         vuln: Dict[str, Any],
         repo_path: Path,
         software_profile_path: Optional[Path],
+        commit_hash: str = "",
+        evidence_dir: Optional[Path] = None,
     ) -> str:
         """Build Claude prompt for single vulnerability analysis."""
+        import os
+
         # Build concise vulnerability summary
         file_path = vuln.get('file_path', 'unknown')
         vuln_type = vuln.get('vulnerability_type', 'unknown')
         evidence = vuln.get('evidence', '')[:400]
         description = vuln.get('description', '')[:200]
+
+        # Collect host API key to forward into the container
+        api_key = (
+            os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        )
         
         lines = [
             f"Quick vulnerability check using {self.skill_name} skill:",
@@ -199,6 +240,17 @@ class SkillExploitabilityChecker:
             '"source_analysis":{"sources_found":[{"type":"cli|file|api","location":"..."}],"attack_path":["..."]},',
             '"attack_scenario":{"description":"...","steps":["..."],"impact":"..."},',
             '"remediation":{"recommendation":"..."}}',
+            "",
+            "--- DOCKER VERIFICATION ---",
+            "DOCKER_VERIFY: true",
+            f"COMMIT_HASH: {commit_hash}" if commit_hash else "COMMIT_HASH: HEAD",
+            f"REPO_PATH: {repo_path.resolve()}",
+            f"EVIDENCE_DIR: {evidence_dir.resolve() if evidence_dir else str(repo_path.resolve() / 'evidence')}",
+            f"API_KEY: {api_key}",
+            "",
+            "After the static analysis (phases 1-4), if verdict is EXPLOITABLE, also run",
+            "Phase 5 (Docker PoC Verification) from the skill and include the",
+            "'docker_verification' object in the output JSON.",
         ]
         
         return "\n".join(lines)
@@ -289,13 +341,180 @@ class SkillExploitabilityChecker:
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse analysis JSON: {e}")
             logger.debug(f"JSON string: {json_str[:500]}")
-            
+
+            inferred_verdict = self._infer_verdict_from_text(result_text)
+            inferred_confidence = self._infer_confidence_from_text(result_text)
+
             # Try to create a minimal result from the text
             return {
-                "verdict": "UNKNOWN",
-                "confidence": "low",
-                "raw_result": result_text[:1000],
+                "verdict": inferred_verdict or "UNKNOWN",
+                "confidence": inferred_confidence or "low",
+                "raw_result": result_text[:2000],
             }
+
+    def _infer_verdict_from_text(self, text: str) -> Optional[str]:
+        """Infer verdict from free-form Claude text."""
+        if not text:
+            return None
+
+        # Match longer tokens first to avoid EXPLOITABLE matching inside
+        # CONDITIONALLY_EXPLOITABLE / NOT_EXPLOITABLE.
+        patterns = [
+            ("CONDITIONALLY_EXPLOITABLE", r"\bCONDITIONALLY[_\s-]?EXPLOITABLE\b"),
+            ("NOT_EXPLOITABLE", r"\bNOT[_\s-]?EXPLOITABLE\b"),
+            ("LIBRARY_RISK", r"\bLIBRARY[_\s-]?RISK\b"),
+            ("EXPLOITABLE", r"\bEXPLOITABLE\b"),
+        ]
+        for verdict, pattern in patterns:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                return verdict
+        return None
+
+    def _infer_confidence_from_text(self, text: str) -> Optional[str]:
+        """Infer confidence level from free-form Claude text."""
+        if not text:
+            return None
+        m = re.search(r"\b(high|medium|low)\s+confidence\b", text, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).lower()
+        return None
+
+    def _recover_docker_verification(
+        self,
+        analysis: Dict[str, Any],
+        evidence_dir: Optional[Path],
+        commit_hash: str,
+    ) -> Dict[str, Any]:
+        """Recover docker_verification from evidence files when needed.
+
+        Handles cases where Docker build/run started but Claude output is not
+        strict JSON, timed out, or omitted docker_verification.
+        """
+        if not evidence_dir:
+            return analysis
+
+        evidence = self._build_docker_verification_from_evidence(
+            evidence_dir=evidence_dir,
+            commit_hash=commit_hash,
+        )
+        if not evidence:
+            return analysis
+
+        existing = analysis.get("docker_verification")
+        if isinstance(existing, dict):
+            # Keep Claude-provided structured result, but fill any empty fields
+            # from filesystem evidence for better resilience.
+            for key, value in evidence.items():
+                if key not in existing or existing.get(key) is None:
+                    existing[key] = value
+            analysis["docker_verification"] = existing
+        else:
+            analysis["docker_verification"] = evidence
+
+        # If Claude failed to return structured JSON but evidence shows exploit
+        # confirmation, upgrade UNKNOWN/ERROR to EXPLOITABLE.
+        verdict = str(analysis.get("verdict", "")).upper()
+        if verdict in {"", "UNKNOWN", "ERROR"}:
+            if analysis["docker_verification"].get("exploit_confirmed"):
+                analysis["verdict"] = "EXPLOITABLE"
+                analysis["confidence"] = analysis.get("confidence") or "high"
+            else:
+                inferred = self._infer_verdict_from_text(str(analysis.get("raw_result", "")))
+                if inferred:
+                    analysis["verdict"] = inferred
+                    analysis["confidence"] = analysis.get("confidence") or (
+                        self._infer_confidence_from_text(str(analysis.get("raw_result", ""))) or "low"
+                    )
+
+        return analysis
+
+    def _build_docker_verification_from_evidence(
+        self,
+        evidence_dir: Path,
+        commit_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Construct docker_verification using generated evidence files."""
+        if not evidence_dir.exists():
+            return None
+
+        dockerfile = evidence_dir / "Dockerfile.exploit"
+        build_log = evidence_dir / "docker_build.log"
+        exec_out = evidence_dir / "execution_output.txt"
+
+        poc_candidates = [
+            evidence_dir / "exploit.py",
+            evidence_dir / "exploit_simple.py",
+            evidence_dir / "exploit.go",
+            evidence_dir / "exploit.c",
+            evidence_dir / "Exploit.java",
+            evidence_dir / "exploit.js",
+            evidence_dir / "exploit.rb",
+            evidence_dir / "exploit.rs",
+        ]
+        poc_path = next((p for p in poc_candidates if p.exists()), None)
+
+        has_activity = dockerfile.exists() or build_log.exists() or exec_out.exists() or (poc_path is not None)
+        if not has_activity:
+            return None
+
+        build_text = ""
+        if build_log.exists():
+            try:
+                build_text = build_log.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                build_text = ""
+
+        run_text = ""
+        if exec_out.exists():
+            try:
+                run_text = exec_out.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                run_text = ""
+
+        build_success = False
+        if build_text:
+            build_success = bool(
+                re.search(r"writing image sha256:|naming to docker\.io/library/", build_text, flags=re.IGNORECASE)
+            )
+
+        # If execution output exists, docker run likely started. Keep it robust
+        # even when PoC itself reports EXPLOIT_FAILED.
+        run_success = exec_out.exists()
+        exploit_confirmed = bool(re.search(r"VULNERABILITY_CONFIRMED", run_text))
+
+        short_hash = (commit_hash or "HEAD")[:8]
+        execution_excerpt = (run_text[:2000] if run_text else "")
+        error: Optional[str] = None
+
+        if not build_success:
+            if build_log.exists():
+                if run_success:
+                    # Build was likely successful enough to run, but the log may
+                    # be truncated or lack final markers.
+                    build_success = True
+                else:
+                    error = "Docker build did not complete (likely timeout/interruption)."
+                    execution_excerpt = execution_excerpt or "Docker build did not complete."
+            else:
+                error = "Docker build log not found."
+
+        if build_success and not run_success:
+            error = "Docker run output not found; exploit command may not have executed."
+
+        if run_success and not exploit_confirmed:
+            error = error or "PoC executed but did not confirm exploitation."
+
+        return {
+            "enabled": True,
+            "commit_hash": commit_hash or "HEAD",
+            "build_success": bool(build_success),
+            "run_success": bool(run_success),
+            "exploit_confirmed": bool(exploit_confirmed),
+            "execution_output": execution_excerpt or None,
+            "poc_script_path": str(poc_path) if poc_path else None,
+            "docker_image": f"exploit-test:{short_hash}",
+            "error": error,
+        }
 
     def _init_or_load_results(
         self,
@@ -413,6 +632,7 @@ def check_exploitability_single(
     output_path: Path,
     software_profile_path: Optional[Path] = None,
     timeout: int = 300,
+    commit_hash: str = "",
 ) -> Dict[str, Any]:
     """Convenience function to check exploitability for a single findings file.
     
@@ -422,6 +642,7 @@ def check_exploitability_single(
         output_path: Path to write exploitability.json
         software_profile_path: Optional path to software_profile.json
         timeout: Timeout in seconds for each Claude CLI call
+        commit_hash: Commit hash for reproducible Docker builds
         
     Returns:
         Analysis result dictionary
@@ -432,4 +653,5 @@ def check_exploitability_single(
         repo_path=repo_path,
         output_path=output_path,
         software_profile_path=software_profile_path,
+        commit_hash=commit_hash,
     )

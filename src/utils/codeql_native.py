@@ -301,7 +301,7 @@ class CodeQLAnalyzer:
     def create_database(
         self,
         source_path: str,
-        language: str = "python",
+        language: str,
         database_name: Optional[str] = None,
         overwrite: bool = True
     ) -> Tuple[bool, str]:
@@ -310,7 +310,7 @@ class CodeQLAnalyzer:
         
         Args:
             source_path: Source code path
-            language: Programming language
+            language: Programming language (required – no default)
             database_name: Database name
             overwrite: Whether to overwrite an existing database
         
@@ -445,12 +445,12 @@ class CodeQLAnalyzer:
             if lang in db_name.lower():
                 return lang
         
-        return "python"  # Default
+        return None  # Cannot determine – caller must handle
     
     def analyze(
         self,
         source_path: str,
-        language: str = "python",
+        language: str,
         queries: Optional[List[str]] = None,
         include_call_graph: bool = True
     ) -> CodeQLAnalysisResult:

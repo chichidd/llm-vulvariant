@@ -12,6 +12,14 @@ from typing import Any, Dict, List, Optional
 
 from config import _path_config
 from utils.codeql_native import CodeQLAnalyzer
+from utils.language import (
+    LANGUAGE_CONFIG,
+    ALL_SOURCE_EXTENSIONS,
+    detect_language as detect_repo_language,
+    get_codeql_pack,
+    get_extensions,
+    get_glob_patterns,
+)
 from utils.logger import get_logger
 from utils.tree_utils import build_path_tree, format_file_size, render_tree
 from scanner.agent.utils import _to_dict
@@ -27,7 +35,8 @@ class ToolResult:
 
 
 class AgenticToolkit:
-    def __init__(self, repo_path: Path, memory_manager=None, software_profile=None, codeql_database_name: Optional[str] = None):
+    def __init__(self, repo_path: Path, memory_manager=None, software_profile=None,
+                 codeql_database_name: Optional[str] = None, language: Optional[str] = None):
         self.repo_path = repo_path
         self._file_cache: Dict[str, str] = {}
         self._memory_manager = memory_manager
@@ -37,6 +46,10 @@ class AgenticToolkit:
         self._call_graph_edges: List[Dict] = []  # call graph edges from repo_analysis
         self._file_callers: Dict[str, set] = {}  # file -> set of caller files
         self._file_callees: Dict[str, set] = {}  # file -> set of callee files
+
+        # Language configuration (auto-detect if not specified)
+        self._language: str = language or detect_repo_language(repo_path)
+        self._source_extensions = get_extensions(self._language)
         
         # CodeQL configuration
         self._codeql_db_base_path: Path = _path_config.get('codeql_db_path', Path.home() / 'vuln' / 'codeql_dbs')
@@ -58,8 +71,9 @@ class AgenticToolkit:
             logger.warning(f"Failed to initialize CodeQL analyzer: {e}")
             self._codeql_analyzer = None
         
-        # Setup query directory for custom queries
-        self._codeql_query_dir = Path(_path_config['repo_root']) / '.codeql-queries'
+        # Setup query directory for custom queries (per-language subdirectory)
+        self._codeql_query_base = Path(_path_config['repo_root']) / '.codeql-queries'
+        self._codeql_query_dir = self._codeql_query_base / self._language
     
     def _ensure_query_pack(self) -> bool:
         """Ensure the CodeQL query pack is prepared with dependencies installed."""
@@ -76,11 +90,15 @@ class AgenticToolkit:
         
         # Create qlpack.yml if not exists
         if not qlpack_file.exists():
-            qlpack_content = """name: llm-vulvariant-queries
+            codeql_pack = get_codeql_pack(self._language)
+            if not codeql_pack:
+                logger.warning(f"No CodeQL pack available for language: {self._language}")
+                return False
+            qlpack_content = f"""name: llm-vulvariant-queries
 version: 1.0.0
 description: CodeQL queries for LLM vulnerability variant analysis
 dependencies:
-  codeql/python-all: "*"
+  {codeql_pack}: "*"
 """
             qlpack_file.write_text(qlpack_content, encoding="utf-8")
         
@@ -197,6 +215,28 @@ dependencies:
     def _render_tree(node: Dict, prefix: str = "", value_formatter=None) -> List[str]:
         return render_tree(node, prefix, value_formatter)
 
+    # ---- Multi-language file iteration helpers ----
+
+    def _is_source_file(self, path: Path) -> bool:
+        """Check if *path* is a source file of the current language."""
+        return path.suffix.lower() in self._source_extensions
+
+    def _iter_source_files(self, root: Path, recursive: bool = True):
+        """Yield source files under *root* matching the current language."""
+        IGNORED_DIRS = {".git", "node_modules", "__pycache__", "build", "dist",
+                        ".tox", "venv", ".venv", "vendor", "third_party"}
+        if recursive:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS]
+                for fname in filenames:
+                    fpath = Path(dirpath) / fname
+                    if self._is_source_file(fpath):
+                        yield fpath
+        else:
+            for fpath in root.iterdir():
+                if fpath.is_file() and self._is_source_file(fpath):
+                    yield fpath
+
     def get_available_tools(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -247,7 +287,7 @@ dependencies:
                 "type": "function",
                 "function": {
                     "name": "search_in_folder",
-                    "description": "Search for a pattern across all Python files under a folder and return file paths with matching lines.",
+                    "description": "Search for a pattern across all source files under a folder and return file paths with matching lines.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -266,7 +306,7 @@ dependencies:
                 "type": "function",
                 "function": {
                     "name": "list_files_in_folder",
-                    "description": "List all Python files in a folder along with their sizes.",
+                    "description": "List all source files in a folder along with their sizes.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -299,7 +339,7 @@ dependencies:
                 "type": "function",
                 "function": {
                     "name": "get_imports",
-                    "description": "Get all import statements in a Python file to show which modules and symbols are imported.",
+                    "description": "Get all import/include statements in a source file to show which modules and symbols are imported.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -594,15 +634,15 @@ dependencies:
             regex = re.compile(pattern, re.IGNORECASE)
             file_results: Dict[str, List[Any]] = {}
             total_matches = 0
-            for py_file in full_path.rglob("*.py"):
+            for src_file in self._iter_source_files(full_path):
                 if total_matches >= max_results:
                     break
                 try:
-                    content = py_file.read_text(encoding="utf-8", errors="ignore")
+                    content = src_file.read_text(encoding="utf-8", errors="ignore")
                     lines = content.split("\n")
                     for i, line in enumerate(lines):
                         if regex.search(line):
-                            rel_path = str(py_file.relative_to(self.repo_path))
+                            rel_path = str(src_file.relative_to(self.repo_path))
                             file_results.setdefault(rel_path, []).append((i + 1, line.strip()))
                             total_matches += 1
                             if total_matches >= max_results:
@@ -629,19 +669,18 @@ dependencies:
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"Folder not found: {folder_path}")
         try:
-            glob_pattern = "**/*.py" if recursive else "*.py"
             file_info: List[Any] = []
             total_size = 0
-            for py_file in full_path.glob(glob_pattern):
-                rel_path = str(py_file.relative_to(self.repo_path))
-                size = py_file.stat().st_size
+            for src_file in self._iter_source_files(full_path, recursive=recursive):
+                rel_path = str(src_file.relative_to(self.repo_path))
+                size = src_file.stat().st_size
                 total_size += size
                 file_info.append((rel_path, size))
             if not file_info:
-                return ToolResult(success=True, content="No Python files found")
+                return ToolResult(success=True, content="No source files found")
             tree = self._build_path_tree(file_info)
             tree_lines = self._render_tree(tree, value_formatter=self._format_size)
-            result = f"Found {len(file_info)} Python files (total: {self._format_size(total_size)}):\n\n" + "\n".join(tree_lines)
+            result = f"Found {len(file_info)} source files (total: {self._format_size(total_size)}):\n\n" + "\n".join(tree_lines)
             return ToolResult(success=True, content=result)
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
@@ -652,16 +691,50 @@ dependencies:
             return ToolResult(success=False, content="", error=f"File not found: {file_path}")
         try:
             content = full_path.read_text(encoding="utf-8", errors="ignore")
-            tree = ast.parse(content)
             lines = content.split("\n")
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    if node.name == function_name:
-                        start_line = node.lineno - 1
-                        end_line = node.end_lineno if hasattr(node, "end_lineno") else start_line + 50
-                        func_lines = lines[start_line:end_line]
-                        numbered = [f"{start_line + i + 1}: {line}" for i, line in enumerate(func_lines)]
-                        return ToolResult(success=True, content="\n".join(numbered))
+
+            # Python: use ast for precise extraction
+            if full_path.suffix == ".py":
+                tree = ast.parse(content)
+                for node in ast.walk(tree):
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        if node.name == function_name:
+                            start_line = node.lineno - 1
+                            end_line = node.end_lineno if hasattr(node, "end_lineno") else start_line + 50
+                            func_lines = lines[start_line:end_line]
+                            numbered = [f"{start_line + i + 1}: {line}" for i, line in enumerate(func_lines)]
+                            return ToolResult(success=True, content="\n".join(numbered))
+                return ToolResult(success=False, content="", error=f"Function/class not found: {function_name}")
+
+            # Non-Python: regex-based extraction (C/C++/Go/Java/JS/Rust/Ruby…)
+            # Look for a line that starts with the function name and capture until a
+            # balanced closing brace (or end-of-indent for Ruby).
+            pattern = re.compile(
+                rf'(?:^|\s)(?:(?:pub(?:\(crate\))?\s+)?(?:static\s+)?(?:async\s+)?'
+                rf'(?:fn|func|def|function|void|int|auto|class|struct)\s+)?'
+                rf'{re.escape(function_name)}\s*[(<]',
+                re.MULTILINE,
+            )
+            match = pattern.search(content)
+            if match:
+                start_idx = content[:match.start()].count("\n")
+                # Heuristic: grab up to 80 lines or until brace-depth returns to 0
+                depth = 0
+                end_idx = start_idx
+                started = False
+                for idx in range(start_idx, min(len(lines), start_idx + 200)):
+                    if '{' in lines[idx]:
+                        depth += lines[idx].count('{') - lines[idx].count('}')
+                        started = True
+                    elif '}' in lines[idx]:
+                        depth += lines[idx].count('{') - lines[idx].count('}')
+                    end_idx = idx + 1
+                    if started and depth <= 0:
+                        break
+                func_lines = lines[start_idx:end_idx]
+                numbered = [f"{start_idx + i + 1}: {line}" for i, line in enumerate(func_lines)]
+                return ToolResult(success=True, content="\n".join(numbered))
+
             return ToolResult(success=False, content="", error=f"Function/class not found: {function_name}")
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
@@ -672,20 +745,56 @@ dependencies:
             return ToolResult(success=False, content="", error=f"File not found: {file_path}")
         try:
             content = full_path.read_text(encoding="utf-8", errors="ignore")
-            tree = ast.parse(content)
+            suffix = full_path.suffix.lower()
+
             imports: List[str] = []
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        imports.append(
-                            f"import {alias.name}" + (f" as {alias.asname}" if alias.asname else "")
+
+            if suffix == ".py":
+                tree = ast.parse(content)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            imports.append(
+                                f"import {alias.name}" + (f" as {alias.asname}" if alias.asname else "")
+                            )
+                    elif isinstance(node, ast.ImportFrom):
+                        module = node.module or ""
+                        names = ", ".join(
+                            alias.name + (f" as {alias.asname}" if alias.asname else "") for alias in node.names
                         )
-                elif isinstance(node, ast.ImportFrom):
-                    module = node.module or ""
-                    names = ", ".join(
-                        alias.name + (f" as {alias.asname}" if alias.asname else "") for alias in node.names
-                    )
-                    imports.append(f"from {module} import {names}")
+                        imports.append(f"from {module} import {names}")
+            elif suffix in {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh"}:
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("#include"):
+                        imports.append(stripped)
+            elif suffix == ".go":
+                # Match single and grouped imports
+                imports.extend(re.findall(r'^\s*import\s+(?:".+?"|\((?:[^)]+)\))', content, re.MULTILINE | re.DOTALL))
+            elif suffix == ".java":
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("import "):
+                        imports.append(stripped.rstrip(";"))
+            elif suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+                imports.extend(re.findall(r'^(?:import|const|let|var)\s+.*(?:from|require)\s*[\(\'"].*', content, re.MULTILINE))
+            elif suffix == ".rs":
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("use ") or stripped.startswith("extern crate "):
+                        imports.append(stripped.rstrip(";"))
+            elif suffix == ".rb":
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("require ") or stripped.startswith("require_relative "):
+                        imports.append(stripped)
+            else:
+                # Fallback: grep for common import patterns
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if re.match(r'^(import |from |#include |require |use |extern crate )', stripped):
+                        imports.append(stripped)
+
             if not imports:
                 return ToolResult(success=True, content="No imports found")
             return ToolResult(success=True, content="\n".join(imports))

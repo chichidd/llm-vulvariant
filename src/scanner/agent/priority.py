@@ -103,26 +103,26 @@ def _is_related(module_info: Dict, affected: Set[str]) -> bool:
     return bool((calls & affected) or (called_by & affected))
 
 
-def get_prioritized_files(
-    module_priorities: Dict[str, int],
-    file_to_module: Dict[str, str],
-    max_priority: int = 2,
-) -> List[Tuple[str, int, str]]:
-    """Get files sorted by priority.
+# def get_prioritized_files(
+#     module_priorities: Dict[str, int],
+#     file_to_module: Dict[str, str],
+#     max_priority: int = 2,
+# ) -> List[Tuple[str, int, str]]:
+#     """Get files sorted by priority.
     
-    Args:
-        module_priorities: {module_name: priority}
-        file_to_module: {file_path: module_name}
-        max_priority: Maximum priority to include
+#     Args:
+#         module_priorities: {module_name: priority}
+#         file_to_module: {file_path: module_name}
+#         max_priority: Maximum priority to include
         
-    Returns:
-        List of (file_path, priority, module_name) sorted by priority
-    """
-    result = []
-    for file_path, module_name in file_to_module.items():
-        priority = module_priorities.get(module_name, 3)
-        if priority <= max_priority:
-            result.append((file_path, priority, module_name))
+#     Returns:
+#         List of (file_path, priority, module_name) sorted by priority
+#     """
+#     result = []
+#     for file_path, module_name in file_to_module.items():
+#         priority = module_priorities.get(module_name, 3)
+#         if priority <= max_priority:
+#             result.append((file_path, priority, module_name))
     
-    result.sort(key=lambda x: (x[1], x[0]))
-    return result
+#     result.sort(key=lambda x: (x[1], x[0]))
+#     return result

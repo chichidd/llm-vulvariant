@@ -16,7 +16,14 @@ from config import _path_config
 from profiler.profile_storage import ProfileStorageManager
 from utils.git_utils import get_git_commit, checkout_commit, get_diff_stats, get_changed_files_with_status
 from utils.logger import get_logger
-from utils.path_utils import to_relative_path
+# from utils.path_utils import to_relative_path
+
+# def to_relative_path(file_path: str, repo_path: Path) -> str:
+#     """transform absolute path to relative path from repo root"""
+#     try:
+#         return str(Path(file_path).relative_to(repo_path))
+#     except ValueError:
+#         return file_path
 
 from .models import SoftwareProfile, ModuleInfo, ModuleTree, DataFlowPattern
 from .repo_collector import RepoInfoCollector
@@ -363,9 +370,11 @@ class SoftwareProfiler:
         logger.info("Step 3/4: Analyzing modules...")
         modules_result = self.storage_manager.load_checkpoint("modules", *path_parts) if self.storage_manager else None
         
-        if modules_result:
+        if modules_result and modules_result.get('modules'):
             logger.info("Loaded modules from checkpoint")
         else:
+            if modules_result and not modules_result.get('modules'):
+                logger.warning("Loaded modules checkpoint is empty, re-analyzing...")
             # 使用当前配置的模块分析器（skill 或 agent）
             modules_result = self.module_analyzer.analyze(
                 repo_info, 

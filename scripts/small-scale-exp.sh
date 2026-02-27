@@ -68,7 +68,7 @@ scanner --vuln-repo NeMo --cve cve-tencent-nemo2 --target-repo ms-swift --target
 scanner --vuln-repo NeMo --cve CVE-2025-23361 --target-repo ms-swift --target-commit b5b61b6b6f4a00af743a9c5a27c1f6ba8e8e2c3d --llm-provider deepseek --max-iterations 3  --verbose --output scan-results-withmem-codeql-selfmark
 
 
-# scanner --vuln-repo NeMo --cve cve-tencent-nemo1 --target-repo Megatron-LM --target-commit a845aa7e12b3a117e24c2352b9e3e60bad2e3a17 --llm-provider deepseek --max-iterations 3  --verbose --output scan-results-withmem-codeql-selfmark
+scanner --vuln-repo NeMo --cve cve-tencent-nemo1 --target-repo Megatron-LM --target-commit a845aa7e12b3a117e24c2352b9e3e60bad2e3a17 --llm-provider deepseek --max-iterations 3  --verbose --output scan-results-withmem-codeql-selfmark
 scanner --vuln-repo NeMo --cve cve-tencent-nemo2 --target-repo Megatron-LM --target-commit a845aa7e12b3a117e24c2352b9e3e60bad2e3a17 --llm-provider deepseek --max-iterations 3  --verbose --output scan-results-withmem-codeql-selfmark
 scanner --vuln-repo NeMo --cve CVE-2025-23361 --target-repo Megatron-LM --target-commit a845aa7e12b3a117e24c2352b9e3e60bad2e3a17 --llm-provider deepseek --max-iterations 3  --verbose --output scan-results-withmem-codeql-selfmark
 

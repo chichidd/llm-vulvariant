@@ -239,90 +239,90 @@ def read_code_file_with_line_numbers(
     return '\n'.join(result_lines)
 
 
-def read_code_file_with_context(
-    file_path,
-    target_line: int,
-    context_lines: int = 5,
-    line_number_format: str = "standard",
-    encoding: str = "utf-8"
-) -> str:
-    """
-    Read a target line and surrounding context from a code file, with line numbers.
+# def read_code_file_with_context(
+#     file_path,
+#     target_line: int,
+#     context_lines: int = 5,
+#     line_number_format: str = "standard",
+#     encoding: str = "utf-8"
+# ) -> str:
+#     """
+#     Read a target line and surrounding context from a code file, with line numbers.
 
-    This is especially useful when showing the surrounding context of a specific code location to an LLM.
+#     This is especially useful when showing the surrounding context of a specific code location to an LLM.
 
-    Args:
-        file_path: File path (str or Path).
-        target_line: Target line number (1-indexed).
-        context_lines: Number of lines to show before/after the target (default: 5).
-        line_number_format: Line number format (same as read_code_file_with_line_numbers).
-        encoding: File encoding.
+#     Args:
+#         file_path: File path (str or Path).
+#         target_line: Target line number (1-indexed).
+#         context_lines: Number of lines to show before/after the target (default: 5).
+#         line_number_format: Line number format (same as read_code_file_with_line_numbers).
+#         encoding: File encoding.
 
-    Returns:
-        Code string with line numbers, including the target line and its context.
+#     Returns:
+#         Code string with line numbers, including the target line and its context.
         
-    Example:
-        >>> content = read_code_file_with_context("example.py", target_line=42, context_lines=3)
-        >>> # Shows lines 39-45; line 42 is the target.
-    """
-    start_line = max(1, target_line - context_lines)
-    end_line = target_line + context_lines
+#     Example:
+#         >>> content = read_code_file_with_context("example.py", target_line=42, context_lines=3)
+#         >>> # Shows lines 39-45; line 42 is the target.
+#     """
+#     start_line = max(1, target_line - context_lines)
+#     end_line = target_line + context_lines
     
-    return read_code_file_with_line_numbers(
-        file_path=file_path,
-        start_line=start_line,
-        end_line=end_line,
-        line_number_format=line_number_format,
-        encoding=encoding
-    )
+#     return read_code_file_with_line_numbers(
+#         file_path=file_path,
+#         start_line=start_line,
+#         end_line=end_line,
+#         line_number_format=line_number_format,
+#         encoding=encoding
+#     )
 
 
-def read_multiple_code_sections(
-    file_path,
-    sections: list,
-    line_number_format: str = "standard",
-    separator: str = "\n...\n",
-    encoding: str = "utf-8"
-) -> str:
-    """
-    Read multiple non-contiguous sections of a code file and join them with a separator.
+# def read_multiple_code_sections(
+#     file_path,
+#     sections: list,
+#     line_number_format: str = "standard",
+#     separator: str = "\n...\n",
+#     encoding: str = "utf-8"
+# ) -> str:
+#     """
+#     Read multiple non-contiguous sections of a code file and join them with a separator.
 
-    Useful for showing an LLM several key parts of a file without including the entire content.
+#     Useful for showing an LLM several key parts of a file without including the entire content.
 
-    Args:
-        file_path: File path (str or Path).
-        sections: List of ranges, each a (start_line, end_line) tuple.
-                 Example: [(1, 10), (50, 60), (100, 110)]
-        line_number_format: Line number format.
-        separator: Separator between sections (default: "...").
-        encoding: File encoding.
+#     Args:
+#         file_path: File path (str or Path).
+#         sections: List of ranges, each a (start_line, end_line) tuple.
+#                  Example: [(1, 10), (50, 60), (100, 110)]
+#         line_number_format: Line number format.
+#         separator: Separator between sections (default: "...").
+#         encoding: File encoding.
 
-    Returns:
-        Code string with line numbers, containing all requested sections joined by the separator.
+#     Returns:
+#         Code string with line numbers, containing all requested sections joined by the separator.
         
-    Example:
-        >>> content = read_multiple_code_sections(
-        ...     "example.py",
-        ...     sections=[(1, 5), (20, 25), (50, 55)]
-        ... )
-        >>> # Shows lines 1-5, then "...", then 20-25, then "...", then 50-55.
-    """
-    from pathlib import Path
+#     Example:
+#         >>> content = read_multiple_code_sections(
+#         ...     "example.py",
+#         ...     sections=[(1, 5), (20, 25), (50, 55)]
+#         ... )
+#         >>> # Shows lines 1-5, then "...", then 20-25, then "...", then 50-55.
+#     """
+#     from pathlib import Path
     
-    file_path = Path(file_path)
-    result_parts = []
+#     file_path = Path(file_path)
+#     result_parts = []
     
-    for start_line, end_line in sections:
-        section_content = read_code_file_with_line_numbers(
-            file_path=file_path,
-            start_line=start_line,
-            end_line=end_line,
-            line_number_format=line_number_format,
-            encoding=encoding
-        )
+#     for start_line, end_line in sections:
+#         section_content = read_code_file_with_line_numbers(
+#             file_path=file_path,
+#             start_line=start_line,
+#             end_line=end_line,
+#             line_number_format=line_number_format,
+#             encoding=encoding
+#         )
         
-        if section_content and not section_content.startswith("Error"):
-            result_parts.append(section_content)
+#         if section_content and not section_content.startswith("Error"):
+#             result_parts.append(section_content)
     
-    return separator.join(result_parts)
+#     return separator.join(result_parts)
 

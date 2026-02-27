@@ -1,249 +1,428 @@
+"""Software profile similarity retrieval helpers.
+
+This module implements the similarity strategy used in
+`experiments/rq-software-and-module-similarity/similarity.ipynb`:
+- description similarity
+- target application similarity
+- target user similarity
+- module-name Jaccard similarity
+
+Additionally, it introduces a module dependency/import similarity metric based on
+module-level dependency and import features:
+- internal dependencies (`internal_dependencies`, `calls_modules`, `called_by_modules`)
+- external imports (`external_dependencies`)
 """
-llm-vulvariant.src.scanner.similarity.retriever 的 Docstring
-name: str
-description: str
-target_application: list
-target_user: list
-repo_info['readme_content']
 
+from __future__ import annotations
 
-"""
-
-
-from scanner.similarity.embedding import EmbeddingRetriever, EmbeddingRetrievalConfig
-from profiler.software.models import SoftwareProfile, ModuleInfo
-from typing import Tuple
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Set
+import json
+import re
 
+from profiler.software.models import ModuleInfo, SoftwareProfile
+from scanner.similarity.embedding import EmbeddingRetrievalConfig, EmbeddingRetriever
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+DEFAULT_SIMILARITY_WEIGHTS: Dict[str, float] = {
+    "description": 1.0,
+    "target_application": 1.0,
+    "target_user": 1.0,
+    "module_jaccard": 1.0,
+    "module_dependency_import": 1.0,
+}
+
+
+@dataclass(frozen=True)
+class ProfileRef:
+    """A loaded software profile with repository identity."""
+
+    repo_name: str
+    commit_hash: str
+    profile: SoftwareProfile
+
+    @property
+    def label(self) -> str:
+        return f"{self.repo_name}-{self.commit_hash[:12]}"
+
+
+@dataclass(frozen=True)
+class ProfileSimilarityMetrics:
+    """Per-dimension similarity scores."""
+
+    description_sim: float
+    target_application_sim: float
+    target_user_sim: float
+    module_jaccard_sim: float
+    module_dependency_import_sim: float
+    overall_sim: float
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "description_sim": self.description_sim,
+            "target_application_sim": self.target_application_sim,
+            "target_user_sim": self.target_user_sim,
+            "module_jaccard_sim": self.module_jaccard_sim,
+            "module_dependency_import_sim": self.module_dependency_import_sim,
+            "overall_sim": self.overall_sim,
+        }
+
+
+@dataclass(frozen=True)
+class SimilarProfileCandidate:
+    """A candidate target profile with similarity metrics."""
+
+    profile_ref: ProfileRef
+    metrics: ProfileSimilarityMetrics
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "repo_name": self.profile_ref.repo_name,
+            "commit_hash": self.profile_ref.commit_hash,
+            "label": self.profile_ref.label,
+            "metrics": self.metrics.to_dict(),
+        }
+
+
+def load_all_software_profiles(repo_profiles_dir: Path) -> List[ProfileRef]:
+    """Load all software profiles under `repo_profiles_dir`.
+
+    Expected layout:
+      repo_profiles_dir/{repo_name}/{commit_hash}/software_profile.json
+    """
+    refs: List[ProfileRef] = []
+    repo_profiles_dir = Path(repo_profiles_dir)
+    if not repo_profiles_dir.exists():
+        logger.warning(f"Profile directory not found: {repo_profiles_dir}")
+        return refs
+
+    for repo_dir in sorted(repo_profiles_dir.iterdir()):
+        if not repo_dir.is_dir():
+            continue
+        repo_name = repo_dir.name
+        for commit_dir in sorted(repo_dir.iterdir()):
+            if not commit_dir.is_dir():
+                continue
+            profile_path = commit_dir / "software_profile.json"
+            if not profile_path.exists():
+                continue
+            try:
+                data = json.loads(profile_path.read_text(encoding="utf-8"))
+                profile = SoftwareProfile.from_dict(data)
+                refs.append(
+                    ProfileRef(
+                        repo_name=repo_name,
+                        commit_hash=commit_dir.name,
+                        profile=profile,
+                    )
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning(f"Failed to load profile {profile_path}: {exc}")
+    return refs
+
+
+def resolve_profile_commit(
+    repo_profiles_dir: Path,
+    repo_name: str,
+    commit_hint: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve a profile commit hash by optional full/prefix hint."""
+    repo_dir = Path(repo_profiles_dir) / repo_name
+    if not repo_dir.exists() or not repo_dir.is_dir():
+        return None
+
+    commits = sorted([p.name for p in repo_dir.iterdir() if p.is_dir()])
+    if not commits:
+        return None
+
+    if commit_hint:
+        for commit in commits:
+            if commit == commit_hint or commit.startswith(commit_hint):
+                return commit
+        return None
+
+    # No hint: pick the lexicographically latest commit directory.
+    return commits[-1]
+
+
+def select_profile_ref(
+    profile_refs: Sequence[ProfileRef],
+    repo_name: str,
+    commit_hint: Optional[str] = None,
+) -> Optional[ProfileRef]:
+    """Select a profile reference by repo name and optional commit/prefix."""
+    by_repo = [r for r in profile_refs if r.repo_name == repo_name]
+    if not by_repo:
+        return None
+
+    if commit_hint:
+        for ref in by_repo:
+            if ref.commit_hash == commit_hint or ref.commit_hash.startswith(commit_hint):
+                return ref
+        return None
+
+    return sorted(by_repo, key=lambda r: r.commit_hash)[-1]
+
+
+def build_text_retriever(
+    model_name: str = "BAAI--bge-large-en-v1.5",
+    device: str = "cpu",
+) -> Optional[EmbeddingRetriever]:
+    """Build an embedding retriever for text similarity.
+
+    Falls back to `None` when the model cannot be loaded.
+    """
+    config = EmbeddingRetrievalConfig(
+        model_name=model_name,
+        device=device,
+        batch_size=32,
+        normalize=True,
+    )
+    try:
+        return EmbeddingRetriever(config=config)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning(f"Falling back to lexical text similarity: {exc}")
+        return None
+
+
+def compute_profile_similarity(
+    source_profile: SoftwareProfile,
+    target_profile: SoftwareProfile,
+    text_retriever: Optional[EmbeddingRetriever] = None,
+    weights: Optional[Dict[str, float]] = None,
+) -> ProfileSimilarityMetrics:
+    """Compute profile similarity with five dimensions.
+
+    Metrics:
+    1) description similarity (embedding or lexical fallback)
+    2) target application similarity (embedding or lexical fallback)
+    3) target user similarity (embedding or lexical fallback)
+    4) module-name Jaccard similarity
+    5) module dependency/import Jaccard similarity
+    """
+    weights = weights or DEFAULT_SIMILARITY_WEIGHTS
+
+    description_sim = _text_similarity(
+        source_profile.description,
+        target_profile.description,
+        text_retriever=text_retriever,
+    )
+    target_application_sim = _text_similarity(
+        " | ".join(source_profile.target_application or []),
+        " | ".join(target_profile.target_application or []),
+        text_retriever=text_retriever,
+    )
+    target_user_sim = _text_similarity(
+        " | ".join(source_profile.target_user or []),
+        " | ".join(target_profile.target_user or []),
+        text_retriever=text_retriever,
+    )
+    module_jaccard_sim = _jaccard_similarity(
+        _module_name_set(source_profile),
+        _module_name_set(target_profile),
+    )
+    module_dependency_import_sim = _jaccard_similarity(
+        _module_dependency_import_tokens(source_profile),
+        _module_dependency_import_tokens(target_profile),
+    )
+
+    weighted_items = {
+        "description": description_sim,
+        "target_application": target_application_sim,
+        "target_user": target_user_sim,
+        "module_jaccard": module_jaccard_sim,
+        "module_dependency_import": module_dependency_import_sim,
+    }
+    denom = sum(max(0.0, float(weights.get(k, 0.0))) for k in weighted_items)
+    if denom <= 0:
+        overall_sim = sum(weighted_items.values()) / len(weighted_items)
+    else:
+        overall_sim = sum(
+            float(weights.get(key, 0.0)) * value
+            for key, value in weighted_items.items()
+        ) / denom
+
+    return ProfileSimilarityMetrics(
+        description_sim=description_sim,
+        target_application_sim=target_application_sim,
+        target_user_sim=target_user_sim,
+        module_jaccard_sim=module_jaccard_sim,
+        module_dependency_import_sim=module_dependency_import_sim,
+        overall_sim=overall_sim,
+    )
+
+
+def rank_similar_profiles(
+    source_ref: ProfileRef,
+    candidate_refs: Sequence[ProfileRef],
+    *,
+    top_k: int = 3,
+    text_retriever: Optional[EmbeddingRetriever] = None,
+    weights: Optional[Dict[str, float]] = None,
+    exclude_same_repo: bool = True,
+) -> List[SimilarProfileCandidate]:
+    """Rank candidate profiles by similarity to source profile."""
+    if top_k <= 0:
+        return []
+
+    ranked: List[SimilarProfileCandidate] = []
+    for candidate_ref in candidate_refs:
+        if candidate_ref.repo_name == source_ref.repo_name and exclude_same_repo:
+            continue
+        if candidate_ref.repo_name == source_ref.repo_name and candidate_ref.commit_hash == source_ref.commit_hash:
+            continue
+
+        metrics = compute_profile_similarity(
+            source_ref.profile,
+            candidate_ref.profile,
+            text_retriever=text_retriever,
+            weights=weights,
+        )
+        ranked.append(SimilarProfileCandidate(profile_ref=candidate_ref, metrics=metrics))
+
+    ranked.sort(
+        key=lambda item: (
+            item.metrics.overall_sim,
+            item.metrics.module_dependency_import_sim,
+            item.metrics.module_jaccard_sim,
+        ),
+        reverse=True,
+    )
+    return ranked[: min(top_k, len(ranked))]
+
+
+def _module_name_set(profile: SoftwareProfile) -> Set[str]:
+    names: Set[str] = set()
+    for module in _iter_modules(profile):
+        module_name = _normalize_token(module.name)
+        if module_name:
+            names.add(module_name)
+    return names
+
+
+def _module_dependency_import_tokens(profile: SoftwareProfile) -> Set[str]:
+    """Build module-level dependency/import tokens for Jaccard comparison."""
+    tokens: Set[str] = set()
+    for module in _iter_modules(profile):
+        module_name = _normalize_token(module.name)
+        if not module_name:
+            continue
+
+        internal_dep_lists = [
+            module.internal_dependencies,
+            module.calls_modules,
+            module.called_by_modules,
+        ]
+        for dep in _flatten_list(internal_dep_lists):
+            dep_name = _normalize_token(dep)
+            if dep_name and dep_name != module_name:
+                tokens.add(f"dep::{module_name}->{dep_name}")
+
+        for imp in _flatten_list([module.external_dependencies]):
+            import_name = _normalize_token(imp)
+            if import_name:
+                tokens.add(f"import::{module_name}::{import_name}")
+
+    for dep_name in profile.dependency_usage_count.keys():
+        normalized = _normalize_token(dep_name)
+        if normalized:
+            tokens.add(f"project_import::{normalized}")
+
+    for dep_name in profile.third_party_libraries:
+        normalized = _normalize_token(dep_name)
+        if normalized:
+            tokens.add(f"project_import::{normalized}")
+
+    return tokens
+
+
+def _iter_modules(profile: SoftwareProfile) -> Iterable[ModuleInfo]:
+    modules = profile.modules or []
+    for module in modules:
+        if isinstance(module, ModuleInfo):
+            yield module
+        elif isinstance(module, dict):
+            yield ModuleInfo.from_dict(module)
+
+
+def _flatten_list(values: Sequence[Sequence[str]]) -> Iterable[str]:
+    for seq in values:
+        for item in seq or []:
+            if isinstance(item, str):
+                yield item
+
+
+def _normalize_token(value: str) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = " ".join(value.strip().lower().split())
+    return normalized
+
+
+def _tokenize_text(value: str) -> Set[str]:
+    if not value:
+        return set()
+    return set(re.findall(r"[a-zA-Z0-9_\\.\\-/]+", value.lower()))
+
+
+def _jaccard_similarity(left: Set[str], right: Set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+def _text_similarity(
+    left: str,
+    right: str,
+    *,
+    text_retriever: Optional[EmbeddingRetriever] = None,
+) -> float:
+    left = left or ""
+    right = right or ""
+    if not left.strip() or not right.strip():
+        return 0.0
+
+    if text_retriever is not None:
+        try:
+            return float(text_retriever.similarity(left, right))
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.debug(f"Embedding similarity failed, using lexical fallback: {exc}")
+
+    return _jaccard_similarity(_tokenize_text(left), _tokenize_text(right))
 
 
 class SimilarityRetriever:
+    """Backward-compatible wrapper around `compute_profile_similarity`."""
 
-    def __init__(self, embedding_config: EmbeddingRetrievalConfig=None):
-        self.embedding_config = EmbeddingRetrievalConfig()
-        if embedding_config:
-            self.embedding_config = embedding_config
-        self.text_retriever = EmbeddingRetriever(config=self.embedding_config)
-        pass
+    def __init__(self, embedding_config: Optional[EmbeddingRetrievalConfig] = None):
+        self.embedding_config = embedding_config or EmbeddingRetrievalConfig(
+            model_name="BAAI--bge-large-en-v1.5",
+            device="cpu",
+            batch_size=32,
+            normalize=True,
+        )
+        self.text_retriever: Optional[EmbeddingRetriever]
+        try:
+            self.text_retriever = EmbeddingRetriever(config=self.embedding_config)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"SimilarityRetriever falls back to lexical mode: {exc}")
+            self.text_retriever = None
 
-        
     def compute_profile_similarity(
         self,
-        profile1: SoftwareProfile, 
-        profile2: SoftwareProfile, 
-    ) -> Tuple[float, float, float, float]:
-        """
-        Compute four similarity scores between two software profiles.
-        
-        Args:
-            profile1: First software profile
-            profile2: Second software profile
-   
-        Returns:
-            Tuple of (desc_sim, apps_sim, users_sim, module_jaccard_sim)
-            - desc_sim: Description similarity (embedding-based)
-            - apps_sim: Target applications similarity (embedding-based)
-            - users_sim: Target users similarity (embedding-based)
-            - module_jaccard_sim: Module Jaccard similarity (|intersection| / |union|)
-        """
-        # Description similarity
-        desc_sim = self.text_retriever.similarity(profile1.description, profile2.description)
-        
-        # Target applications similarity
-        apps1 = " | ".join(profile1.target_application)
-        apps2 = " | ".join(profile2.target_application)
-        if apps1 and apps2:
-            apps_sim = self.text_retriever.similarity(apps1, apps2)
-        else:
-            apps_sim = 0.0
-        
-        # Target users similarity
-        users1 = " | ".join(profile1.target_user)
-        users2 = " | ".join(profile2.target_user)
-        if users1 and users2:
-            users_sim = self.text_retriever.similarity(users1, users2)
-        else:
-            users_sim = 0.0
-        
-        # Module Jaccard similarity (intersection / union)
-        modules1 = set(m.name for m in profile1.modules)
-        modules2 = set(m.name for m in profile2.modules)
-        common_modules = modules1 & modules2
-        union = modules1 | modules2
-        if len(union) > 0:
-            module_jaccard_sim = len(common_modules) / len(union)
-        else:
-            module_jaccard_sim = 0.0
-        
-        return {'description_sim': desc_sim, 
-                'aaplication_sim': apps_sim, 
-                'user_sim': users_sim, 
-                'module_jaccard': module_jaccard_sim, 
-                'common_modules': common_modules
-                }
-
-
-
-
-# from scanner.similarity.retriever import find_similar_modules_across_repos
-# # Example usage: Find similar modules for the first repository
-# source_repo_key = list(repo_similarity_dict.keys())[3]
-# print(f"\nAnalyzing: {source_repo_key}\n")
-
-# results = find_similar_modules_across_repos(
-#     source_repo_label=source_repo_key,
-#     repo_similarity_dict=repo_similarity_dict,
-#     all_profiles=all_profiles,
-#     text_retriever=text_retriever,
-#     top_k=3,
-#     module_similarity_threshold=0.7
-# )
-
-# print("\n" + "="*100)
-# print("SUMMARY OF MODULE SIMILARITY RESULTS")
-# print("="*100)
-# for target_label, data in results.items():
-#     print(f"\n{target_label}:")
-#     print(f"  Repository Similarity (avg): {data['repo_info']['repo_similarity']['avg']:.4f}")
-#     print(f"  Similar Module Pairs Found: {data['num_pairs']}")
-#     if data['num_pairs'] > 0:
-#         top_pair = data['similar_pairs'][0]
-#         print(f"  Top Module Match: {top_pair['source_module'].name} <-> {top_pair['target_module'].name} ({top_pair['similarity']:.4f})")
-
-
-
-def find_similar_modules_across_repos(
-    source_repo_label: str,
-    repo_similarity_dict: dict,
-    all_profiles: dict,
-    text_retriever: EmbeddingRetriever,
-    top_k: int = 3,
-    module_similarity_threshold: float = 0.7
-):
-    """
-    Find similar modules between a source repo and its top-k most similar repos.
-    
-    Args:
-        source_repo_label: Key in repo_similarity_dict (format: repo-name-commit[:12])
-        repo_similarity_dict: Dictionary mapping repo labels to similarity lists
-        all_profiles: Dictionary of all loaded software profiles
-        text_retriever: EmbeddingRetriever for computing similarities
-        top_k: Number of top similar repos to compare with
-        module_similarity_threshold: Threshold for module similarity
-    
-    Returns:
-        Dictionary containing comparison results for each similar repo
-    """
-    from typing import List, Dict, Tuple
-    
-    # Get source repo info
-    # Format: repo-name-commit[:12], commit is always 12 chars
-    source_commit = source_repo_label[-12:]
-    source_repo_name = source_repo_label[:-13]  # Remove '-commit' (13 chars)
-    source_profile = all_profiles[source_repo_name][source_commit]
-    
-    # Get top-k similar repos
-    similar_repos = repo_similarity_dict[source_repo_label][:top_k]
-    
-    
-    print(f"\nTop {top_k} Similar Repositories:")
-    for idx, (repo_label, desc_sim, apps_sim, users_sim) in enumerate(similar_repos, 1):
-        avg_sim = (desc_sim + apps_sim + users_sim) / 3
-        print(f"{idx}. {repo_label} (avg similarity: {avg_sim:.4f})")
-    
-    # Helper function to create module text representation
-    def create_module_text(module: ModuleInfo) -> str:
-        parts = [
-            f"Module: {module.name}",
-            f"Category: {module.category}",
-            f"Description: {module.description}",
-        ]
-        if module.public_apis:
-            parts.append(f"APIs: {', '.join(module.public_apis[:5])}")
-        if module.external_dependencies:
-            parts.append(f"Dependencies: {', '.join(module.external_dependencies[:5])}")
-        if module.data_formats:
-            parts.append(f"Data formats: {', '.join(module.data_formats)}")
-        return " | ".join(parts)
-    
-    # Get source modules and embeddings
-    source_modules = [m for m in source_profile.modules if isinstance(m, ModuleInfo)]
-    print(f"\nGenerating embeddings for {len(source_modules)} source modules...")
-    source_texts = [create_module_text(m) for m in source_modules]
-    source_embeddings = text_retriever.embed(source_texts)
-    
-    # Compare with each similar repo
-    all_results = {}
-    
-    for rank, (target_repo_label, desc_sim, apps_sim, users_sim, jaccard_sim) in enumerate(similar_repos, 1):
-        # Format: repo-name-commit[:12], commit is always 12 chars
-        target_commit = target_repo_label[-12:]
-        target_repo_name = target_repo_label[:-13]  # Remove '-commit' (13 chars)
-        target_profile = all_profiles[target_repo_name][target_commit]
-        
-        print(f"\n{'='*100}")
-        print(f"COMPARING WITH RANK {rank}: {target_repo_label}")
-        print(f"{'='*100}")
-        
-        target_modules = [m for m in target_profile.modules if isinstance(m, ModuleInfo)]
-        print(f"Target modules: {len(target_modules)}")
-        
-        if not target_modules:
-            print("No modules to compare!")
-            continue
-        
-        target_texts = [create_module_text(m) for m in target_modules]
-        target_embeddings = text_retriever.embed(target_texts)
-        
-        # Find similar module pairs
-        similar_pairs = []
-        for i, (source_mod, source_emb) in enumerate(zip(source_modules, source_embeddings)):
-            best_match = None
-            best_score = module_similarity_threshold
-            
-            for j, (target_mod, target_emb) in enumerate(zip(target_modules, target_embeddings)):
-                similarity = sum(a * b for a, b in zip(source_emb, target_emb))
-                
-                if similarity > best_score:
-                    best_score = similarity
-                    best_match = (j, target_mod)
-            
-            if best_match is not None:
-                similar_pairs.append({
-                    'source_idx': i,
-                    'source_module': source_mod,
-                    'target_idx': best_match[0],
-                    'target_module': best_match[1],
-                    'similarity': best_score
-                })
-        
-        # Sort by similarity
-        similar_pairs.sort(key=lambda x: x['similarity'], reverse=True)
-        
-        print(f"\nFound {len(similar_pairs)} similar module pairs (threshold={module_similarity_threshold})")
-        print("\nTop 10 similar module pairs:")
-        print("-"*100)
-        for i, pair in enumerate(similar_pairs[:10], 1):
-            print(f"\n{i}. Similarity: {pair['similarity']:.4f}")
-            print(f"   Source [{source_repo_name}]: {pair['source_module'].name}")
-            print(f"      Category: {pair['source_module'].category}")
-            print(f"   Target [{target_repo_name}]: {pair['target_module'].name}")
-            print(f"      Category: {pair['target_module'].category}")
-        
-        all_results[target_repo_label] = {
-            'repo_info': {
-                'name': target_repo_name,
-                'commit': target_commit,
-                'version': target_profile.version,
-                'repo_similarity': {
-                    'desc': desc_sim,
-                    'apps': apps_sim,
-                    'users': users_sim,
-                    'avg': (desc_sim + apps_sim + users_sim) / 3
-                }
-            },
-            'similar_pairs': similar_pairs,
-            'num_pairs': len(similar_pairs)
-        }
-    
-    return all_results
+        profile1: SoftwareProfile,
+        profile2: SoftwareProfile,
+    ) -> Dict[str, float]:
+        metrics = compute_profile_similarity(
+            source_profile=profile1,
+            target_profile=profile2,
+            text_retriever=self.text_retriever,
+        )
+        return metrics.to_dict()
