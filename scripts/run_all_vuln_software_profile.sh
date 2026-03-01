@@ -2,18 +2,21 @@
 
 # Script to generate software profiles for all vulnerabilities in vuln.json
 # Usage: ./run_all_vuln_software_profile.sh
-# Run sth like: software-profile --repo-name Megatron-LM --target-version a845aa7e12b3a117e24c2352b9e3e60bad2e3a17 --llm-provider lab --llm-name DeepSeek-V3.2 --output-dir ./repo-profiles-0131  --force-full-analysis
+# Run sth like: software-profile --repo-name Megatron-LM --target-version a845aa7e12b3a117e24c2352b9e3e60bad2e3a17 --llm-provider deepseek --output-dir ./repo-profiles --force-full-analysis
 # under llm-vulvariant: ./scripts/run_all_vuln_software_profile.sh
 set -e  # Exit on error
 
 VULN_JSON="$HOME/vuln/data/vuln.json"
 OUTPUT_DIR="./repo-profiles"
+LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
+LLM_NAME="${LLM_NAME:-}"
 
 echo "=========================================="
 echo "Software Profile Batch Generator"
 echo "=========================================="
 echo "Reading vulnerability data from: $VULN_JSON"
 echo "Output directory: $OUTPUT_DIR"
+echo "LLM provider: $LLM_PROVIDER"
 echo ""
 
 # Check if vuln.json exists
@@ -43,13 +46,19 @@ while IFS='|' read -r repo_name commit; do
     echo "=========================================="
     
     # Run software-profile command
-    if software-profile \
-        --repo-name "$repo_name" \
-        --target-version "$commit" \
-        --llm-provider lab \
-        --llm-name DeepSeek-V3.2 \
-        --output-dir "$OUTPUT_DIR" \
-        --force-full-analysis; then
+    cmd=(
+        software-profile
+        --repo-name "$repo_name"
+        --target-version "$commit"
+        --llm-provider "$LLM_PROVIDER"
+        --output-dir "$OUTPUT_DIR"
+        --force-full-analysis
+    )
+    if [ -n "$LLM_NAME" ]; then
+        cmd+=(--llm-name "$LLM_NAME")
+    fi
+
+    if "${cmd[@]}"; then
         succeeded=$((succeeded + 1))
         echo "✅ Success: $repo_name @ ${commit:0:8}"
     else

@@ -82,6 +82,33 @@ def test_generate_ghsa_reports_filters_findings_and_embeds_docker_section():
     assert "Docker Verification Evidence" in reports[0]["content"]
 
 
+def test_generate_ghsa_reports_only_exploitable_filter():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "original_finding": {
+                    "file_path": "src/a.py",
+                    "vulnerability_type": "command_injection",
+                },
+            },
+            {
+                "finding_id": "vuln_002",
+                "verdict": "CONDITIONALLY_EXPLOITABLE",
+                "original_finding": {
+                    "file_path": "src/b.py",
+                    "vulnerability_type": "xss",
+                },
+            },
+        ]
+    }
+
+    reports = gen.generate_ghsa_reports(data, only_exploitable=True)
+    assert [r["finding_id"] for r in reports] == ["vuln_001"]
+
+
 def test_generate_full_report_contains_docker_summary_and_findings_sections():
     gen = _generator()
     data = {
@@ -123,3 +150,36 @@ def test_generate_full_report_contains_docker_summary_and_findings_sections():
     assert "Exploitable Vulnerabilities" in report
     assert "Finding 1" in report
     assert "VERIFIED_EXPLOITABLE" in report
+
+
+def test_generate_full_report_only_exploitable_hides_conditional_sections():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "original_finding": {
+                    "file_path": "src/app.py",
+                    "vulnerability_type": "deserialization",
+                    "description": "Unsafe load",
+                    "confidence": "high",
+                },
+            },
+            {
+                "finding_id": "vuln_002",
+                "verdict": "CONDITIONALLY_EXPLOITABLE",
+                "original_finding": {
+                    "file_path": "src/extra.py",
+                    "vulnerability_type": "ssrf",
+                    "description": "Conditional issue",
+                    "confidence": "medium",
+                },
+            },
+        ],
+    }
+
+    report = gen.generate_full_report(data, only_exploitable=True)
+    assert "Report mode: only findings with verdict `EXPLOITABLE`" in report
+    assert "Exploitable Vulnerabilities" in report
+    assert "Conditionally Exploitable Vulnerabilities" not in report

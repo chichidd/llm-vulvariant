@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate software profile using LLM')
     parser.add_argument('--repo-name', required=True, help='Repository name under repo base path (config/paths.yaml)')
-    parser.add_argument('--llm-provider', default='lab', help='LLM provider name (e.g., openai, deepseek)')
+    parser.add_argument('--llm-provider', default='deepseek', help='LLM provider name (e.g., openai, deepseek)')
     parser.add_argument('--llm-name', default=None, help='LLM model name (e.g., gpt-5.1, deepseek-chat). If not specified, use default model for the provider.')
     parser.add_argument('--output-dir', default=None, help='Output directory for profiles')
     parser.add_argument('--repo-base-path', default=None, help='Base path containing repos (default from config/paths.yaml)')

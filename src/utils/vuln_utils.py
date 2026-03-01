@@ -1,5 +1,6 @@
 import json
 from typing import List, Dict, Any
+from pathlib import Path
 from config import _path_config
 from .git_utils import get_git_commit, checkout_commit, restore_to_latest_commit
 from .logger import get_logger
@@ -7,10 +8,11 @@ from utils.llm_utils import extract_function_snippet_based_on_name_with_ast
 
 logger = get_logger(__name__)
 
-def read_vuln_data(index=None, verbose: bool = False) -> List[Dict[str, Any]]:
+def read_vuln_data(index=None, verbose: bool = False, vuln_json_path: str | Path | None = None) -> List[Dict[str, Any]]:
     if verbose:
         logger.info("Reading vulnerability data...")
-    with open(_path_config['vuln_data_path'], 'r', encoding='utf-8') as f:
+    source_path = Path(vuln_json_path).expanduser() if vuln_json_path else _path_config['vuln_data_path']
+    with open(source_path, 'r', encoding='utf-8') as f:
         rawdata = json.load(f)
     repos = []
     if index is not None:

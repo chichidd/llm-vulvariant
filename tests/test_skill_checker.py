@@ -184,3 +184,39 @@ def test_check_single_resumes_existing_results_and_processes_remaining(monkeypat
     assert len(saved["results"]) == 2
     assert saved["summary"]["exploitable"] == 1
     assert saved["summary"]["not_exploitable"] == 1
+
+
+def test_check_single_writes_run_metadata(monkeypatch, tmp_path):
+    checker = _checker()
+
+    findings_path = tmp_path / "agentic_vuln_findings.json"
+    findings_path.write_text(
+        json.dumps(
+            {"vulnerabilities": [{"file_path": "x.py", "vulnerability_type": "x"}]}
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "exploitability.json"
+    runtime_dir = tmp_path / "claude-runtime" / "run-1"
+
+    def fake_analyze_single_vuln(**kwargs):
+        return {
+            "finding_id": kwargs["finding_id"],
+            "verdict": "NOT_EXPLOITABLE",
+            "original_finding": kwargs["vuln"],
+        }
+
+    monkeypatch.setattr(checker, "_analyze_single_vuln", fake_analyze_single_vuln)
+
+    result = checker.check_single(
+        findings_path=findings_path,
+        repo_path=tmp_path,
+        output_path=output_path,
+        run_id="run-1",
+        claude_config_dir=runtime_dir,
+    )
+
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+    assert result["status"] == "success"
+    assert saved["metadata"]["run_id"] == "run-1"
+    assert saved["metadata"]["claude_runtime_dir"] == str(runtime_dir)

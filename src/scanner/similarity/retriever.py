@@ -261,6 +261,7 @@ def rank_similar_profiles(
     candidate_refs: Sequence[ProfileRef],
     *,
     top_k: int = 3,
+    min_overall_similarity: float = 0.0,
     text_retriever: Optional[EmbeddingRetriever] = None,
     weights: Optional[Dict[str, float]] = None,
     exclude_same_repo: bool = True,
@@ -282,6 +283,8 @@ def rank_similar_profiles(
             text_retriever=text_retriever,
             weights=weights,
         )
+        if metrics.overall_sim < min_overall_similarity:
+            continue
         ranked.append(SimilarProfileCandidate(profile_ref=candidate_ref, metrics=metrics))
 
     ranked.sort(

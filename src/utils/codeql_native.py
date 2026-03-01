@@ -50,8 +50,6 @@ import shutil
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
-
 from utils.logger import get_logger
 
 # Initialize logger for this module
@@ -176,18 +174,6 @@ class CallGraphEdge:
     callee_file: str
     callee_line: int
     call_site_line: int
-
-
-@dataclass
-class CodeQLAnalysisResult:
-    """CodeQL analysis result."""
-    success: bool
-    database_path: str
-    query_results: Dict[str, List[CodeQLFinding]] = field(default_factory=dict)
-    call_graph: List[CallGraphEdge] = field(default_factory=list)
-    statistics: Dict[str, Any] = field(default_factory=dict)
-    errors: List[str] = field(default_factory=list)
-    execution_time: float = 0.0
 
 
 class CodeQLAnalyzer:
@@ -446,90 +432,6 @@ class CodeQLAnalyzer:
                 return lang
         
         return None  # Cannot determine – caller must handle
-    
-    def analyze(
-        self,
-        source_path: str,
-        language: str,
-        queries: Optional[List[str]] = None,
-        include_call_graph: bool = True
-    ) -> CodeQLAnalysisResult:
-        """
-        Full analysis workflow.
-        
-        Args:
-            source_path: Source code path
-            language: Programming language
-            queries: List of queries to run; None means using default security queries
-            include_call_graph: Whether to include call graph analysis
-        
-        Returns:
-            CodeQLAnalysisResult
-        """
-        start_time = datetime.now()
-        result = CodeQLAnalysisResult(
-            success=False,
-            database_path=""
-        )
-        
-        # Check whether CodeQL is available
-        if not self.is_available:
-            result.errors.append("CodeQL is not installed or not in PATH")
-            return result
-        
-        # Create database
-        success, db_path_or_error = self.create_database(source_path, language)
-        if not success:
-            result.errors.append(db_path_or_error)
-            return result
-        
-        result.database_path = db_path_or_error
-        
-        # Determine which queries to run
-        if queries is None:
-            queries = self._get_default_queries(language)
-        
-        # Run queries
-        for query in queries:
-            query_success, query_result = self.run_query(result.database_path, query)
-            
-            if query_success:
-                findings = self._parse_sarif_results(query_result)
-                query_name = os.path.basename(query).replace(".ql", "")
-                result.query_results[query_name] = findings
-            else:
-                result.errors.append(f"Query '{query}' failed: {query_result}")
-        
-        # Build call graph
-        if include_call_graph:
-            call_graph = self._build_call_graph(result.database_path, language)
-            result.call_graph = call_graph
-        
-        # Statistics
-        result.statistics = {
-            "total_findings": sum(len(f) for f in result.query_results.values()),
-            "findings_by_query": {k: len(v) for k, v in result.query_results.items()},
-            "call_graph_edges": len(result.call_graph),
-        }
-        
-        result.success = True
-        result.execution_time = (datetime.now() - start_time).total_seconds()
-        
-        return result
-    
-    def _get_default_queries(self, language: str) -> List[str]:
-        """Get the default query list."""
-        queries_dir = os.path.join(self.config['queries_path'], language)
-        
-        if os.path.exists(queries_dir):
-            return [
-                os.path.join(queries_dir, f)
-                for f in os.listdir(queries_dir)
-                if f.endswith(".ql")
-            ]
-        
-        # Use built-in security queries
-        return ["security"]
     
     def _parse_sarif_results(self, sarif: Dict) -> List[CodeQLFinding]:
         """Parse SARIF-format results."""

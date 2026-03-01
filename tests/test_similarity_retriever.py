@@ -164,6 +164,32 @@ def test_rank_similar_profiles_excludes_same_repo_and_uses_tie_break(monkeypatch
     assert [c.profile_ref.repo_name for c in ranked] == ["repo-b", "repo-c"]
 
 
+def test_rank_similar_profiles_applies_min_overall_similarity(monkeypatch):
+    source = ProfileRef("repo-a", "aaaaaaaaaaaa1111", _mk_profile("a", "x", [ModuleInfo(name="m")]))
+    candidate_1 = ProfileRef("repo-b", "bbbb", _mk_profile("b", "x", [ModuleInfo(name="m")]))
+    candidate_2 = ProfileRef("repo-c", "cccc", _mk_profile("c", "x", [ModuleInfo(name="m")]))
+
+    score_map = {
+        "b": ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+        "c": ProfileSimilarityMetrics(0.6, 0.6, 0.6, 0.6, 0.6, 0.6),
+    }
+
+    def fake_compute(source_profile, target_profile, text_retriever=None, weights=None):
+        return score_map[target_profile.name]
+
+    monkeypatch.setattr("scanner.similarity.retriever.compute_profile_similarity", fake_compute)
+
+    ranked = rank_similar_profiles(
+        source_ref=source,
+        candidate_refs=[candidate_1, candidate_2],
+        top_k=10,
+        min_overall_similarity=0.7,
+    )
+
+    assert len(ranked) == 1
+    assert ranked[0].profile_ref.repo_name == "repo-b"
+
+
 def test_load_all_profiles_and_commit_resolution(tmp_path):
     repo_profiles_dir = tmp_path / "repo-profiles"
     good_dir = repo_profiles_dir / "repo1" / "abc123456789"

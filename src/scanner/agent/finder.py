@@ -32,6 +32,8 @@ class AgenticVulnFinder:
         software_profile,
         vulnerability_profile,
         max_iterations: int = 300,
+        stop_when_critical_complete: bool = False,
+        critical_stop_mode: str = "min",
         temperature: float = 1.0,
         max_tokens: int = 65536,
         verbose: bool = True,
@@ -43,6 +45,14 @@ class AgenticVulnFinder:
         self.software_profile = software_profile
         self.vulnerability_profile = vulnerability_profile
         self.max_iterations = max_iterations
+        self.stop_when_critical_complete = stop_when_critical_complete
+        normalized_stop_mode = (critical_stop_mode or "min").lower()
+        if normalized_stop_mode not in {"min", "max"}:
+            logger.warning(
+                f"Invalid critical_stop_mode={critical_stop_mode!r}; fallback to 'min'"
+            )
+            normalized_stop_mode = "min"
+        self.critical_stop_mode = normalized_stop_mode
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.verbose = verbose
@@ -303,9 +313,45 @@ class AgenticVulnFinder:
         ]
         iteration = 0  # iteration index
 
-        while iteration < self.max_iterations:
+        while True:
+            critical_complete = self.memory.is_critical_complete() if self.memory else True
+            base_iteration_reached = iteration >= self.max_iterations
+            if not self.stop_when_critical_complete:
+                if base_iteration_reached:
+                    break
+            elif self.critical_stop_mode == "max":
+                if base_iteration_reached and critical_complete:
+                    if self.verbose:
+                        logger.info(
+                            "Reached stop condition: iterations >= baseline and priority-1 scope complete"
+                        )
+                    break
+            else:
+                # min mode: stop when either baseline iteration cap is reached
+                # or critical scope is complete
+                if base_iteration_reached:
+                    if self.verbose:
+                        logger.warning(f"Reached maximum iterations ({self.max_iterations})")
+                    break
+                if critical_complete and iteration > 0:
+                    if self.verbose:
+                        logger.info("- Priority-1 scan scope is complete; stopping (critical-stop-mode=min)")
+                    break
+
             if self.verbose:
-                logger.info(f"\n[ITERATION {iteration + 1}/{self.max_iterations}]")
+                if self.stop_when_critical_complete and self.critical_stop_mode == "max":
+                    logger.info(
+                        f"\n[ITERATION {iteration + 1}] "
+                        f"(baseline={self.max_iterations}, "
+                        "stop when baseline reached AND priority-1 complete)"
+                    )
+                elif self.stop_when_critical_complete and self.critical_stop_mode == "min":
+                    logger.info(
+                        f"\n[ITERATION {iteration + 1}/{self.max_iterations}] "
+                        "(stop when baseline reached OR priority-1 complete)"
+                    )
+                else:
+                    logger.info(f"\n[ITERATION {iteration + 1}/{self.max_iterations}]")
             self.conversation_history.append(
                 {"role": "user", "content": self._get_user_message(iteration)}
             )
@@ -316,8 +362,11 @@ class AgenticVulnFinder:
             should_stop = bool(
                 response and any(keyword in response.lower() for keyword in completion_keywords)
             )
+            critical_complete = self.memory.is_critical_complete() if self.memory else True
             if should_stop and self.verbose:
                 logger.info("- LLM indicates analysis is complete")
+            if self.stop_when_critical_complete and critical_complete and self.verbose:
+                logger.info("- Priority-1 scan scope is complete")
 
             if self.output_dir:
                 conversations_dir = self.output_dir / "conversations"
@@ -341,10 +390,19 @@ class AgenticVulnFinder:
                 )
             
             iteration += 1
-            if should_stop:
+            if should_stop and (not self.stop_when_critical_complete or self.critical_stop_mode == "min"):
                 break
+            if should_stop and self.stop_when_critical_complete and self.critical_stop_mode == "max" and self.verbose:
+                logger.info(
+                    "- Continue scanning until both conditions are met: "
+                    f"iterations >= {self.max_iterations} and priority-1 scope complete"
+                )
 
-        if iteration >= self.max_iterations and self.verbose:
+        if (
+            not self.stop_when_critical_complete
+            and iteration >= self.max_iterations
+            and self.verbose
+        ):
             logger.warning(f"Reached maximum iterations ({self.max_iterations})")
         
         # Finalize memory

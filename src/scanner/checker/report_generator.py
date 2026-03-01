@@ -67,6 +67,7 @@ class ReportGenerator:
         exploitability_results: Dict[str, Any],
         output_dir: Optional[Path] = None,
         cve_id: Optional[str] = None,
+        only_exploitable: bool = False,
     ) -> Dict[str, str]:
         """Generate all report types.
 
@@ -81,11 +82,19 @@ class ReportGenerator:
         reports = {}
 
         # Generate GHSA report for each exploitable finding
-        ghsa_reports = self.generate_ghsa_reports(exploitability_results, cve_id)
+        ghsa_reports = self.generate_ghsa_reports(
+            exploitability_results,
+            cve_id,
+            only_exploitable=only_exploitable,
+        )
         reports["ghsa_reports"] = ghsa_reports
 
         # Generate comprehensive research report
-        full_report = self.generate_full_report(exploitability_results, cve_id)
+        full_report = self.generate_full_report(
+            exploitability_results,
+            cve_id,
+            only_exploitable=only_exploitable,
+        )
         reports["full_report"] = full_report
 
         # Write to files if output_dir specified
@@ -130,6 +139,7 @@ class ReportGenerator:
         self,
         exploitability_results: Dict[str, Any],
         cve_id: Optional[str] = None,
+        only_exploitable: bool = False,
     ) -> List[Dict[str, Any]]:
         """Generate GitHub Security Advisory reports for exploitable findings.
 
@@ -141,10 +151,14 @@ class ReportGenerator:
         reports = []
         results = exploitability_results.get("results", [])
         verifications = self._extract_finding_verifications(exploitability_results)
+        allowed_verdicts = {"EXPLOITABLE"} if only_exploitable else {
+            "EXPLOITABLE",
+            "CONDITIONALLY_EXPLOITABLE",
+        }
 
         for result in results:
             verdict = result.get("verdict", "").upper()
-            if verdict not in ("EXPLOITABLE", "CONDITIONALLY_EXPLOITABLE"):
+            if verdict not in allowed_verdicts:
                 continue
 
             finding_id = result.get("finding_id", "unknown")
@@ -456,6 +470,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         self,
         exploitability_results: Dict[str, Any],
         cve_id: Optional[str] = None,
+        only_exploitable: bool = False,
     ) -> str:
         """Generate a comprehensive security research report.
 
@@ -466,6 +481,26 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         summary = exploitability_results.get("summary", {})
         metadata = exploitability_results.get("metadata", {})
         verifications = self._extract_finding_verifications(exploitability_results)
+        filtered_results = [
+            r for r in results
+            if r.get("verdict", "").upper() == "EXPLOITABLE"
+        ] if only_exploitable else results
+
+        summary_counts = {
+            "exploitable": sum(1 for r in filtered_results if r.get("verdict", "").upper() == "EXPLOITABLE"),
+            "conditionally_exploitable": sum(
+                1 for r in filtered_results if r.get("verdict", "").upper() == "CONDITIONALLY_EXPLOITABLE"
+            ),
+            "library_risk": sum(1 for r in filtered_results if r.get("verdict", "").upper() == "LIBRARY_RISK"),
+            "not_exploitable": sum(1 for r in filtered_results if r.get("verdict", "").upper() == "NOT_EXPLOITABLE"),
+        }
+        if not filtered_results and not only_exploitable:
+            summary_counts = {
+                "exploitable": summary.get("exploitable", 0),
+                "conditionally_exploitable": summary.get("conditionally_exploitable", 0),
+                "library_risk": summary.get("library_risk", 0),
+                "not_exploitable": summary.get("not_exploitable", 0),
+            }
 
         lines = [
             f"# Security Research Report: {self.repo_name}",
@@ -484,12 +519,17 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
             "",
             f"| Verdict | Count |",
             f"|---------|-------|",
-            f"| Exploitable | {summary.get('exploitable', 0)} |",
-            f"| Conditionally Exploitable | {summary.get('conditionally_exploitable', 0)} |",
-            f"| Library Risk | {summary.get('library_risk', 0)} |",
-            f"| Not Exploitable | {summary.get('not_exploitable', 0)} |",
+            f"| Exploitable | {summary_counts.get('exploitable', 0)} |",
+            f"| Conditionally Exploitable | {summary_counts.get('conditionally_exploitable', 0)} |",
+            f"| Library Risk | {summary_counts.get('library_risk', 0)} |",
+            f"| Not Exploitable | {summary_counts.get('not_exploitable', 0)} |",
             "",
         ]
+        if only_exploitable:
+            lines.extend([
+                "> Report mode: only findings with verdict `EXPLOITABLE` are included in detailed sections.",
+                "",
+            ])
 
         # Docker verification summary
         if verifications:
@@ -538,9 +578,13 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         ])
 
         # Group findings by verdict
-        exploitable = [r for r in results if r.get("verdict", "").upper() == "EXPLOITABLE"]
-        conditional = [r for r in results if r.get("verdict", "").upper() == "CONDITIONALLY_EXPLOITABLE"]
-        library_risk = [r for r in results if r.get("verdict", "").upper() == "LIBRARY_RISK"]
+        exploitable = [r for r in filtered_results if r.get("verdict", "").upper() == "EXPLOITABLE"]
+        conditional = [] if only_exploitable else [
+            r for r in filtered_results if r.get("verdict", "").upper() == "CONDITIONALLY_EXPLOITABLE"
+        ]
+        library_risk = [] if only_exploitable else [
+            r for r in filtered_results if r.get("verdict", "").upper() == "LIBRARY_RISK"
+        ]
 
         if exploitable:
             lines.append("### Exploitable Vulnerabilities")

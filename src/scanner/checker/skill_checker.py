@@ -13,6 +13,7 @@ Key design:
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from datetime import datetime
@@ -28,17 +29,29 @@ logger = get_logger(__name__)
 class SkillExploitabilityChecker:
     """Check vulnerability exploitability using Claude Code skill."""
 
-    def __init__(self, timeout: int = 600):
+    def __init__(self, timeout: int = 600, claude_config_dir: str | Path | None = None):
         """Initialize the checker.
         
         Args:
             timeout: Timeout in seconds for each Claude CLI call (default: 600 = 10 minutes)
+            claude_config_dir: Base Claude runtime directory (default: <repo_root>/.claude-runtime)
         """
         self.timeout = timeout
         self.skill_name = "check-exploitability"
+        self._default_claude_config_dir = Path(claude_config_dir) if claude_config_dir else (
+            _path_config["repo_root"] / ".claude-runtime"
+        )
+        self._active_claude_config_dir = self._default_claude_config_dir
+        self._ensure_claude_runtime_dir(self._default_claude_config_dir)
         
         if not self._skill_exists():
             logger.warning(f"Skill '{self.skill_name}' not found at {self._get_skill_path()}")
+
+    @staticmethod
+    def _ensure_claude_runtime_dir(runtime_dir: Path) -> None:
+        """Ensure runtime dir has expected writable structure."""
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "debug").mkdir(parents=True, exist_ok=True)
 
     def _get_skill_path(self) -> Path:
         """Get the path to the skill directory."""
@@ -55,6 +68,8 @@ class SkillExploitabilityChecker:
         output_path: Path,
         software_profile_path: Optional[Path] = None,
         commit_hash: str = "",
+        run_id: Optional[str] = None,
+        claude_config_dir: str | Path | None = None,
     ) -> Dict[str, Any]:
         """Check exploitability of vulnerabilities in a findings file.
         
@@ -68,6 +83,8 @@ class SkillExploitabilityChecker:
             output_path: Path to write exploitability.json
             software_profile_path: Optional path to software_profile.json
             commit_hash: Full or prefix commit hash for reproducible Docker builds.
+            run_id: Optional batch run identifier persisted into metadata
+            claude_config_dir: Runtime directory used by Claude CLI for this check
             
         Returns:
             Dictionary with analysis results and metadata
@@ -95,9 +112,19 @@ class SkillExploitabilityChecker:
 
         logger.info(f"Analyzing {len(vulnerabilities)} vulnerabilities from {findings_path}")
 
+        runtime_dir = Path(claude_config_dir) if claude_config_dir else self._default_claude_config_dir
+        self._ensure_claude_runtime_dir(runtime_dir)
+        self._active_claude_config_dir = runtime_dir
+
         # Initialize or load existing results
         result_doc = self._init_or_load_results(
-            output_path, findings_path, repo_path, software_profile_path, len(vulnerabilities)
+            output_path=output_path,
+            findings_path=findings_path,
+            repo_path=repo_path,
+            software_profile_path=software_profile_path,
+            total_vulns=len(vulnerabilities),
+            run_id=run_id,
+            claude_config_dir=runtime_dir,
         )
 
         # Get already processed indices
@@ -270,12 +297,15 @@ class SkillExploitabilityChecker:
         
         try:
             logger.debug(f"Running Claude with prompt length: {len(prompt)}")
+            claude_env = os.environ.copy()
+            claude_env["CLAUDE_CONFIG_DIR"] = str(self._active_claude_config_dir)
             result = subprocess.run(
                 cmd,
                 check=False,
                 capture_output=True,
                 text=True,
                 cwd=str(_path_config['repo_root']),
+                env=claude_env,
                 timeout=self.timeout,
             )
             
@@ -523,13 +553,40 @@ class SkillExploitabilityChecker:
         repo_path: Path,
         software_profile_path: Optional[Path],
         total_vulns: int,
+        run_id: Optional[str] = None,
+        claude_config_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Initialize new results or load existing for resume."""
         if output_path.exists():
             try:
                 existing = json.loads(output_path.read_text(encoding="utf-8"))
                 if "results" in existing and "metadata" in existing:
-                    logger.info(f"Resuming from {len(existing['results'])} existing results")
+                    original_count = len(existing.get("results", []))
+                    retained_results = []
+                    retry_count = 0
+                    for item in existing.get("results", []):
+                        verdict = str(item.get("verdict", "")).upper()
+                        if verdict in {"ERROR", "UNKNOWN"}:
+                            retry_count += 1
+                            continue
+                        retained_results.append(item)
+
+                    if retry_count > 0:
+                        logger.info(
+                            f"Resuming with retry: dropping {retry_count} ERROR/UNKNOWN results, "
+                            f"retaining {len(retained_results)}/{original_count}"
+                        )
+                        existing["results"] = retained_results
+                        metadata = existing.setdefault("metadata", {})
+                        metadata["completed_at"] = None
+                        self._update_summary(existing)
+                    else:
+                        logger.info(f"Resuming from {original_count} existing results")
+                    metadata = existing.setdefault("metadata", {})
+                    if run_id:
+                        metadata["run_id"] = run_id
+                    if claude_config_dir:
+                        metadata["claude_runtime_dir"] = str(claude_config_dir)
                     return existing
             except Exception:
                 pass
@@ -542,6 +599,8 @@ class SkillExploitabilityChecker:
                 "total_vulnerabilities": total_vulns,
                 "started_at": datetime.now().isoformat(),
                 "completed_at": None,
+                "run_id": run_id,
+                "claude_runtime_dir": str(claude_config_dir) if claude_config_dir else None,
             },
             "summary": {
                 "exploitable": 0,
@@ -633,6 +692,8 @@ def check_exploitability_single(
     software_profile_path: Optional[Path] = None,
     timeout: int = 300,
     commit_hash: str = "",
+    run_id: Optional[str] = None,
+    claude_config_dir: str | Path | None = None,
 ) -> Dict[str, Any]:
     """Convenience function to check exploitability for a single findings file.
     
@@ -643,15 +704,19 @@ def check_exploitability_single(
         software_profile_path: Optional path to software_profile.json
         timeout: Timeout in seconds for each Claude CLI call
         commit_hash: Commit hash for reproducible Docker builds
+        run_id: Optional run identifier for metadata
+        claude_config_dir: Optional runtime directory for Claude CLI
         
     Returns:
         Analysis result dictionary
     """
-    checker = SkillExploitabilityChecker(timeout=timeout)
+    checker = SkillExploitabilityChecker(timeout=timeout, claude_config_dir=claude_config_dir)
     return checker.check_single(
         findings_path=findings_path,
         repo_path=repo_path,
         output_path=output_path,
         software_profile_path=software_profile_path,
         commit_hash=commit_hash,
+        run_id=run_id,
+        claude_config_dir=claude_config_dir,
     )

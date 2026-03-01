@@ -78,6 +78,15 @@ def parse_args() -> argparse.Namespace:
         help="In auto-target mode, number of most similar profiles to scan (default: 3)",
     )
     parser.add_argument(
+        "--similarity-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional minimum overall similarity for auto-target candidates. "
+            "When set, only candidates with overall similarity >= threshold are kept."
+        ),
+    )
+    parser.add_argument(
         "--include-same-repo",
         action="store_true",
         help="In auto-target mode, include profiles from the same source repository",
@@ -110,7 +119,32 @@ def parse_args() -> argparse.Namespace:
         default="deepseek",
         help="LLM provider (deepseek, lab, openai, anthropic)",
     )
+    parser.add_argument(
+        "--llm-name",
+        type=str,
+        default=None,
+        help="Optional model name override for the chosen provider",
+    )
     parser.add_argument("--max-iterations", type=int, default=3, help="Maximum iterations")
+    parser.add_argument(
+        "--stop-when-critical-complete",
+        action="store_true",
+        help=(
+            "Enable priority-1 completion aware stopping policy. "
+            "Use --critical-stop-mode to choose min/max composition."
+        ),
+    )
+    parser.add_argument(
+        "--critical-stop-mode",
+        type=str,
+        choices=["min", "max"],
+        default="min",
+        help=(
+            "When --stop-when-critical-complete is enabled: "
+            "min => stop at min(max-iterations, X); "
+            "max => stop at max(max-iterations, X). Default: min"
+        ),
+    )
     parser.add_argument("--output", type=str, default=None, help="Output base directory")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     return parser.parse_args()
@@ -129,6 +163,10 @@ def _validate_args(args: argparse.Namespace) -> bool:
         return False
     if args.top_k <= 0:
         logger.error("--top-k must be >= 1")
+        return False
+    similarity_threshold = getattr(args, "similarity_threshold", None)
+    if similarity_threshold is not None and not (0.0 <= similarity_threshold <= 1.0):
+        logger.error("--similarity-threshold must be between 0 and 1")
         return False
     return True
 
@@ -192,10 +230,13 @@ def _resolve_auto_targets(
         model_name=args.similarity_model_name,
         device=args.similarity_device,
     )
+    similarity_threshold = getattr(args, "similarity_threshold", None)
+    resolved_top_k = args.top_k if similarity_threshold is None else len(refs)
     ranked = rank_similar_profiles(
         source_ref=source_ref,
         candidate_refs=refs,
-        top_k=args.top_k,
+        top_k=resolved_top_k,
+        min_overall_similarity=float(similarity_threshold or 0.0),
         text_retriever=text_retriever,
         exclude_same_repo=not args.include_same_repo,
     )
@@ -203,7 +244,12 @@ def _resolve_auto_targets(
         logger.error("No similar profiles found for auto-target mode")
         return []
 
-    logger.info(f"Selected top-{len(ranked)} similar targets:")
+    if similarity_threshold is None:
+        logger.info(f"Selected top-{len(ranked)} similar targets:")
+    else:
+        logger.info(
+            f"Selected {len(ranked)} similar targets with overall similarity >= {similarity_threshold:.3f}:"
+        )
     for index, candidate in enumerate(ranked, 1):
         metrics = candidate.metrics
         logger.info(
@@ -275,7 +321,7 @@ def _run_single_target_scan(
         software_profile = load_software_profile(
             target.repo_name,
             target.commit_hash,
-            base_dir=_path_config["repo_root"] / "repo-profiles",
+            base_dir=Path(getattr(args, "repo_profiles_dir", _path_config["repo_root"] / "repo-profiles")),
         )
         if not software_profile:
             logger.error(
@@ -302,6 +348,8 @@ def _run_single_target_scan(
             software_profile=software_profile,
             vulnerability_profile=vulnerability_profile,
             max_iterations=args.max_iterations,
+            stop_when_critical_complete=getattr(args, "stop_when_critical_complete", False),
+            critical_stop_mode=getattr(args, "critical_stop_mode", "min"),
             verbose=args.verbose,
             output_dir=output_dir,
             codeql_database_name=codeql_database_name,
@@ -349,7 +397,7 @@ def main() -> int:
         logger.error("No scan targets resolved")
         return 1
 
-    llm_client = create_llm_client(LLMConfig(provider=args.llm_provider))
+    llm_client = create_llm_client(LLMConfig(provider=args.llm_provider, model=args.llm_name))
     logger.info(f"Using LLM provider: {args.llm_provider}")
 
     success_count = 0

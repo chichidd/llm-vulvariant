@@ -25,6 +25,11 @@ def test_validate_args_rejects_non_positive_top_k():
     assert agent_scanner._validate_args(args) is False
 
 
+def test_validate_args_rejects_out_of_range_similarity_threshold():
+    args = Namespace(target_repo="repo", target_commit=None, top_k=1, similarity_threshold=1.2)
+    assert agent_scanner._validate_args(args) is False
+
+
 def test_resolve_manual_targets_prefers_vuln_commit_for_same_repo(monkeypatch, tmp_path):
     args = Namespace(target_repo="repo-a", target_commit=None, vuln_repo="repo-a")
     vuln = SimpleNamespace(repo_name="repo-a", affected_version="deadbeef1234")
@@ -190,3 +195,54 @@ def test_run_single_target_scan_fails_when_profile_missing(monkeypatch, tmp_path
     )
 
     assert ok is False
+
+
+def test_run_single_target_scan_passes_critical_stop_flag(monkeypatch, tmp_path):
+    repo_base = tmp_path / "repos"
+    repo_dir = repo_base / "target-repo"
+    repo_dir.mkdir(parents=True)
+
+    monkeypatch.setitem(agent_scanner._path_config, "repo_base_path", repo_base)
+    monkeypatch.setitem(agent_scanner._path_config, "repo_root", tmp_path)
+    monkeypatch.setattr(agent_scanner, "get_git_commit", lambda repo_path: "origcommit9999")
+    monkeypatch.setattr(agent_scanner, "checkout_commit", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        agent_scanner,
+        "load_software_profile",
+        lambda *args, **kwargs: _mk_profile("target-repo", "targethash"),
+    )
+    monkeypatch.setattr(agent_scanner, "detect_repo_language", lambda repo_path: "python")
+
+    captured = {}
+
+    class DummyFinder:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.conversation_history = [{"role": "assistant", "content": "done"}]
+
+        def run(self):
+            return {"vulnerabilities": []}
+
+    monkeypatch.setattr(agent_scanner, "AgenticVulnFinder", DummyFinder)
+
+    args = Namespace(
+        cve="CVE-2025-0001",
+        output=str(tmp_path / "scan-out"),
+        language=None,
+        max_iterations=2,
+        stop_when_critical_complete=True,
+        critical_stop_mode="min",
+        verbose=False,
+    )
+    target = agent_scanner.ScanTarget(repo_name="target-repo", commit_hash="targethash1234")
+
+    ok = agent_scanner._run_single_target_scan(
+        args=args,
+        vulnerability_profile=SimpleNamespace(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert ok is True
+    assert captured["stop_when_critical_complete"] is True
+    assert captured["critical_stop_mode"] == "min"
