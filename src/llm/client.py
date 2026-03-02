@@ -13,6 +13,23 @@ from utils import DSTokenizerCompute
 logger = get_logger(__name__)
 
 
+def safe_chat_call(llm_client: Any, messages: List[Dict[str, str]], **kwargs) -> Any:
+    """Call ``chat`` with optional kwargs, falling back for lightweight test doubles.
+
+    Some tests use simple dummy clients with ``chat(messages)`` signatures. This helper
+    keeps runtime behavior (passing kwargs like ``temperature``) while preserving
+    compatibility with those clients.
+    """
+    if not kwargs:
+        return llm_client.chat(messages)
+    try:
+        return llm_client.chat(messages, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument" in str(exc):
+            return llm_client.chat(messages)
+        raise
+
+
 def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """
     Load LLM configuration from a YAML file.
@@ -315,6 +332,7 @@ class OpenAIClient(BaseLLMClient):
         request_params = {
             "model": self.config.model,
             "messages": messages,
+            "temperature": kwargs.get("temperature", self.config.temperature),
             "top_p": kwargs.get("top_p", self.config.top_p),
             "timeout": kwargs.get("timeout", self.config.timeout),
             "stream": False,

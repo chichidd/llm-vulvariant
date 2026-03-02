@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from llm import BaseLLMClient
+from llm import BaseLLMClient, safe_chat_call
 from utils.logger import get_logger
 from utils.llm_utils import parse_llm_json, extract_message_content
 from profiler.profile_storage import ProfileStorageManager
-from .prompts import CODE_SNIPPET_PROMPT
+from .prompts import CODE_SNIPPET_PROMPT, SOFTWARE_FILE_SUMMARY_SYSTEM_PROMPT
 
 logger = get_logger(__name__)
 
@@ -68,12 +68,29 @@ class FileSummarizer:
                     file_content=content
                 )
 
-                response = self.llm_client.chat(
-                    messages=[{"role": "user", "content": prompt}],
+                response = safe_chat_call(
+                    self.llm_client,
+                    messages=[
+                        {"role": "system", "content": SOFTWARE_FILE_SUMMARY_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.1,
                 )
 
                 content = extract_message_content(response)
-                summary = parse_llm_json(content)
+                summary = parse_llm_json(
+                    content,
+                    required_keys=["main_purpose", "key_functions", "dependencies", "functionality"],
+                    expected_types={
+                        "main_purpose": str,
+                        "key_functions": list,
+                        "dependencies": list,
+                        "functionality": str,
+                    },
+                    llm_client=self.llm_client,
+                    max_repair_attempts=2,
+                    task_hint="file summary extraction",
+                )
 
                 if storage_manager:
                     conversation_data = {

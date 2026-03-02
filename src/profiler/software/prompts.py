@@ -2,6 +2,12 @@
 LLM Prompt Templates for Software Profiling
 """
 
+SOFTWARE_BASIC_INFO_SYSTEM_PROMPT = """You are a senior software analysis assistant.
+Follow the user's task strictly, ground conclusions in provided repository evidence, and output JSON only."""
+
+SOFTWARE_FILE_SUMMARY_SYSTEM_PROMPT = """You are a precise code analyst.
+Summarize only what is supported by the file content and output JSON only."""
+
 BASIC_INFO_PROMPT = """Please carefully analyze the following software repository and accurately identify its application domain, target scenarios, and user groups.
 
 # Repository Information

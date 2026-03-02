@@ -4,11 +4,11 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from llm import BaseLLMClient
+from llm import BaseLLMClient, safe_chat_call
 from utils.logger import get_logger
 from utils.llm_utils import parse_llm_json, extract_message_content
 from profiler.profile_storage import ProfileStorageManager
-from .prompts import BASIC_INFO_PROMPT
+from .prompts import BASIC_INFO_PROMPT, SOFTWARE_BASIC_INFO_SYSTEM_PROMPT
 
 logger = get_logger(__name__)
 
@@ -50,12 +50,28 @@ class BasicInfoAnalyzer:
         )
         
         try:
-            response = self.llm_client.chat(
-                messages=[{"role": "user", "content": prompt}],
+            response = safe_chat_call(
+                self.llm_client,
+                messages=[
+                    {"role": "system", "content": SOFTWARE_BASIC_INFO_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
             )
 
             content = extract_message_content(response)
-            llm_result = parse_llm_json(content)
+            llm_result = parse_llm_json(
+                content,
+                required_keys=["description", "target_application", "target_user"],
+                expected_types={
+                    "description": str,
+                    "target_application": list,
+                    "target_user": list,
+                },
+                llm_client=self.llm_client,
+                max_repair_attempts=2,
+                task_hint="software basic information extraction",
+            )
 
             if storage_manager:
                 conversation_data = {
@@ -89,4 +105,3 @@ class BasicInfoAnalyzer:
             result.append(f"[{name}]\n{content}")
         return "\n\n".join(result)
     
-
