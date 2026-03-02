@@ -112,6 +112,12 @@ def parse_args() -> argparse.Namespace:
             "Auto-detected from the target repository if not specified."
         ),
     )
+    parser.add_argument(
+        "--repo-base-path",
+        type=str,
+        default=str(_path_config["repo_base_path"]),
+        help="Base directory containing target repositories (default from config/paths.yaml)",
+    )
 
     parser.add_argument(
         "--llm-provider",
@@ -188,7 +194,10 @@ def _resolve_manual_targets(
         commit_hint = source_commit
 
     if not commit_hint:
-        repo_path = _path_config["repo_base_path"] / repo_name
+        repo_base_path = Path(getattr(args, "repo_base_path", _path_config["repo_base_path"])).expanduser()
+        if not repo_base_path.is_absolute():
+            repo_base_path = _path_config["repo_root"] / repo_base_path
+        repo_path = repo_base_path / repo_name
         commit_hint = get_git_commit(str(repo_path))
 
     resolved_commit = resolve_profile_commit(repo_profiles_dir, repo_name, commit_hint)
@@ -301,7 +310,10 @@ def _run_single_target_scan(
     llm_client,
     target: ScanTarget,
 ) -> bool:
-    target_repo_path = _path_config["repo_base_path"] / target.repo_name
+    repo_base_path = Path(getattr(args, "repo_base_path", _path_config["repo_base_path"])).expanduser()
+    if not repo_base_path.is_absolute():
+        repo_base_path = _path_config["repo_root"] / repo_base_path
+    target_repo_path = repo_base_path / target.repo_name
     if not target_repo_path.exists():
         logger.error(f"Repository not found: {target_repo_path}")
         return False

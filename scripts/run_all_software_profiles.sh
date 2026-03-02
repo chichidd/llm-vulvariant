@@ -61,6 +61,15 @@ done
 # --- Normalize OUTPUT_DIR to an absolute path (relative to where the script was launched) ---
 START_DIR="$(pwd -P)"
 
+# Normalize ROOT_DIR to an absolute path so forwarded flags remain valid
+# even when the command runs inside each repository directory.
+if [[ "$ROOT_DIR" != /* ]]; then
+  ROOT_DIR="$START_DIR/$ROOT_DIR"
+fi
+if command -v realpath >/dev/null 2>&1; then
+  ROOT_DIR="$(realpath -m "$ROOT_DIR")"
+fi
+
 if [[ -n "$OUTPUT_DIR" ]]; then
   # If OUTPUT_DIR is relative, make it absolute based on START_DIR.
   if [[ "$OUTPUT_DIR" != /* ]]; then
@@ -94,6 +103,9 @@ fi
 if [[ -n "$OUTPUT_DIR" ]]; then
   BASE_CMD+=(--output-dir "$OUTPUT_DIR")
 fi
+
+# Pass the root directory so software-profile knows where to find repos
+BASE_CMD+=(--repo-base-path "$ROOT_DIR")
 
 # Forward any additional flags like --verbose, --enable-dee, etc.
 BASE_CMD+=("${EXTRA_ARGS[@]}")

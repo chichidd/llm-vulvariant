@@ -283,6 +283,24 @@ class CodeQLAnalyzer:
             return False, "", "Command timed out"
         except Exception as e:
             return False, "", str(e)
+
+    @staticmethod
+    def _is_complete_database(db_path: str) -> bool:
+        """Check whether a CodeQL database directory looks complete."""
+        return os.path.isfile(os.path.join(db_path, "codeql-database.yml"))
+
+    @staticmethod
+    def _format_codeql_error(stdout: str, stderr: str) -> str:
+        """Format CodeQL command output for easier debugging."""
+        stderr_text = (stderr or "").strip()
+        stdout_text = (stdout or "").strip()
+        if stderr_text and stdout_text:
+            return f"{stderr_text}\n[stdout]\n{stdout_text}"
+        if stderr_text:
+            return stderr_text
+        if stdout_text:
+            return stdout_text
+        return "Unknown CodeQL error"
     
     def create_database(
         self,
@@ -325,28 +343,53 @@ class CodeQLAnalyzer:
         
         db_path = os.path.join(self.config['database_dir'], database_name)
         
-        # If database already exists
+        # If database path already exists
         if os.path.exists(db_path):
-            if overwrite:
-                shutil.rmtree(db_path)
-            else:
-                return True, db_path  # Use existing database
+            if not overwrite and self._is_complete_database(db_path):
+                return True, db_path
+            # Remove incomplete database or recreate when overwrite=True.
+            shutil.rmtree(db_path, ignore_errors=True)
         
-        # Build command
-        args = [
-            "database", "create",
-            db_path,
-            f"--language={normalized_lang}",
-            f"--source-root={source_path}",
-        ]
-        
-        if self.config.get('threads', 0) > 0:
-            args.append(f"--threads={self.config['threads']}")
-        
-        # Execute creation
-        success, stdout, stderr = self._run_codeql(args, timeout=1800)  # 30-minute timeout
-        
-        return (True, db_path) if success else (False, f"Failed to create database: {stderr}")
+        def _create_db(extra_args: Optional[List[str]] = None) -> Tuple[bool, str, str]:
+            args = [
+                "database", "create",
+                db_path,
+                f"--language={normalized_lang}",
+                f"--source-root={source_path}",
+            ]
+            if self.config.get('threads', 0) > 0:
+                args.append(f"--threads={self.config['threads']}")
+            if extra_args:
+                args.extend(extra_args)
+            return self._run_codeql(args, timeout=1800)  # 30-minute timeout
+
+        # Primary attempt (default build mode, usually autobuild for compiled languages)
+        success, stdout, stderr = _create_db()
+        if success:
+            return True, db_path
+
+        primary_error = self._format_codeql_error(stdout, stderr)
+
+        # C/C++ fallback: buildless extraction avoids fragile project-specific autobuilds.
+        if normalized_lang == "cpp":
+            logger.warning(
+                "CodeQL database create failed for C/C++ with default build mode; "
+                "retrying with --build-mode=none. Error: %s",
+                primary_error
+            )
+            if os.path.exists(db_path):
+                shutil.rmtree(db_path, ignore_errors=True)
+            fallback_success, fallback_stdout, fallback_stderr = _create_db(["--build-mode=none"])
+            if fallback_success:
+                return True, db_path
+            fallback_error = self._format_codeql_error(fallback_stdout, fallback_stderr)
+            return False, (
+                "Failed to create database. "
+                f"Default mode error: {primary_error}\n"
+                f"Fallback (--build-mode=none) error: {fallback_error}"
+            )
+
+        return False, f"Failed to create database: {primary_error}"
     
     def run_query(
         self,
@@ -700,5 +743,4 @@ class CodeQLAnalyzer:
         
         return paths
     
-
 

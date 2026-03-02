@@ -410,6 +410,7 @@ def _run_target_scan(
         cve=cve_id,
         output=str(batch_args.scan_output_dir),
         language=batch_args.language,
+        repo_base_path=str(batch_args.repos_root),
         max_iterations=batch_args.max_iterations_cap,
         stop_when_critical_complete=not batch_args.disable_critical_stop,
         critical_stop_mode=batch_args.critical_stop_mode,
