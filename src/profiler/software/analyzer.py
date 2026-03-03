@@ -573,6 +573,19 @@ class SoftwareProfiler:
                     patterns.add(pattern_name)
         
         return list(patterns)
+
+    @staticmethod
+    def _build_function_ref(file_path: str, func_name: str, line: Any = 0) -> str:
+        """Build a stable function reference used in data-flow pattern extraction."""
+        if not file_path or not func_name:
+            return ""
+        try:
+            line_num = int(line or 0)
+        except (TypeError, ValueError):
+            line_num = 0
+        if line_num > 0:
+            return f"{file_path}::{func_name}@{line_num}"
+        return f"{file_path}::{func_name}"
     
     def _extract_data_flow_patterns(
         self,
@@ -606,12 +619,17 @@ class SoftwareProfiler:
             file_paths = module.files
             
             # 从模块的函数中提取相关API
-            module_functions = {}  # {file::func_name: func_info}
+            module_functions = {}  # {function_ref: func_info}
             for file_path in module.files:
                 if file_path in functions_by_file:
                     for func in functions_by_file[file_path]:
                         func_name = func.get('name', '')
-                        func_key = f"{file_path}::{func_name}"
+                        func_key = (
+                            func.get('function_id')
+                            or self._build_function_ref(file_path, func_name, func.get('start_line', 0))
+                        )
+                        if not func_key:
+                            continue
                         module_functions[func_key] = func
                         
                         # 根据数据源识别源API
@@ -655,8 +673,16 @@ class SoftwareProfiler:
                 callee_file = edge.get('callee_file', '')
                 callee_func = edge.get('callee', '')  # 字段名是 'callee' 而非 'callee_function'
                 
-                caller_key = f"{caller_file}::{caller_func}"
-                callee_key = f"{callee_file}::{callee_func}"
+                caller_key = edge.get('caller_id') or self._build_function_ref(
+                    caller_file,
+                    caller_func,
+                    edge.get('caller_line', 0),
+                )
+                callee_key = edge.get('callee_id') or self._build_function_ref(
+                    callee_file,
+                    callee_func,
+                    edge.get('callee_line', 0),
+                )
                 
                 # 如果调用者或被调用者在模块内
                 if caller_key in module_functions or callee_key in module_functions:

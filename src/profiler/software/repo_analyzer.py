@@ -63,13 +63,14 @@ class CodeLocation:
 @dataclass
 class FunctionInfo:
     """Function information."""
+    id: str
     name: str
     file: str
     start_line: int
     end_line: int
     parameters: List[str] = field(default_factory=list)
-    calls: List[str] = field(default_factory=list)  # Functions called by this function
-    called_by: List[str] = field(default_factory=list)  # Functions that call this function
+    calls: List[str] = field(default_factory=list)  # Called function IDs
+    called_by: List[str] = field(default_factory=list)  # Caller function IDs
     
     def __str__(self):
         return f"{self.name} @ {self.file}:{self.start_line}"
@@ -224,6 +225,8 @@ class RepoAnalyzer:
         # Data storage
         self._call_graph_edges: List[CallGraphEdge] = []
         self._functions: Dict[str, FunctionInfo] = {}
+        self._functions_by_name: Dict[str, List[str]] = defaultdict(list)
+        self._function_key_index: Dict[Tuple[str, str, int], str] = {}
         self._dependencies: Dict[str, DependencyInfo] = {}
 
         # Load or build analysis data
@@ -245,9 +248,11 @@ class RepoAnalyzer:
                     'caller': edge.caller_name,
                     'caller_file': edge.caller_file,
                     'caller_line': edge.caller_line,
+                    'caller_id': self._resolve_function_id(edge.caller_name, edge.caller_file, edge.caller_line),
                     'callee': edge.callee_name,
                     'callee_file': edge.callee_file,
                     'callee_line': edge.callee_line,
+                    'callee_id': self._resolve_function_id(edge.callee_name, edge.callee_file, edge.callee_line),
                     'call_site_line': edge.call_site_line
                 }
                 for edge in call_graph
@@ -258,6 +263,7 @@ class RepoAnalyzer:
         if functions:
             info['functions'] = [
                 {
+                    'function_id': func.id,
                     'name': func.name,
                     'file': func.file,
                     'start_line': func.start_line,
@@ -305,7 +311,11 @@ class RepoAnalyzer:
                 
                 self._call_graph_edges = cache_data['call_graph_edges']
                 self._functions = cache_data['functions']
+                self._functions_by_name = cache_data.get('functions_by_name', defaultdict(list))
+                self._function_key_index = cache_data.get('function_key_index', {})
                 self._dependencies = cache_data['dependencies']
+
+                self._rebuild_function_indexes()
 
                 logger.info(f"Cache loaded successfully")
                 logger.info(f"  - Functions: {len(self._functions)}")
@@ -320,10 +330,16 @@ class RepoAnalyzer:
         self._build_analysis()
         
         # Save cache
+        self._save_cache(cache_path)
+
+    def _save_cache(self, cache_path: Path):
+        """Persist current analysis cache to disk."""
         try:
             cache_data = {
                 'call_graph_edges': self._call_graph_edges,
                 'functions': self._functions,
+                'functions_by_name': dict(self._functions_by_name),
+                'function_key_index': self._function_key_index,
                 'dependencies': self._dependencies,
             }
             with open(cache_path, 'wb') as f:
@@ -331,6 +347,54 @@ class RepoAnalyzer:
             logger.info(f"Cache saved to {cache_path}")
         except Exception as e:
             logger.warning(f"Failed to save cache: {e}")
+
+    @staticmethod
+    def _build_function_id(name: str, file_path: str, start_line: int) -> str:
+        return f"{file_path}::{name}@{start_line}"
+
+    def _rebuild_function_indexes(self):
+        """Rebuild name and location indexes from function table."""
+        rebuilt_by_name: Dict[str, List[str]] = defaultdict(list)
+        rebuilt_key_index: Dict[Tuple[str, str, int], str] = {}
+
+        for key, func in list(self._functions.items()):
+            func_id = getattr(func, 'id', '') or (key if isinstance(key, str) else '')
+            if not func_id:
+                func_id = self._build_function_id(func.name, func.file, int(func.start_line))
+            func.id = func_id
+
+            rebuilt_key_index[(func.name, func.file, int(func.start_line))] = func_id
+            if func.name:
+                rebuilt_by_name[func.name].append(func_id)
+
+        self._functions_by_name = rebuilt_by_name
+        self._function_key_index = rebuilt_key_index
+
+    def _register_function(self, name: str, file_path: str, start_line: int) -> Optional[str]:
+        """Create/register a function and return its function ID."""
+        if not name or not file_path:
+            return None
+
+        line = int(start_line or 0)
+        func_id = self._build_function_id(name, file_path, line)
+        if func_id not in self._functions:
+            self._functions[func_id] = FunctionInfo(
+                id=func_id,
+                name=name,
+                file=file_path,
+                start_line=line,
+                end_line=line,
+            )
+
+        self._function_key_index[(name, file_path, line)] = func_id
+        if func_id not in self._functions_by_name[name]:
+            self._functions_by_name[name].append(func_id)
+        return func_id
+
+    def _resolve_function_id(self, name: str, file_path: str, line: int) -> str:
+        if not name or not file_path:
+            return ""
+        return self._function_key_index.get((name, file_path, int(line or 0)), "")
     
     def _build_analysis(self):
         """Build the full analysis dataset."""
@@ -391,42 +455,41 @@ class RepoAnalyzer:
         Only includes functions with resolved file paths (excludes builtins,
         standard library, third-party packages, and unresolved dynamic calls).
         """
-        # Extract functions from call graph edges
-        seen_functions = set()
+        self._functions = {}
+        self._functions_by_name = defaultdict(list)
+        self._function_key_index = {}
         skipped_unresolved = 0
         
         for edge in self._call_graph_edges:
-            # Add caller (always has valid file since it's in user code)
-            if edge.caller_name not in seen_functions and edge.caller_file:
-                func = FunctionInfo(
-                    name=edge.caller_name,
-                    file=edge.caller_file,
-                    start_line=edge.caller_line,
-                    end_line=edge.caller_line  # Simplification
+            # Add caller (module-level callers may use line=0)
+            caller_id = None
+            if edge.caller_file:
+                caller_id = self._register_function(
+                    edge.caller_name,
+                    edge.caller_file,
+                    edge.caller_line,
                 )
-                self._functions[edge.caller_name] = func
-                seen_functions.add(edge.caller_name)
             
             # Add callee only if it has a valid file path
             # Skip builtins, stdlib, third-party, and unresolved dynamic calls
-            if edge.callee_name not in seen_functions:
-                if edge.callee_file and edge.callee_line > 0:
-                    func = FunctionInfo(
-                        name=edge.callee_name,
-                        file=edge.callee_file,
-                        start_line=edge.callee_line,
-                        end_line=edge.callee_line
-                    )
-                    self._functions[edge.callee_name] = func
-                    seen_functions.add(edge.callee_name)
-                else:
-                    skipped_unresolved += 1
+            callee_id = None
+            if edge.callee_file and edge.callee_line > 0:
+                callee_id = self._register_function(
+                    edge.callee_name,
+                    edge.callee_file,
+                    edge.callee_line,
+                )
+            else:
+                skipped_unresolved += 1
             
             # Build call relationships (only for resolved functions)
-            if edge.caller_name in self._functions:
-                self._functions[edge.caller_name].calls.append(edge.callee_name)
-            if edge.callee_name in self._functions:
-                self._functions[edge.callee_name].called_by.append(edge.caller_name)
+            if caller_id and callee_id and caller_id in self._functions and callee_id in self._functions:
+                caller = self._functions[caller_id]
+                callee = self._functions[callee_id]
+                if callee_id not in caller.calls:
+                    caller.calls.append(callee_id)
+                if caller_id not in callee.called_by:
+                    callee.called_by.append(caller_id)
         
         if skipped_unresolved > 0:
             logger.debug(f"Skipped {skipped_unresolved} unresolved callee references (builtins/stdlib/third-party)")
@@ -434,6 +497,9 @@ class RepoAnalyzer:
     def _analyze_dependencies(self):
         """Analyze third-party library dependencies."""
         from utils.language import get_extensions, ALL_SOURCE_EXTENSIONS
+
+        # Dependency analysis is a full rebuild; clear any previous state first.
+        self._dependencies = {}
 
         # Build set of extensions to scan for this language
         lang_exts = get_extensions(self.language)
@@ -543,21 +609,41 @@ class RepoAnalyzer:
 
     # ========== Public methods ==========
     
-    def get_function_callers(self, func_name: str) -> List[FunctionInfo]:
-        """Get all functions that call the specified function."""
-        if func_name not in self._functions:
+    def _resolve_function_refs(self, func_ref: str) -> List[str]:
+        """Resolve a function reference string to function IDs."""
+        if func_ref in self._functions:
+            return [func_ref]
+        return list(self._functions_by_name.get(func_ref, []))
+
+    def get_function_callers(self, func_ref: str) -> List[FunctionInfo]:
+        """Get all caller functions for a function ID or name."""
+        target_ids = self._resolve_function_refs(func_ref)
+        if not target_ids:
             return []
-        
-        caller_names = self._functions[func_name].called_by
-        return [self._functions[name] for name in caller_names if name in self._functions]
+
+        caller_ids = []
+        seen = set()
+        for target_id in target_ids:
+            for caller_id in self._functions[target_id].called_by:
+                if caller_id in self._functions and caller_id not in seen:
+                    seen.add(caller_id)
+                    caller_ids.append(caller_id)
+        return [self._functions[func_id] for func_id in caller_ids]
     
-    def get_function_callees(self, func_name: str) -> List[FunctionInfo]:
-        """Get all functions called by the specified function."""
-        if func_name not in self._functions:
+    def get_function_callees(self, func_ref: str) -> List[FunctionInfo]:
+        """Get all callee functions for a function ID or name."""
+        target_ids = self._resolve_function_refs(func_ref)
+        if not target_ids:
             return []
-        
-        callee_names = self._functions[func_name].calls
-        return [self._functions[name] for name in callee_names if name in self._functions]
+
+        callee_ids = []
+        seen = set()
+        for target_id in target_ids:
+            for callee_id in self._functions[target_id].calls:
+                if callee_id in self._functions and callee_id not in seen:
+                    seen.add(callee_id)
+                    callee_ids.append(callee_id)
+        return [self._functions[func_id] for func_id in callee_ids]
     
     def get_code_context(
         self,
@@ -637,7 +723,7 @@ class RepoAnalyzer:
         
         for func in affected_functions:
             # Get callers
-            callers = self.get_function_callers(func.name)
+            callers = self.get_function_callers(func.id or func.name)
             
             for depth in range(1, max_depth + 1):
                 if len(files_involved) >= max_files:
@@ -665,7 +751,7 @@ class RepoAnalyzer:
                 # Continue tracing upwards
                 next_callers = []
                 for caller in callers:
-                    next_callers.extend(self.get_function_callers(caller.name))
+                    next_callers.extend(self.get_function_callers(caller.id or caller.name))
                 callers = next_callers
                 
                 if not callers:
@@ -719,7 +805,7 @@ class RepoAnalyzer:
         
         for func in affected_functions:
             # Get callees
-            callees = self.get_function_callees(func.name)
+            callees = self.get_function_callees(func.id or func.name)
             
             for depth in range(1, max_depth + 1):
                 if len(files_involved) >= max_files:
@@ -747,7 +833,7 @@ class RepoAnalyzer:
                 # Continue tracing downwards
                 next_callees = []
                 for callee in callees:
-                    next_callees.extend(self.get_function_callees(callee.name))
+                    next_callees.extend(self.get_function_callees(callee.id or callee.name))
                 callees = next_callees
                 
                 if not callees:

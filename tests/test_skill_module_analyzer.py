@@ -89,3 +89,57 @@ def test_legacy_normalize_modules_emits_paths_for_consistency():
 
     assert normalized[0]["paths"] == ["src/a.py"]
     assert normalized[0]["files"] == ["src/a.py"]
+
+
+def test_skill_attach_dependencies_ignores_module_level_entries():
+    analyzer = SkillModuleAnalyzer()
+    modules = [
+        {
+            "name": "module.a",
+            "category": "module",
+            "description": "",
+            "files": ["src/a.py"],
+            "key_functions": [],
+            "dependencies": [],
+        }
+    ]
+    repo_info = {
+        "repo_analysis": {
+            "functions": [
+                {"file": "src/a.py", "name": "<module>"},
+                {"file": "src/a.py", "name": "run"},
+            ],
+            "call_graph_edges": [],
+        }
+    }
+
+    enriched = analyzer._attach_key_functions_and_dependencies(modules, repo_info, Path("/tmp/repo"))
+
+    assert enriched[0]["key_functions"] == ["run"]
+
+
+def test_legacy_attach_dependencies_ignores_module_level_entries():
+    analyzer = LegacySkillModuleAnalyzer()
+    modules = [
+        {
+            "name": "module.a",
+            "category": "module",
+            "description": "",
+            "paths": ["src/a.py"],
+            "key_functions": [],
+            "dependencies": [],
+        }
+    ]
+    repo_info = {
+        "repo_analysis": {
+            "functions": [
+                {"file": "src/a.py", "name": "<module>"},
+                {"file": "src/a.py", "name": "run"},
+            ],
+            "call_graph_edges": [],
+        }
+    }
+
+    enriched = analyzer._attach_key_functions_and_dependencies(modules, repo_info, Path("/tmp/repo"))
+
+    assert enriched[0]["key_functions"] == ["run"]

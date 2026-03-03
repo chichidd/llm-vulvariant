@@ -384,7 +384,7 @@ class SkillModuleAnalyzer:
             if not module_name:
                 continue
             name = func.get("name", "")
-            if not name:
+            if not name or name == "<module>":
                 continue
             module_functions.setdefault(module_name, []).append(name)
 

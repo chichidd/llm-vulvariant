@@ -4,6 +4,7 @@ import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -68,24 +69,63 @@ class AgenticToolkit:
             logger.warning(f"Failed to initialize CodeQL analyzer: {e}")
             self._codeql_analyzer = None
         
-        # Setup query directory for custom queries (per-language subdirectory)
-        self._codeql_query_base = Path(_path_config['repo_root']) / '.codeql-queries'
-        self._codeql_query_dir = self._codeql_query_base / self._language
+        # Template query directory (contains pre-installed qlpack.yml / lock files)
+        self._codeql_query_template_dir = Path(_path_config['repo_root']) / '.codeql-queries' / self._language
+        # Actual query directory will be created lazily under the output folder
+        self._codeql_query_dir: Optional[Path] = None
+        self._codeql_query_dir_ready = False
     
-    def _ensure_query_pack(self) -> bool:
-        """Ensure the CodeQL query pack is prepared with dependencies installed."""
-        if not self._codeql_query_dir:
+    def _setup_query_dir(self) -> bool:
+        """Lazily set up the CodeQL query directory under the output folder.
+        
+        Creates <output_dir>/codeql-queries/<language>/ and copies yml files
+        (qlpack.yml, codeql-pack.lock.yml) from the template directory so that
+        generated .ql files live alongside the results.
+        """
+        if not self._memory_manager:
+            logger.warning("Memory manager not available. Cannot set up query directory.")
             return False
         
-        self._codeql_query_dir.mkdir(parents=True, exist_ok=True)
+        output_dir: Path = self._memory_manager.output_dir
+        query_dir = output_dir / "codeql-queries" / self._language
+        if self._codeql_query_dir_ready and self._codeql_query_dir == query_dir:
+            return True
+
+        if self._codeql_query_dir_ready and self._codeql_query_dir != query_dir:
+            logger.info(
+                "CodeQL query directory changed from %s to %s; rebuilding query workspace.",
+                self._codeql_query_dir,
+                query_dir,
+            )
+
+        query_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Copy yml files from template directory if available
+        if self._codeql_query_template_dir and self._codeql_query_template_dir.exists():
+            for yml_file in self._codeql_query_template_dir.glob("*.yml"):
+                dest = query_dir / yml_file.name
+                if not dest.exists():
+                    shutil.copy2(yml_file, dest)
+                    logger.info(f"Copied {yml_file.name} to {query_dir}")
+        
+        self._codeql_query_dir = query_dir
+        self._codeql_query_dir_ready = True
+        logger.info(f"CodeQL query directory set up at: {query_dir}")
+        return True
+
+    def _ensure_query_pack(self) -> bool:
+        """Ensure the CodeQL query pack is prepared with dependencies installed."""
+        if not self._setup_query_dir():
+            return False
+        
         qlpack_file = self._codeql_query_dir / "qlpack.yml"
         qlpack_lock_file = self._codeql_query_dir / "codeql-pack.lock.yml"
         
-        # Check if already prepared
+        # Check if already prepared (lock file copied from template or previously installed)
         if qlpack_lock_file.exists():
             return True
         
-        # Create qlpack.yml if not exists
+        # Create qlpack.yml if not exists (no template available)
         if not qlpack_file.exists():
             codeql_pack = get_codeql_pack(self._language)
             if not codeql_pack:
@@ -193,6 +233,10 @@ dependencies:
     def set_memory_manager(self, memory_manager):
         """Set or update the memory manager reference."""
         self._memory_manager = memory_manager
+        # Query workspace lives under memory_manager.output_dir.
+        # Reset cached state so future queries use the current output directory.
+        self._codeql_query_dir = None
+        self._codeql_query_dir_ready = False
     
     def set_software_profile(self, software_profile):
         """Set or update the software profile reference."""
