@@ -45,6 +45,74 @@ def test_parse_claude_result_fallback_to_inferred_verdict_and_confidence():
     assert parsed["confidence"] == "medium"
 
 
+def test_build_prompt_includes_output_json_path(tmp_path):
+    checker = _checker()
+    result_json_path = tmp_path / "analysis_output.json"
+
+    prompt = checker._build_prompt(
+        vuln={"file_path": "x.py", "vulnerability_type": "x", "evidence": "line", "description": "desc"},
+        repo_path=tmp_path,
+        software_profile_path=None,
+        result_json_path=result_json_path,
+    )
+
+    assert f"RESULT_JSON_PATH: {result_json_path.resolve()}" in prompt
+    assert "write the same final JSON object to that path" in prompt
+    assert "return JSON only on stdout" in prompt
+
+
+def test_analyze_single_vuln_falls_back_to_output_file(monkeypatch, tmp_path):
+    checker = _checker()
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+
+    def fake_run_claude(prompt):
+        (evidence_dir / "analysis_output.json").write_text(
+            json.dumps({"verdict": "NOT_EXPLOITABLE", "confidence": "high"}),
+            encoding="utf-8",
+        )
+        return False, None
+
+    monkeypatch.setattr(checker, "_run_claude", fake_run_claude)
+
+    result = checker._analyze_single_vuln(
+        vuln={"file_path": "x.py", "vulnerability_type": "x"},
+        finding_id="vuln_000",
+        repo_path=tmp_path,
+        software_profile_path=None,
+        evidence_dir=evidence_dir,
+    )
+
+    assert result["verdict"] == "NOT_EXPLOITABLE"
+    assert result["confidence"] == "high"
+    assert result["finding_id"] == "vuln_000"
+
+
+def test_analyze_single_vuln_ignores_stale_output_file(monkeypatch, tmp_path):
+    checker = _checker()
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+
+    # Pre-existing file from an earlier run should be ignored.
+    (evidence_dir / "analysis_output.json").write_text(
+        json.dumps({"verdict": "EXPLOITABLE", "confidence": "high"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(checker, "_run_claude", lambda prompt: (False, None))
+
+    result = checker._analyze_single_vuln(
+        vuln={"file_path": "x.py", "vulnerability_type": "x"},
+        finding_id="vuln_000",
+        repo_path=tmp_path,
+        software_profile_path=None,
+        evidence_dir=evidence_dir,
+    )
+
+    assert result["verdict"] == "ERROR"
+    assert result.get("error") == "Claude analysis failed"
+
+
 def test_build_docker_verification_from_evidence_confirmed(tmp_path):
     checker = _checker()
     evidence = tmp_path / "evidence"

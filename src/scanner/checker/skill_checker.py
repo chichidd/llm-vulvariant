@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -196,10 +197,18 @@ class SkillExploitabilityChecker:
         Returns:
             Analysis result dictionary
         """
+        result_json_path: Optional[Path] = None
+        fallback_min_mtime: Optional[float] = None
+        if evidence_dir:
+            result_json_path = evidence_dir / "analysis_output.json"
+            self._prepare_result_json_path(result_json_path)
+            fallback_min_mtime = time.time()
+
         prompt = self._build_prompt(
             vuln, repo_path, software_profile_path,
             commit_hash=commit_hash,
             evidence_dir=evidence_dir,
+            result_json_path=result_json_path,
         )
         
         # Run Claude and get JSON result
@@ -209,6 +218,17 @@ class SkillExploitabilityChecker:
         if success and claude_result:
             # Parse the result text from Claude's JSON output
             analysis = self._parse_claude_result(claude_result)
+
+        # File fallback: if stdout is missing/invalid (or only UNKNOWN/ERROR),
+        # try loading structured JSON from RESULT_JSON_PATH.
+        needs_fallback = not analysis or str(analysis.get("verdict", "")).upper() in {"UNKNOWN", "ERROR"}
+        if needs_fallback and result_json_path:
+            file_analysis = self._load_analysis_from_output_path(
+                result_json_path,
+                min_mtime=fallback_min_mtime,
+            )
+            if file_analysis:
+                analysis = file_analysis
 
         if not analysis:
             analysis = self._create_error_vuln_result(vuln, finding_id, "Claude analysis failed")
@@ -234,6 +254,7 @@ class SkillExploitabilityChecker:
         software_profile_path: Optional[Path],
         commit_hash: str = "",
         evidence_dir: Optional[Path] = None,
+        result_json_path: Optional[Path] = None,
     ) -> str:
         """Build Claude prompt for single vulnerability analysis."""
         import os
@@ -260,13 +281,23 @@ class SkillExploitabilityChecker:
             "",
             f"Repository: {repo_path.resolve()}",
             "",
-            "Verify the code path exists. Output JSON only:",
+            "Verify the code path exists. Return JSON on stdout:",
             '{"verdict":"EXPLOITABLE|CONDITIONALLY_EXPLOITABLE|LIBRARY_RISK|NOT_EXPLOITABLE",',
             '"confidence":"high|medium|low",',
             '"sink_analysis":{"confirmed":true/false,"sink_type":"...","protection_status":"none|partial|full"},',
             '"source_analysis":{"sources_found":[{"type":"cli|file|api","location":"..."}],"attack_path":["..."]},',
             '"attack_scenario":{"description":"...","steps":["..."],"impact":"..."},',
             '"remediation":{"recommendation":"..."}}',
+        ]
+
+        if result_json_path:
+            lines.extend([
+                f"RESULT_JSON_PATH: {result_json_path.resolve()}",
+                "If RESULT_JSON_PATH is provided, write the same final JSON object to that path,",
+                "and still return JSON only on stdout.",
+            ])
+
+        lines.extend([
             "",
             "--- DOCKER VERIFICATION ---",
             "DOCKER_VERIFY: true",
@@ -278,9 +309,79 @@ class SkillExploitabilityChecker:
             "After the static analysis (phases 1-4), if verdict is EXPLOITABLE, also run",
             "Phase 5 (Docker PoC Verification) from the skill and include the",
             "'docker_verification' object in the output JSON.",
-        ]
+        ])
         
         return "\n".join(lines)
+
+    def _prepare_result_json_path(self, result_json_path: Path) -> None:
+        """Prepare result file path and clear stale output from previous attempts."""
+        try:
+            result_json_path.parent.mkdir(parents=True, exist_ok=True)
+            if result_json_path.exists():
+                result_json_path.unlink()
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"Failed to prepare result file {result_json_path}: {exc}")
+
+    def _load_analysis_from_output_path(
+        self,
+        output_json_path: Path,
+        min_mtime: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Load analysis JSON from a result file path provided in the prompt."""
+        if not output_json_path.exists():
+            return None
+
+        if min_mtime is not None:
+            try:
+                file_mtime = output_json_path.stat().st_mtime
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning(f"Failed to stat analysis output file {output_json_path}: {exc}")
+                return None
+            # Some filesystems have coarse mtime precision; allow a small skew
+            # to avoid rejecting fresh writes from the current invocation.
+            mtime_tolerance_seconds = 1.0
+            if (file_mtime + mtime_tolerance_seconds) < min_mtime:
+                logger.warning(
+                    f"Ignoring stale analysis output file {output_json_path} "
+                    f"(mtime={file_mtime:.6f} < min_mtime={min_mtime:.6f})"
+                )
+                return None
+
+        try:
+            text = output_json_path.read_text(encoding="utf-8")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"Failed to read analysis output file {output_json_path}: {exc}")
+            return None
+
+        text = text.strip()
+        if not text:
+            return None
+
+        payload: Optional[Dict[str, Any]] = None
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                payload = parsed
+        except json.JSONDecodeError:
+            json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+            candidate = json_match.group(1).strip() if json_match else text
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except json.JSONDecodeError:
+                object_match = re.search(r"\{.*\}", candidate, re.DOTALL)
+                if object_match:
+                    try:
+                        parsed = json.loads(object_match.group(0))
+                        if isinstance(parsed, dict):
+                            payload = parsed
+                    except json.JSONDecodeError:
+                        payload = None
+
+        if payload:
+            logger.info(f"Loaded analysis JSON from file fallback: {output_json_path}")
+        return payload
 
     def _run_claude(self, prompt: str) -> Tuple[bool, Optional[Dict]]:
         """Run Claude CLI and return the result.

@@ -369,7 +369,7 @@ class SkillModuleAnalyzer:
         basename_to_files = {}
         for module in modules:
             module_name = module.get("name", "")
-            for file_path in module.get("paths", []):
+            for file_path in module.get("files"):
                 file_to_module[file_path] = module_name
                 basename = Path(file_path).name
                 basename_to_files.setdefault(basename, []).append(file_path)

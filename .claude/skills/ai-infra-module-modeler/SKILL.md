@@ -1,6 +1,6 @@
 ---
 name: ai-infra-module-modeler
-description: Classify an AI/LLM infrastructure repository into a hierarchical module taxonomy and generate a module map + skeleton using LLM semantic analysis of repo structure and key files.
+description: Classify an AI/LLM infrastructure repository into a hierarchical module taxonomy and generate `module_map.json`, `file_index.json`, and `module_profile.json` using LLM semantic analysis. Use when software profiling needs stable module boundaries for AI infra repositories.
 ---
 
 # AI Infra Module Modeler
@@ -20,7 +20,7 @@ Typical inputs:
 
 ## Taxonomy
 - Read: [references/taxonomy.md](references/taxonomy.md) for the definition and notation
-- Per-module checklists and inclusion criteria: [references/checklists/](references/checklists/)
+- Use per-module validation checklists under [references/checklists/](references/checklists/)
 
 ## Procedure (recommended)
 0. **Check Python environment**, make sure in the conda environment `dsocr`.
@@ -38,9 +38,9 @@ Typical inputs:
 - doc or manual-related, like `doc`
 - any other folder that you decide not related to the main code of the repository
 
-2. Obtain LLM-driven module candiates
+2. Obtain LLM-driven module candidates
 
-2.1 If you find existing output by the scanner `scan_repos.py`, you can directly jump to step 3.
+2.1 If `module_map.json` / `file_index.json` / `module_profile.json` already exist in your target output directory, you can directly jump to step 3.
 
 2.2 If not, **run the scanner** to produce LLM-driven module candidates:
    ```bash
@@ -55,13 +55,13 @@ Typical inputs:
      --llm-model "DeepSeek-V3.2"
    ```
    - Use `--require-llm` to fail fast if the LLM is unavailable or returns invalid JSON.
-   - Adjust grouping with `--group-depth`, `--group-sample-files`, `--group-snippets`, `--snippet-bytes`, `--batch-size`. Make sure you can cover as many groups as possible. I want the module classification to be as assurate as possible. `--group-depth` should be determined by your overview of the repository to balance the execution time and accuracy. 
+   - Adjust grouping with `--group-depth`, `--group-sample-files`, `--group-snippets`, `--snippet-bytes`, `--batch-size`. Choose `--group-depth` based on repository structure to balance runtime and classification accuracy.
    - Wait until the script ends.
 
-3. **Inspect the summary** in `analysis/<repo-name>/MODULES.md`.
-4. **IMPORTANT: Validate modules** using the checklist files under `references/checklists/`. Review every output of the module assignment. 
-- If you found any insistency betweeen assigned module and the file, read relevant files and correct them. 
-- You need to do this check for several arround to make sure they are correct.
+3. **Inspect the summary** in `<out>/MODULES.md`.
+4. **Validate module assignment quality** by reviewing `module_map.json`, `file_index.json`, and `module_profile.json` against real code files and checklist criteria in `references/checklists/`.
+- If you find inconsistency between assignment and code behavior, read the relevant files and correct the output.
+- Run at least one verification pass after corrections to ensure consistency.
 
 ## Notes / guardrails
 - Rely on LLM semantic classification, not keyword rules.
