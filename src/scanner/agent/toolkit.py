@@ -131,7 +131,8 @@ class AgenticToolkit:
             if not codeql_pack:
                 logger.warning(f"No CodeQL pack available for language: {self._language}")
                 return False
-            qlpack_content = f"""name: llm-vulvariant-queries
+            pack_name = f"llm-vulvariant-queries-{self._language}"
+            qlpack_content = f"""name: {pack_name}
 version: 1.0.0
 description: CodeQL queries for LLM vulnerability variant analysis
 dependencies:
