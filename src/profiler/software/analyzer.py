@@ -115,11 +115,12 @@ class SoftwareProfiler:
         ])
         
         # 文件摘要配置
-        self.enable_llm_file_summary = analyzer_config.get('enable_llm_file_summary', True)
+
         self.file_summary_llm_config = analyzer_config.get('file_summary_llm', {})
         self.file_summary_llm_client = None
-        
-        if self.enable_llm_file_summary and self.file_summary_llm_config.get('enabled', False):
+        self.enable_llm_file_summary = self.file_summary_llm_config.get('enabled', False)
+
+        if self.enable_llm_file_summary:
             try:
                 llm_config = LLMConfig(
                     provider=self.file_summary_llm_config.get('provider', 'deepseek'),

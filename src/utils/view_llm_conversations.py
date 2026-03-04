@@ -138,7 +138,6 @@ def list_conversations(conversations_dir: Path):
         timestamp, step_name = parse_conversation_filename(conv_file.name)
         if step_name:
             by_step[step_name].append((timestamp, conv_file))
-    
     # Show stats.
     for step_name, files in sorted(by_step.items()):
         logger.info(f"{step_name}: {len(files)} conversations")

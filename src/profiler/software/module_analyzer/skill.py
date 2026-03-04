@@ -256,12 +256,11 @@ class SkillModuleAnalyzer:
         for module in modules:
             name = module.get("name", "")
             category, _ = self._split_module_name(name)
-            files = module.get("paths") or module.get("files") or files_by_module.get(name, [])
+            files = module.get("files") or files_by_module.get(name, [])
             normalized.append({
                 "name": name,
                 "category": module.get("category") or category,
                 "description": module.get("description", ""),
-                "paths": sorted(set(files)),
                 "key_functions": module.get("key_functions", []),
                 "dependencies": module.get("dependencies", []),
                 "files": sorted(set(files)),

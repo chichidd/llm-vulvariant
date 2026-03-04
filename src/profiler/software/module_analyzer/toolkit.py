@@ -83,10 +83,10 @@ class ModuleAnalyzerToolkit:
                                         "name": {"type": "string", "description": "Module name."},
                                         "category": {"type": "string", "description": "Module category (e.g., web_interface, data_loading, core_algorithm, etc.)."},
                                         "description": {"type": "string", "description": "Module functionality description."},
-                                        "paths": {
+                                        "files": {
                                             "type": "array",
                                             "items": {"type": "string"},
-                                            "description": "List of file or folder paths related to the module. Make sure they are complete.",
+                                            "description": "List of file paths related to the module. Make sure they are complete.",
                                         },
                                         "key_functions": {
                                             "type": "array",
@@ -99,7 +99,7 @@ class ModuleAnalyzerToolkit:
                                             "description": "List of other modules that this module depends on.",
                                         },
                                     },
-                                    "required": ["name", "category", "description", "paths"],
+                                    "required": ["name", "category", "description", "files"],
                                 },
                                 "description": "List of identified modules.",
                             },

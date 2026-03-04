@@ -178,9 +178,6 @@ analyzer_config:
     - .eggs
     - "*.egg-info"
   
-  # 是否启用LLM对每个文件进行摘要分析
-  enable_llm_file_summary: false
-  
   # 文件摘要分析使用的LLM配置（可选）
   # 如果不配置，则使用主 LLM 客户端
   # 可以配置为更便宜/更快的模型来降低成本
