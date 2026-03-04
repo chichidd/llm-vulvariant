@@ -6,6 +6,7 @@ Software Profile Generator (Refactored)
 
 import yaml
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List
@@ -33,6 +34,13 @@ class SoftwareProfiler:
     
     _detection_rules = None
     _rules_lock = threading.Lock()
+    _C_API_ALIASES = {
+        "open": {"fopen"},
+        "read": {"fread"},
+        "write": {"fwrite"},
+        "close": {"fclose"},
+        "socket": {"recv", "send", "accept", "connect"},
+    }
     
     @classmethod
     def _load_detection_rules(cls, rules_path: Path = None, output_dir: Path = None) -> Dict[str, Any]:
@@ -436,24 +444,35 @@ class SoftwareProfiler:
         call_graph_edges = repo_analysis.get('call_graph_edges', [])
         dependencies = repo_analysis.get('dependencies', [])
         all_files = list(functions_by_file.keys())
+        all_files_set = set(all_files)
         
         # 构建模块名到文件的映射
         module_name_to_files = {}
         for module in base_modules:
             module_paths = module.get('files', [])
             module_files = []
-            for path in module_paths:
-                path = path.replace('\\', '/').rstrip('/')
-                if '.' in path.split('/')[-1]:
-                    # it's a file
-                    if path in all_files:
+            module_file_set = set()
+            for raw_path in module_paths:
+                if not isinstance(raw_path, str):
+                    continue
+
+                path = raw_path.replace('\\', '/').strip().rstrip('/')
+                if not path:
+                    # LLM output may contain empty path entries; ignore them.
+                    continue
+
+                # Prefer exact file matching so extensionless files (e.g. Makefile) are handled correctly.
+                if path in all_files_set:
+                    if path not in module_file_set:
                         module_files.append(path)
-                else:
-                    # it's a folder
-                    folder_prefix = path + '/' if path else ''
-                    for file_path in all_files:
-                        if file_path.startswith(folder_prefix):
-                            module_files.append(file_path)
+                        module_file_set.add(path)
+                    continue
+
+                folder_prefix = path + '/'
+                for file_path in all_files:
+                    if file_path.startswith(folder_prefix) and file_path not in module_file_set:
+                        module_files.append(file_path)
+                        module_file_set.add(file_path)
             module_name_to_files[module.get('name', '')] = module_files
         
         # 构建文件到模块的映射
@@ -505,19 +524,29 @@ class SoftwareProfiler:
                     if caller_file in module_files or callee_file in module_files:
                         module_call_graph.append(edge)
             
+            # 函数名 + 该模块函数调用的 API 名称（例如 C/C++ stdlib）共同参与模式检测
+            pattern_candidates = list(module_functions)
+            outgoing_callee_names = set()
+            for edge in module_call_graph:
+                if edge.get('caller_file', '') not in module_files:
+                    continue
+                callee_name = edge.get('callee', '')
+                if callee_name and callee_name != '<module>':
+                    outgoing_callee_names.add(callee_name)
+
+            for callee_name in sorted(outgoing_callee_names):
+                pattern_candidates.append({'name': callee_name})
+
             # 检测数据流模式
-            data_sources = self._detect_patterns(module_functions, 'data_sources')
-            data_formats = self._detect_patterns(module_functions, 'data_formats')
-            processing_operations = self._detect_patterns(module_functions, 'processing_operations')
+            data_sources = self._detect_patterns(pattern_candidates, 'data_sources')
+            data_formats = self._detect_patterns(pattern_candidates, 'data_formats')
+            processing_operations = self._detect_patterns(pattern_candidates, 'processing_operations')
             
             # 提取外部依赖
             external_dependencies = set()
             for file in module_files:
                 if file in dependencies_by_file:
                     external_dependencies.update(dependencies_by_file[file])
-            
-            # 提取内部依赖（从base_modules的dependencies字段）
-            internal_dependencies = module.get('dependencies', [])
             
             # 计算模块间的调用关系
             called_by_modules = set()
@@ -538,6 +567,20 @@ class SoftwareProfiler:
                     callee_module = file_to_module[callee_file]
                     if callee_module != module_name:
                         calls_modules.add(callee_module)
+
+            # 统一 internal_dependencies 与 calls_modules 的来源，避免路径映射不一致。
+            base_internal_dependencies = module.get('dependencies', [])
+            if not isinstance(base_internal_dependencies, list):
+                base_internal_dependencies = []
+            internal_dependencies = set(calls_modules)
+            for dep_name in base_internal_dependencies:
+                if not isinstance(dep_name, str):
+                    continue
+                normalized_dep_name = dep_name.strip()
+                if not normalized_dep_name or normalized_dep_name == module_name:
+                    continue
+                if normalized_dep_name in module_name_to_files:
+                    internal_dependencies.add(normalized_dep_name)
             
             enhanced_module = ModuleInfo(
                 name=module_name,
@@ -548,7 +591,7 @@ class SoftwareProfiler:
                 data_formats=data_formats,
                 processing_operations=processing_operations,
                 external_dependencies=sorted(list(external_dependencies)),
-                internal_dependencies=internal_dependencies,
+                internal_dependencies=sorted(list(internal_dependencies)),
                 called_by_modules=sorted(list(called_by_modules)),
                 calls_modules=sorted(list(calls_modules))
             )
@@ -564,16 +607,102 @@ class SoftwareProfiler:
         # 基于规则的检测
         for func in functions:
             func_name = func.get('name', '')
+            if not func_name:
+                continue
             for pattern_name, pattern_config in rules.items():
-                # 支持两种配置格式：直接是列表，或者是 {keywords: [...]}
-                if isinstance(pattern_config, list):
-                    keywords = pattern_config
-                else:
-                    keywords = pattern_config.get('keywords', [])
-                if any(keyword.lower() in func_name.lower() for keyword in keywords):
+                keywords = self._extract_rule_keywords(pattern_config)
+                if any(self._matches_keyword(func_name, keyword) for keyword in keywords):
                     patterns.add(pattern_name)
         
-        return list(patterns)
+        return sorted(patterns)
+
+    @staticmethod
+    def _extract_rule_keywords(pattern_config: Any) -> List[str]:
+        """统一提取规则关键词（兼容 list 和 {keywords: [...]} 两种格式）。"""
+        if isinstance(pattern_config, list):
+            return [kw for kw in pattern_config if isinstance(kw, str)]
+        if isinstance(pattern_config, dict):
+            return [kw for kw in pattern_config.get('keywords', []) if isinstance(kw, str)]
+        return []
+
+    @staticmethod
+    def _normalize_keyword(keyword: str) -> str:
+        """标准化规则关键词，兼容 open( / Path( / .json / requests. 这类写法。"""
+        normalized = keyword.strip().lower()
+        while normalized.endswith("("):
+            normalized = normalized[:-1].strip()
+        while normalized.endswith(")"):
+            normalized = normalized[:-1].strip()
+        normalized = normalized.strip(".")
+        return normalized
+
+    @staticmethod
+    def _split_identifier_tokens(text: str) -> List[str]:
+        """按分隔符与驼峰切分标识符。"""
+        if not text:
+            return []
+
+        chunks = re.split(r"[^0-9A-Za-z]+", text)
+        tokens = []
+        for chunk in chunks:
+            if not chunk:
+                continue
+            matches = re.findall(r"[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+", chunk)
+            if matches:
+                tokens.extend(match.lower() for match in matches if match)
+            else:
+                tokens.append(chunk.lower())
+        return tokens
+
+    @staticmethod
+    def _contains_token_sequence(tokens: List[str], keyword_tokens: List[str]) -> bool:
+        """检查 keyword_tokens 是否以连续子序列出现在 tokens 中。"""
+        if not tokens or not keyword_tokens or len(keyword_tokens) > len(tokens):
+            return False
+
+        window = len(keyword_tokens)
+        for idx in range(len(tokens) - window + 1):
+            if tokens[idx:idx + window] == keyword_tokens:
+                return True
+        return False
+
+    def _matches_keyword(self, candidate_name: str, keyword: str) -> bool:
+        """规则关键词与函数/API 名的匹配，优先词级匹配，避免子串误报。"""
+        if not candidate_name or not keyword:
+            return False
+
+        normalized_keyword = self._normalize_keyword(keyword)
+        if not normalized_keyword:
+            return False
+
+        candidate = candidate_name.strip()
+        if not candidate:
+            return False
+
+        candidate_lower = candidate.lower()
+        if candidate_lower == normalized_keyword:
+            return True
+
+        candidate_tokens = self._split_identifier_tokens(candidate)
+        keyword_tokens = self._split_identifier_tokens(normalized_keyword)
+        if keyword_tokens and self._contains_token_sequence(candidate_tokens, keyword_tokens):
+            return True
+
+        if len(keyword_tokens) == 1:
+            alias_candidates = self._C_API_ALIASES.get(keyword_tokens[0], set())
+            if alias_candidates and any(alias in candidate_tokens for alias in alias_candidates):
+                return True
+
+        # 复杂符号关键词（如 "json.load"）回退到字面包含匹配
+        if any(sep in normalized_keyword for sep in (".", "::", "/", "\\")):
+            return normalized_keyword in candidate_lower
+
+        # 单词关键词使用边界匹配，避免 map->bitmap、read->thread 误报
+        if len(keyword_tokens) == 1:
+            escaped = re.escape(keyword_tokens[0])
+            return bool(re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", candidate_lower))
+
+        return False
 
     @staticmethod
     def _build_function_ref(file_path: str, func_name: str, line: Any = 0) -> str:
@@ -618,6 +747,25 @@ class SoftwareProfiler:
             sink_apis = []
             intermediate_ops = []
             file_paths = module.files
+
+            called_apis_by_function = {}
+            for edge in call_graph_edges:
+                caller_file = edge.get('caller_file', '')
+                if caller_file not in file_paths:
+                    continue
+                callee_name = edge.get('callee', '')
+                if not callee_name or callee_name == '<module>':
+                    continue
+                caller_key = edge.get('caller_id') or self._build_function_ref(
+                    caller_file,
+                    edge.get('caller', ''),
+                    edge.get('caller_line', 0),
+                )
+                if not caller_key:
+                    continue
+                if caller_key not in called_apis_by_function:
+                    called_apis_by_function[caller_key] = set()
+                called_apis_by_function[caller_key].add(callee_name)
             
             # 从模块的函数中提取相关API
             module_functions = {}  # {function_ref: func_info}
@@ -632,39 +780,44 @@ class SoftwareProfiler:
                         if not func_key:
                             continue
                         module_functions[func_key] = func
+                        candidate_names = [func_name]
+                        candidate_names.extend(sorted(called_apis_by_function.get(func_key, set())))
                         
                         # 根据数据源识别源API
                         for data_source in module.data_sources:
                             source_rules = self.detection_rules.get('data_sources', {}).get(data_source, {})
-                            # 支持两种配置格式：直接是列表，或者是 {keywords: [...]}
-                            if isinstance(source_rules, list):
-                                keywords = source_rules
-                            else:
-                                keywords = source_rules.get('keywords', [])
-                            if any(kw.lower() in func_name.lower() for kw in keywords):
-                                source_apis.append(func_key)
+                            keywords = self._extract_rule_keywords(source_rules)
+                            if any(
+                                self._matches_keyword(candidate_name, keyword)
+                                for candidate_name in candidate_names
+                                for keyword in keywords
+                            ):
+                                if func_key not in source_apis:
+                                    source_apis.append(func_key)
                         
                         # 根据数据格式识别汇API
                         for data_format in module.data_formats:
                             format_rules = self.detection_rules.get('data_formats', {}).get(data_format, {})
-                            # 支持两种配置格式
-                            if isinstance(format_rules, list):
-                                keywords = format_rules
-                            else:
-                                keywords = format_rules.get('keywords', [])
-                            if any(kw.lower() in func_name.lower() for kw in keywords):
-                                sink_apis.append(func_key)
+                            keywords = self._extract_rule_keywords(format_rules)
+                            if any(
+                                self._matches_keyword(candidate_name, keyword)
+                                for candidate_name in candidate_names
+                                for keyword in keywords
+                            ):
+                                if func_key not in sink_apis:
+                                    sink_apis.append(func_key)
                         
                         # 识别中间处理操作
                         for proc_op in module.processing_operations:
                             proc_rules = self.detection_rules.get('processing_operations', {}).get(proc_op, {})
-                            # 支持两种配置格式
-                            if isinstance(proc_rules, list):
-                                keywords = proc_rules
-                            else:
-                                keywords = proc_rules.get('keywords', [])
-                            if any(kw.lower() in func_name.lower() for kw in keywords):
-                                intermediate_ops.append(func_key)
+                            keywords = self._extract_rule_keywords(proc_rules)
+                            if any(
+                                self._matches_keyword(candidate_name, keyword)
+                                for candidate_name in candidate_names
+                                for keyword in keywords
+                            ):
+                                if func_key not in intermediate_ops:
+                                    intermediate_ops.append(func_key)
             
             # 利用调用图边来追踪数据流路径
             # 找出源API到汇API之间的中间调用
