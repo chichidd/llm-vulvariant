@@ -7,7 +7,7 @@ codeql_cli:
   cli_path: ""
   
   # 自定义查询路径
-  queries_path: ""
+  queries_path: ".codeql-queries"
   
   # 数据库存储目录（将从 src/config.py 的 _path_config['codeql_db_path'] 自动加载）
   # 留空则使用项目配置的路径
@@ -20,4 +20,4 @@ codeql_cli:
   memory: 0
   
   # 查询超时时间（秒）
-  timeout: 600
+  timeout: 1800

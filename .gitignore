@@ -156,5 +156,3 @@ codeql_dbs/
 .codeql/
 notebooks/
 .claude-runtime/
-.codeql-queries/**/*.ql
-.codeql-queries/**/codeql-pack.lock.yml

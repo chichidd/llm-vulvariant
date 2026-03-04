@@ -1,0 +1,24 @@
+---
+lockVersion: 1.0.0
+dependencies:
+  codeql/concepts:
+    version: 0.0.16
+  codeql/controlflow:
+    version: 2.0.26
+  codeql/dataflow:
+    version: 2.0.26
+  codeql/mad:
+    version: 1.0.42
+  codeql/regex:
+    version: 1.0.42
+  codeql/ruby-all:
+    version: 5.1.10
+  codeql/ssa:
+    version: 2.0.18
+  codeql/tutorial:
+    version: 1.0.42
+  codeql/typetracking:
+    version: 2.0.26
+  codeql/util:
+    version: 2.0.29
+compiled: false

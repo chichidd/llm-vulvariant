@@ -106,14 +106,20 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             }
         
         logger.debug(f"Loaded CodeQL config: queries_path={config.get('queries_path')}, database_dir={config.get('database_dir')}")
-        # If no query path is provided, use the default (.codeql under project root)
+
+        # Determine the repo root (llm-vulvariant/) for resolving relative paths
+        if _path_config and 'repo_root' in _path_config:
+            _repo_root = str(_path_config['repo_root'])
+        else:
+            # __file__ is src/utils/codeql_native.py → go up 3 levels to llm-vulvariant/
+            _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+
+        # If no query path is provided, use the default (.codeql under repo root)
         if not config['queries_path']:
-            if _path_config:
-                config['queries_path'] = os.path.join(str(_path_config['project_root']), ".codeql")
-            else:
-                # If config cannot be imported, fall back to computing the project root
-                project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-                config['queries_path'] = os.path.join(project_root, ".codeql")
+            config['queries_path'] = os.path.join(_repo_root, ".codeql")
+        elif not os.path.isabs(config['queries_path']):
+            # Resolve relative queries_path against the repo root, not the CWD
+            config['queries_path'] = os.path.join(_repo_root, config['queries_path'])
         
         # If no database directory is provided, use the project's configured path
         if not config['database_dir']:
@@ -286,8 +292,32 @@ class CodeQLAnalyzer:
 
     @staticmethod
     def _is_complete_database(db_path: str) -> bool:
-        """Check whether a CodeQL database directory looks complete."""
-        return os.path.isfile(os.path.join(db_path, "codeql-database.yml"))
+        """Check whether a CodeQL database directory looks complete.
+        
+        A valid database must have both the metadata YAML and the actual
+        dataset directory (db-{language}).  An incomplete/failed creation
+        may leave the YAML without the dataset.
+        """
+        yml_path = os.path.join(db_path, "codeql-database.yml")
+        if not os.path.isfile(yml_path):
+            return False
+        # Read primary language and verify the dataset directory exists
+        try:
+            import yaml
+            with open(yml_path) as f:
+                info = yaml.safe_load(f)
+            lang = info.get("primaryLanguage")
+            if lang:
+                dataset_dir = os.path.join(db_path, f"db-{lang}")
+                if not os.path.isdir(dataset_dir):
+                    logger.warning(
+                        "Database at %s is incomplete: missing dataset directory %s",
+                        db_path, dataset_dir,
+                    )
+                    return False
+        except Exception:
+            pass  # If we can't parse YAML, fall through to True for backwards compat
+        return True
 
     @staticmethod
     def _format_codeql_error(stdout: str, stderr: str) -> str:
