@@ -55,8 +55,6 @@ llm-vulvariant/
 │   │   └── checker/            # exploitability + report generator
 │   ├── llm/                    # LLM client 与重试封装
 │   └── utils/
-├── repo-profiles/
-├── vuln-profiles/
 ├── scripts/
 └── tests/
 ```
@@ -93,10 +91,15 @@ pip install transformers sentence-transformers torch
 关键字段:
 
 - `project_root`
+- `profile_base_path`
 - `vuln_data_path`
 - `repo_base_path`
 - `codeql_db_path`
 - `embedding_model_path`
+
+说明:
+
+- software/vulnerability profile 的子目录名通过 CLI 参数传入（例如 `--software-profile-dirname`、`--vuln-profile-dirname`），并拼接到 `profile_base_path` 下。
 
 默认约定是 `~/vuln/...` 目录布局。
 
@@ -172,14 +175,15 @@ software-profile \
   --repo-name NeMo \
   --repo-base-path ~/vuln/data/repos \
   --target-version a1b2c3d4e5f6 \
-  --output-dir ./repo-profiles \
+  --profile-base-path ~/vuln/profiles \
+  --software-profile-dirname soft \
   --llm-provider deepseek \
   --force-full-analysis
 ```
 
 输出:
 
-- `repo-profiles/NeMo/<commit>/software_profile.json`
+- `~/vuln/profiles/soft/NeMo/<commit>/software_profile.json`
 
 ### 7.2 生成漏洞画像
 
@@ -187,14 +191,15 @@ software-profile \
 vuln-profile \
   --vuln-index 0 \
   --vuln-json ~/vuln/data/vuln.json \
-  --repo-profile-dir ./repo-profiles \
-  --output-dir ./vuln-profiles \
+  --profile-base-path ~/vuln/profiles \
+  --software-profile-dirname soft \
+  --vuln-profile-dirname vuln \
   --llm-provider deepseek
 ```
 
 输出:
 
-- `vuln-profiles/<repo_name>/<cve_id>/vulnerability_profile.json`
+- `~/vuln/profiles/vuln/<repo_name>/<cve_id>/vulnerability_profile.json`
 
 ### 7.3 单目标扫描（手动指定目标仓库）
 
@@ -229,8 +234,9 @@ scanner \
 batch-scanner \
   --vuln-json ~/vuln/data/vuln.json \
   --repos-root ~/vuln/data/repos \
-  --repo-profiles-dir ./repo-profiles \
-  --vuln-profiles-dir ./vuln-profiles \
+  --profile-base-path ~/vuln/profiles \
+  --soft-profiles-dir soft \
+  --vuln-profiles-dir vuln \
   --scan-output-dir results/full-batch-scan \
   --similarity-threshold 0.70 \
   --fallback-top-n 3 \
@@ -248,7 +254,8 @@ batch-scanner \
 ```bash
 python -m cli.exploitability \
   --scan-results-dir results/full-batch-scan \
-  --repo-profile-dir repo-profiles \
+  --profile-base-path ~/vuln/profiles \
+  --software-profile-dirname soft \
   --repo-base-path ~/vuln/data/repos \
   --generate-report \
   --report-only-exploitable \
@@ -341,12 +348,12 @@ pytest -q tests/test_cli_batch_scanner.py tests/test_cli_exploitability.py tests
 ## 14. 常见问题
 
 1. `Software profile not found`:
-   - 先确认 `repo-profiles/<repo>/<commit>/software_profile.json` 已存在
-   - 检查 `--repo-profiles-dir` 与 `config/paths.yaml` 是否一致
+   - 先确认 `~/vuln/profiles/soft/<repo>/<commit>/software_profile.json` 已存在
+   - 检查 `--soft-profiles-dir` 与 `config/paths.yaml` 是否一致
 
 2. `Vulnerability profile not found`:
    - 先执行 `vuln-profile`
-   - 注意路径是 `vuln-profiles/<repo>/<cve>/vulnerability_profile.json`
+   - 注意路径是 `~/vuln/profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
 
 3. `Claude CLI not found`:
    - 安装 Claude CLI 并确保 `claude` 在 `PATH`

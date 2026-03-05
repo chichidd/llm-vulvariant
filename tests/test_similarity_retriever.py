@@ -191,7 +191,7 @@ def test_rank_similar_profiles_applies_min_overall_similarity(monkeypatch):
 
 
 def test_load_all_profiles_and_commit_resolution(tmp_path):
-    repo_profiles_dir = tmp_path / "repo-profiles"
+    repo_profiles_dir = tmp_path / "soft"
     good_dir = repo_profiles_dir / "repo1" / "abc123456789"
     good_dir.mkdir(parents=True)
     (good_dir / "software_profile.json").write_text(

@@ -9,12 +9,12 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from config import _path_config
 from utils.codeql_native import CodeQLAnalyzer
 from utils.language import (
-    detect_language as detect_repo_language,
+    detect_languages as detect_repo_languages,
     get_codeql_pack,
     get_extensions,
 )
@@ -33,8 +33,14 @@ class ToolResult:
 
 
 class AgenticToolkit:
-    def __init__(self, repo_path: Path, memory_manager=None, software_profile=None,
-                 codeql_database_name: Optional[str] = None, language: Optional[str] = None):
+    def __init__(
+        self,
+        repo_path: Path,
+        memory_manager=None,
+        software_profile=None,
+        languages: Optional[List[str]] = None,
+        codeql_database_names: Optional[Dict[str, str]] = None,
+    ):
         self.repo_path = repo_path
         self._file_cache: Dict[str, str] = {}
         self._memory_manager = memory_manager
@@ -45,18 +51,72 @@ class AgenticToolkit:
         self._file_callers: Dict[str, set] = {}  # file -> set of caller files
         self._file_callees: Dict[str, set] = {}  # file -> set of callee files
 
-        # Language configuration (auto-detect if not specified)
-        self._language: str = language or detect_repo_language(repo_path)
-        self._source_extensions = get_extensions(self._language)
+        # Language configuration (multi-language aware).
+        self._languages: List[str] = self._resolve_languages(languages=languages)
+        self._source_extensions: Set[str] = self._resolve_source_extensions()
         
         # CodeQL configuration
         self._codeql_db_base_path: Path = _path_config.get('codeql_db_path', Path.home() / 'vuln' / 'codeql_dbs')
-        self._codeql_database_name: Optional[str] = codeql_database_name
+        self._codeql_database_names: Dict[str, str] = self._normalize_codeql_database_names(
+            codeql_database_names
+        )
         self._codeql_analyzer: Optional[CodeQLAnalyzer] = None
-        self._codeql_query_dir: Optional[Path] = None
+        self._codeql_query_dirs: Dict[str, Path] = {}
+        self._codeql_query_dirs_ready: Set[str] = set()
         self._init_codeql()
         
         self._build_module_cache()
+
+    def _resolve_languages(
+        self,
+        languages: Optional[List[str]],
+    ) -> List[str]:
+        if languages:
+            resolved = self._dedupe_languages(languages)
+            if resolved:
+                return resolved
+        detected = self._dedupe_languages(detect_repo_languages(self.repo_path))
+        return detected or ["python"]
+
+    @staticmethod
+    def _dedupe_languages(languages: List[str]) -> List[str]:
+        seen = set()
+        ordered: List[str] = []
+        for lang in languages:
+            normalized = str(lang).strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
+
+    def _resolve_source_extensions(self) -> Set[str]:
+        extensions: Set[str] = set()
+        for lang in self._languages:
+            try:
+                extensions |= get_extensions(lang)
+            except ValueError:
+                logger.warning("Unsupported language in scanner toolkit: %s", lang)
+        if not extensions:
+            extensions = get_extensions(self._primary_language())
+        return extensions
+
+    def _primary_language(self) -> str:
+        return self._languages[0] if self._languages else "python"
+
+    def _normalize_codeql_database_names(
+        self,
+        codeql_database_names: Optional[Dict[str, str]],
+    ) -> Dict[str, str]:
+        if not isinstance(codeql_database_names, dict):
+            return {}
+        normalized: Dict[str, str] = {}
+        for lang, db_name in codeql_database_names.items():
+            lang_key = str(lang).strip().lower()
+            db_value = str(db_name).strip()
+            if lang_key and db_value:
+                normalized[lang_key] = db_value
+        return normalized
     
     def _init_codeql(self):
         """Initialize CodeQL analyzer and query directory."""
@@ -69,57 +129,79 @@ class AgenticToolkit:
             logger.warning(f"Failed to initialize CodeQL analyzer: {e}")
             self._codeql_analyzer = None
         
-        # Template query directory (contains pre-installed qlpack.yml / lock files)
-        self._codeql_query_template_dir = Path(_path_config['repo_root']) / '.codeql-queries' / self._language
-        # Actual query directory will be created lazily under the output folder
-        self._codeql_query_dir: Optional[Path] = None
-        self._codeql_query_dir_ready = False
+        template_root = Path(_path_config['repo_root']) / '.codeql-queries'
+        self._codeql_query_template_dirs = {
+            lang: template_root / lang
+            for lang in self._languages
+        }
+        self._codeql_query_dirs = {}
+        self._codeql_query_dirs_ready = set()
+
+    def _resolve_query_language(self, language: Optional[str] = None) -> str:
+        normalized = str(language or "").strip().lower()
+        if normalized:
+            return normalized
+        return self._primary_language()
     
-    def _setup_query_dir(self) -> bool:
+    def _setup_query_dir(self, language: Optional[str] = None) -> bool:
         """Lazily set up the CodeQL query directory under the output folder.
         
         Creates <output_dir>/codeql-queries/<language>/ and copies yml files
         (qlpack.yml, codeql-pack.lock.yml) from the template directory so that
         generated .ql files live alongside the results.
         """
+        query_language = self._resolve_query_language(language)
         if not self._memory_manager:
             logger.warning("Memory manager not available. Cannot set up query directory.")
             return False
         
         output_dir: Path = self._memory_manager.output_dir
-        query_dir = output_dir / "codeql-queries" / self._language
-        if self._codeql_query_dir_ready and self._codeql_query_dir == query_dir:
+        query_dir = output_dir / "codeql-queries" / query_language
+        if (
+            query_language in self._codeql_query_dirs_ready
+            and self._codeql_query_dirs.get(query_language) == query_dir
+        ):
             return True
 
-        if self._codeql_query_dir_ready and self._codeql_query_dir != query_dir:
+        existing_query_dir = self._codeql_query_dirs.get(query_language)
+        if existing_query_dir and existing_query_dir != query_dir:
             logger.info(
-                "CodeQL query directory changed from %s to %s; rebuilding query workspace.",
-                self._codeql_query_dir,
+                "CodeQL query directory changed for %s from %s to %s; rebuilding query workspace.",
+                query_language,
+                existing_query_dir,
                 query_dir,
             )
 
         query_dir.mkdir(parents=True, exist_ok=True)
         
         # Copy yml files from template directory if available
-        if self._codeql_query_template_dir and self._codeql_query_template_dir.exists():
-            for yml_file in self._codeql_query_template_dir.glob("*.yml"):
+        template_dir = self._codeql_query_template_dirs.get(query_language)
+        if not template_dir:
+            template_dir = Path(_path_config['repo_root']) / '.codeql-queries' / query_language
+        if template_dir.exists():
+            for yml_file in template_dir.glob("*.yml"):
                 dest = query_dir / yml_file.name
                 if not dest.exists():
                     shutil.copy2(yml_file, dest)
                     logger.info(f"Copied {yml_file.name} to {query_dir}")
         
-        self._codeql_query_dir = query_dir
-        self._codeql_query_dir_ready = True
+        self._codeql_query_dirs[query_language] = query_dir
+        self._codeql_query_dirs_ready.add(query_language)
         logger.info(f"CodeQL query directory set up at: {query_dir}")
         return True
 
-    def _ensure_query_pack(self) -> bool:
+    def _ensure_query_pack(self, language: Optional[str] = None) -> bool:
         """Ensure the CodeQL query pack is prepared with dependencies installed."""
-        if not self._setup_query_dir():
+        query_language = self._resolve_query_language(language)
+        if not self._setup_query_dir(query_language):
             return False
-        
-        qlpack_file = self._codeql_query_dir / "qlpack.yml"
-        qlpack_lock_file = self._codeql_query_dir / "codeql-pack.lock.yml"
+
+        query_dir = self._codeql_query_dirs.get(query_language)
+        if not query_dir:
+            return False
+
+        qlpack_file = query_dir / "qlpack.yml"
+        qlpack_lock_file = query_dir / "codeql-pack.lock.yml"
         
         # Check if already prepared (lock file copied from template or previously installed)
         if qlpack_lock_file.exists():
@@ -127,11 +209,15 @@ class AgenticToolkit:
         
         # Create qlpack.yml if not exists (no template available)
         if not qlpack_file.exists():
-            codeql_pack = get_codeql_pack(self._language)
-            if not codeql_pack:
-                logger.warning(f"No CodeQL pack available for language: {self._language}")
+            try:
+                codeql_pack = get_codeql_pack(query_language)
+            except ValueError:
+                logger.warning(f"No CodeQL pack available for language: {query_language}")
                 return False
-            pack_name = f"llm-vulvariant-queries-{self._language}"
+            if not codeql_pack:
+                logger.warning(f"No CodeQL pack available for language: {query_language}")
+                return False
+            pack_name = f"llm-vulvariant-queries-{query_language}"
             qlpack_content = f"""name: {pack_name}
 version: 1.0.0
 description: CodeQL queries for LLM vulnerability variant analysis
@@ -144,7 +230,7 @@ dependencies:
         logger.info("Installing CodeQL pack dependencies...")
         try:
             result = subprocess.run(
-                ["codeql", "pack", "install", str(self._codeql_query_dir)],
+                ["codeql", "pack", "install", str(query_dir)],
                 capture_output=True,
                 text=True,
                 timeout=300
@@ -161,15 +247,28 @@ dependencies:
             logger.error(f"Failed to install CodeQL pack: {e}")
             return False
     
-    def set_codeql_database(self, database_name: str):
+    def set_codeql_database(self, database_name: str, language: Optional[str] = None):
         """Set or update the CodeQL database name."""
-        self._codeql_database_name = database_name
+        query_language = self._resolve_query_language(language)
+        self._codeql_database_names[query_language] = database_name
     
-    def _get_codeql_database_path(self) -> Optional[Path]:
+    def _get_codeql_database_name(self, language: Optional[str] = None) -> Optional[str]:
+        query_language = self._resolve_query_language(language)
+        if query_language in self._codeql_database_names:
+            return self._codeql_database_names[query_language]
+        primary_language = self._primary_language()
+        if primary_language in self._codeql_database_names:
+            return self._codeql_database_names[primary_language]
+        if self._codeql_database_names:
+            return next(iter(self._codeql_database_names.values()))
+        return None
+
+    def _get_codeql_database_path(self, language: Optional[str] = None) -> Optional[Path]:
         """Get the full path to the CodeQL database."""
-        if not self._codeql_database_name:
+        db_name = self._get_codeql_database_name(language=language)
+        if not db_name:
             return None
-        db_path = self._codeql_db_base_path / self._codeql_database_name
+        db_path = self._codeql_db_base_path / db_name
         if db_path.exists():
             return db_path
         return None
@@ -236,8 +335,8 @@ dependencies:
         self._memory_manager = memory_manager
         # Query workspace lives under memory_manager.output_dir.
         # Reset cached state so future queries use the current output directory.
-        self._codeql_query_dir = None
-        self._codeql_query_dir_ready = False
+        self._codeql_query_dirs = {}
+        self._codeql_query_dirs_ready = set()
     
     def set_software_profile(self, software_profile):
         """Set or update the software profile reference."""
@@ -260,11 +359,11 @@ dependencies:
     # ---- Multi-language file iteration helpers ----
 
     def _is_source_file(self, path: Path) -> bool:
-        """Check if *path* is a source file of the current language."""
+        """Check if *path* is a source file of any configured language."""
         return path.suffix.lower() in self._source_extensions
 
     def _iter_source_files(self, root: Path, recursive: bool = True):
-        """Yield source files under *root* matching the current language."""
+        """Yield source files under *root* matching configured languages."""
         IGNORED_DIRS = {".git", "node_modules", "__pycache__", "build", "dist",
                         ".tox", "venv", ".venv", "vendor", "third_party"}
         if recursive:
@@ -1160,6 +1259,39 @@ dependencies:
             }, indent=2, ensure_ascii=False)
         )
 
+    @staticmethod
+    def _infer_query_language(query: str) -> Optional[str]:
+        """Infer CodeQL query language from `import <lang>`."""
+        import_match = re.search(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_]*)", query, re.MULTILINE)
+        if not import_match:
+            return None
+        import_key = import_match.group(1).strip().lower()
+        alias_map = {
+            "python": "python",
+            "cpp": "cpp",
+            "c": "cpp",
+            "go": "go",
+            "java": "java",
+            "javascript": "javascript",
+            "js": "javascript",
+            "ruby": "ruby",
+            "csharp": "csharp",
+            "cs": "csharp",
+        }
+        return alias_map.get(import_key)
+
+    def _choose_query_language(self, query: str) -> str:
+        """Choose the most suitable language for query pack/database routing."""
+        inferred = self._infer_query_language(query)
+        if inferred and inferred in self._languages:
+            return inferred
+        if inferred and inferred in self._codeql_database_names:
+            return inferred
+        for lang in self._languages:
+            if self._get_codeql_database_path(lang):
+                return lang
+        return self._primary_language()
+
     def _run_codeql_query(self, query: str, query_name: str) -> ToolResult:
         """Run a CodeQL query on the pre-loaded database.
         
@@ -1178,33 +1310,47 @@ dependencies:
                 error="CodeQL analyzer is not available. Please ensure CodeQL CLI is installed."
             )
         
-        # Check if database is configured
-        db_path = self._get_codeql_database_path()
+        query_language = self._choose_query_language(query)
+        db_name = self._get_codeql_database_name(language=query_language)
+        db_path = self._get_codeql_database_path(language=query_language)
         if not db_path:
             return ToolResult(
                 success=False,
                 content="",
-                error=f"CodeQL database not found. Database name: {self._codeql_database_name}, "
+                error=f"CodeQL database not found. Database name: {db_name}, "
                       f"Search path: {self._codeql_db_base_path}"
             )
         
         # Ensure query pack is ready
-        if not self._ensure_query_pack():
+        if not self._ensure_query_pack(query_language):
             return ToolResult(
                 success=False,
                 content="",
                 error="Failed to prepare CodeQL query pack. Check logs for details."
             )
+
+        query_dir = self._codeql_query_dirs.get(query_language)
+        if not query_dir:
+            return ToolResult(
+                success=False,
+                content="",
+                error=f"CodeQL query directory not initialized for language: {query_language}",
+            )
         
         # Write query code to the qlpack directory (where dependencies are installed)
         # This is required for CodeQL to resolve dependencies like 'import python'
         safe_name = re.sub(r'[^\w\-]', '_', query_name)
-        query_path = self._codeql_query_dir / f"{safe_name}.ql"
+        query_path = query_dir / f"{safe_name}.ql"
         query_path.write_text(query, encoding="utf-8")
         
         try:
             # Run the query
-            logger.info(f"Running CodeQL query '{query_name}' on database: {db_path}")
+            logger.info(
+                "Running CodeQL query '%s' [language=%s, database=%s]",
+                query_name,
+                query_language,
+                db_path,
+            )
             success, result = self._codeql_analyzer.run_query(
                 database_path=str(db_path),
                 query=str(query_path),
@@ -1222,7 +1368,13 @@ dependencies:
             findings = self._extract_codeql_findings(result)
             
             # Save results to output_dir/codeql-results/
-            self._save_codeql_results(query_name, result, findings)
+            self._save_codeql_results(
+                query_name,
+                result,
+                findings,
+                query_language=query_language,
+                database_name=db_name,
+            )
             
             # Record findings in memory
             self._record_codeql_findings_in_memory(query_name, findings)
@@ -1272,7 +1424,14 @@ dependencies:
         
         return findings
 
-    def _save_codeql_results(self, query_name: str, sarif_result: Dict[str, Any], findings: List[Dict[str, Any]]):
+    def _save_codeql_results(
+        self,
+        query_name: str,
+        sarif_result: Dict[str, Any],
+        findings: List[Dict[str, Any]],
+        query_language: Optional[str] = None,
+        database_name: Optional[str] = None,
+    ):
         """Save CodeQL results to output_dir/codeql-results/."""
         if not self._memory_manager:
             logger.warning("Memory manager not available, cannot save CodeQL results to output_dir")
@@ -1294,7 +1453,8 @@ dependencies:
         summary_data = {
             "query_name": query_name,
             "timestamp": datetime.now().isoformat(),
-            "database": self._codeql_database_name,
+            "query_language": query_language or self._primary_language(),
+            "database": database_name or self._get_codeql_database_name(query_language),
             "total_findings": len(findings),
             "findings": findings
         }

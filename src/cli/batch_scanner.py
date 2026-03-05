@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from config import _path_config
+from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config
 from llm import LLMConfig, create_llm_client
 from profiler import SoftwareProfiler, VulnerabilityProfiler, VulnEntry
 from scanner.agent import load_software_profile, load_vulnerability_profile
@@ -53,16 +53,28 @@ def parse_args() -> argparse.Namespace:
         help="Root directory of target repositories (default: data/repos)",
     )
     parser.add_argument(
-        "--repo-profiles-dir",
+        "--profile-base-path",
         type=str,
-        default=str(_path_config["repo_root"] / "repo-profiles"),
-        help="Directory storing software profiles",
+        default=str(_path_config["profile_base_path"]),
+        help="Base directory containing profile folders (default from config/paths.yaml)",
+    )
+    parser.add_argument(
+        "--soft-profiles-dir",
+        type=str,
+        default=DEFAULT_SOFTWARE_PROFILE_DIRNAME,
+        help=(
+            "Software profile directory name under --profile-base-path, "
+            "or an absolute path"
+        ),
     )
     parser.add_argument(
         "--vuln-profiles-dir",
         type=str,
-        default=str(_path_config["repo_root"] / "vuln-profiles"),
-        help="Directory storing vulnerability profiles",
+        default=DEFAULT_VULN_PROFILE_DIRNAME,
+        help=(
+            "Vulnerability profile directory name under --profile-base-path, "
+            "or an absolute path"
+        ),
     )
     parser.add_argument(
         "--scan-output-dir",
@@ -160,12 +172,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional limit on number of vuln entries from vuln.json",
     )
-    parser.add_argument(
-        "--language",
-        type=str,
-        default=None,
-        help="Force scan language, otherwise auto-detect per target repo",
-    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logs")
     return parser.parse_args()
 
@@ -183,7 +189,39 @@ def _validate_args(args: argparse.Namespace) -> bool:
     if args.max_iterations_cap <= 0:
         logger.error("--max-iterations-cap must be >= 1")
         return False
+    if not str(args.soft_profiles_dir).strip():
+        logger.error("--soft-profiles-dir must not be empty")
+        return False
+    if not str(args.vuln_profiles_dir).strip():
+        logger.error("--vuln-profiles-dir must not be empty")
+        return False
     return True
+
+
+def _resolve_profile_dir(profile_base_path: Path, directory_arg: str) -> Path:
+    candidate = Path(directory_arg).expanduser()
+    return candidate if candidate.is_absolute() else profile_base_path / candidate
+
+
+def _resolve_profile_dirs_from_args(args: argparse.Namespace) -> tuple[Path, Path]:
+    profile_base_path = Path(args.profile_base_path).expanduser()
+    soft_profiles_dir = _resolve_profile_dir(profile_base_path, args.soft_profiles_dir)
+    vuln_profiles_dir = _resolve_profile_dir(profile_base_path, args.vuln_profiles_dir)
+    return soft_profiles_dir, vuln_profiles_dir
+
+
+def _resolve_software_profile_locator(
+    batch_args: argparse.Namespace,
+    repo_profiles_dir: Path,
+) -> tuple[str | None, str]:
+    profile_base_path = getattr(batch_args, "profile_base_path", None)
+    software_profile_dirname = getattr(batch_args, "soft_profiles_dir", None)
+    if software_profile_dirname is not None and str(software_profile_dirname).strip():
+        return (
+            None if profile_base_path is None else str(profile_base_path),
+            str(software_profile_dirname),
+        )
+    return str(repo_profiles_dir.parent), repo_profiles_dir.name
 
 
 def _normalize_cve_id(entry: Dict[str, object], index: int) -> str:
@@ -406,15 +444,20 @@ def _run_target_scan(
     llm_client,
     target: SimilarProfileCandidate,
 ) -> bool:
+    profile_base_path, software_profile_dirname = _resolve_software_profile_locator(
+        batch_args,
+        repo_profiles_dir,
+    )
     scan_args = argparse.Namespace(
         cve=cve_id,
         output=str(batch_args.scan_output_dir),
-        language=batch_args.language,
         repo_base_path=str(batch_args.repos_root),
         max_iterations=batch_args.max_iterations_cap,
         stop_when_critical_complete=not batch_args.disable_critical_stop,
         critical_stop_mode=batch_args.critical_stop_mode,
         verbose=batch_args.verbose,
+        profile_base_path=profile_base_path,
+        software_profile_dirname=software_profile_dirname,
         repo_profiles_dir=repo_profiles_dir,
     )
     scan_target = agent_scanner.ScanTarget(
@@ -449,8 +492,7 @@ def main() -> int:
 
     vuln_json = Path(args.vuln_json).expanduser()
     repos_root = Path(args.repos_root).expanduser()
-    repo_profiles_dir = Path(args.repo_profiles_dir).expanduser()
-    vuln_profiles_dir = Path(args.vuln_profiles_dir).expanduser()
+    repo_profiles_dir, vuln_profiles_dir = _resolve_profile_dirs_from_args(args)
     scan_output_dir = Path(args.scan_output_dir).expanduser()
     args.scan_output_dir = str(scan_output_dir)
 

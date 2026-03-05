@@ -5,6 +5,12 @@ import logging
 from pathlib import Path
 import argparse
 
+from config import (
+    DEFAULT_SOFTWARE_PROFILE_DIRNAME,
+    _path_config,
+    resolve_software_profiles_path,
+)
+
 try:
     from cli.common import setup_logging
 except ImportError:  # pragma: no cover - direct script execution fallback
@@ -18,7 +24,21 @@ def parse_args():
     parser.add_argument('--repo-name', required=True, help='Repository name under repo base path (config/paths.yaml)')
     parser.add_argument('--llm-provider', default='deepseek', help='LLM provider name (e.g., openai, deepseek)')
     parser.add_argument('--llm-name', default=None, help='LLM model name (e.g., gpt-5.1, deepseek-chat). If not specified, use default model for the provider.')
-    parser.add_argument('--output-dir', default=None, help='Output directory for profiles')
+    parser.add_argument(
+        '--profile-base-path',
+        default=str(_path_config["profile_base_path"]),
+        help='Base directory containing profile folders (default from config/paths.yaml)'
+    )
+    parser.add_argument(
+        '--software-profile-dirname',
+        default=DEFAULT_SOFTWARE_PROFILE_DIRNAME,
+        help='Software profile directory name under --profile-base-path (default: soft)'
+    )
+    parser.add_argument(
+        '--output-dir',
+        default=None,
+        help='Output directory for profiles (overrides --profile-base-path/--software-profile-dirname)'
+    )
     parser.add_argument('--repo-base-path', default=None, help='Base path containing repos (default from config/paths.yaml)')
     parser.add_argument('--target-version', default=None, help='Target commit hash/version. Default is the current version.')
 
@@ -36,11 +56,22 @@ def main():
     setup_logging(args.verbose)
     
     # Build the repository path
-    from config import load_paths_config
-    path_config = load_paths_config()
-    repo_base_path = Path(args.repo_base_path).expanduser() if args.repo_base_path else path_config["repo_base_path"]
+    repo_base_path = (
+        Path(args.repo_base_path).expanduser()
+        if args.repo_base_path
+        else _path_config["repo_base_path"]
+    )
     repo_path = str(repo_base_path / args.repo_name)
     logger.info(f"Repository path: {repo_path}")
+    output_dir = (
+        Path(args.output_dir).expanduser()
+        if args.output_dir
+        else resolve_software_profiles_path(
+            profile_base_path=args.profile_base_path,
+            software_profile_dirname=args.software_profile_dirname,
+        )
+    )
+    logger.info(f"Software profile output dir: {output_dir}")
     
     # Configure the LLM
     llm_config = LLMConfig(provider=args.llm_provider, model=args.llm_name)
@@ -52,7 +83,7 @@ def main():
     llm_client = create_llm_client(llm_config)
     profiler = SoftwareProfiler(
         llm_client=llm_client, 
-        output_dir=args.output_dir,
+        output_dir=str(output_dir),
     )
     
     # Generate the profile

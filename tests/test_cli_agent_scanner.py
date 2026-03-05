@@ -11,8 +11,14 @@ from scanner.similarity.retriever import (
 )
 
 
-def _mk_profile(name: str, version: str = ""):
-    return SoftwareProfile(name=name, version=version, modules=[ModuleInfo(name="m")])
+def _mk_profile(name: str, version: str = "", repo_analysis=None):
+    repo_info = {"repo_analysis": repo_analysis} if isinstance(repo_analysis, dict) else {}
+    return SoftwareProfile(
+        name=name,
+        version=version,
+        repo_info=repo_info,
+        modules=[ModuleInfo(name="m")],
+    )
 
 
 def test_validate_args_rejects_target_commit_without_repo():
@@ -118,6 +124,28 @@ def test_save_scan_outputs_writes_similarity_file(tmp_path):
     assert (tmp_path / "target_similarity.json").exists()
 
 
+def test_resolve_soft_profiles_dir_for_scan_prefers_base_plus_dirname(tmp_path):
+    args = Namespace(
+        profile_base_path=str(tmp_path / "profiles"),
+        software_profile_dirname="soft-nvidia",
+        repo_profiles_dir=tmp_path / "legacy-soft",
+    )
+
+    resolved = agent_scanner._resolve_soft_profiles_dir_for_scan(args)
+
+    assert resolved == tmp_path / "profiles" / "soft-nvidia"
+
+
+def test_resolve_soft_profiles_dir_for_scan_falls_back_to_repo_profiles_dir(tmp_path):
+    args = Namespace(
+        repo_profiles_dir=tmp_path / "profiles" / "soft-legacy",
+    )
+
+    resolved = agent_scanner._resolve_soft_profiles_dir_for_scan(args)
+
+    assert resolved == tmp_path / "profiles" / "soft-legacy"
+
+
 def test_run_single_target_scan_success_restores_original_commit(monkeypatch, tmp_path):
     repo_base = tmp_path / "repos"
     repo_dir = repo_base / "target-repo"
@@ -132,10 +160,22 @@ def test_run_single_target_scan_success_restores_original_commit(monkeypatch, tm
         checkout_calls.append(commit)
         return True
 
+    restore_calls = []
+
+    def fake_restore(repo_path, restore_target):
+        restore_calls.append(restore_target)
+        return True
+
     monkeypatch.setattr(agent_scanner, "get_git_commit", lambda repo_path: "origcommit9999")
+    monkeypatch.setattr(agent_scanner, "get_git_restore_target", lambda repo_path: "master")
+    monkeypatch.setattr(agent_scanner, "restore_git_position", fake_restore)
     monkeypatch.setattr(agent_scanner, "checkout_commit", fake_checkout)
-    monkeypatch.setattr(agent_scanner, "load_software_profile", lambda *args, **kwargs: _mk_profile("target-repo", "targethash"))
-    monkeypatch.setattr(agent_scanner, "detect_repo_language", lambda repo_path: "python")
+    monkeypatch.setattr(
+        agent_scanner,
+        "load_software_profile",
+        lambda *args, **kwargs: _mk_profile("target-repo", "targethash"),
+    )
+    monkeypatch.setattr(agent_scanner, "detect_repo_languages", lambda repo_path: ["python"])
 
     class DummyFinder:
         def __init__(self, **kwargs):
@@ -149,7 +189,6 @@ def test_run_single_target_scan_success_restores_original_commit(monkeypatch, tm
     args = Namespace(
         cve="CVE-2025-0001",
         output=str(tmp_path / "scan-out"),
-        language=None,
         max_iterations=1,
         verbose=False,
     )
@@ -164,7 +203,7 @@ def test_run_single_target_scan_success_restores_original_commit(monkeypatch, tm
 
     assert ok is True
     assert checkout_calls[0] == "targethash1234"
-    assert checkout_calls[-1] == "origcommit9999"
+    assert restore_calls == ["master"]
 
 
 def test_run_single_target_scan_fails_when_profile_missing(monkeypatch, tmp_path):
@@ -175,13 +214,14 @@ def test_run_single_target_scan_fails_when_profile_missing(monkeypatch, tmp_path
     monkeypatch.setitem(agent_scanner._path_config, "repo_base_path", repo_base)
     monkeypatch.setitem(agent_scanner._path_config, "repo_root", tmp_path)
     monkeypatch.setattr(agent_scanner, "get_git_commit", lambda repo_path: "orig")
+    monkeypatch.setattr(agent_scanner, "get_git_restore_target", lambda repo_path: "master")
+    monkeypatch.setattr(agent_scanner, "restore_git_position", lambda *args, **kwargs: True)
     monkeypatch.setattr(agent_scanner, "checkout_commit", lambda *args, **kwargs: True)
     monkeypatch.setattr(agent_scanner, "load_software_profile", lambda *args, **kwargs: None)
 
     args = Namespace(
         cve="CVE-2025-0001",
         output=str(tmp_path / "scan-out"),
-        language="python",
         max_iterations=1,
         verbose=False,
     )
@@ -205,13 +245,22 @@ def test_run_single_target_scan_passes_critical_stop_flag(monkeypatch, tmp_path)
     monkeypatch.setitem(agent_scanner._path_config, "repo_base_path", repo_base)
     monkeypatch.setitem(agent_scanner._path_config, "repo_root", tmp_path)
     monkeypatch.setattr(agent_scanner, "get_git_commit", lambda repo_path: "origcommit9999")
+    monkeypatch.setattr(agent_scanner, "get_git_restore_target", lambda repo_path: "master")
+    monkeypatch.setattr(agent_scanner, "restore_git_position", lambda *args, **kwargs: True)
     monkeypatch.setattr(agent_scanner, "checkout_commit", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         agent_scanner,
         "load_software_profile",
-        lambda *args, **kwargs: _mk_profile("target-repo", "targethash"),
+        lambda *args, **kwargs: _mk_profile(
+            "target-repo",
+            "targethash",
+            repo_analysis={
+                "languages": ["python", "javascript"],
+                "codeql_languages": ["python", "javascript"],
+            },
+        ),
     )
-    monkeypatch.setattr(agent_scanner, "detect_repo_language", lambda repo_path: "python")
+    monkeypatch.setattr(agent_scanner, "detect_repo_languages", lambda repo_path: ["python"])
 
     captured = {}
 
@@ -228,7 +277,6 @@ def test_run_single_target_scan_passes_critical_stop_flag(monkeypatch, tmp_path)
     args = Namespace(
         cve="CVE-2025-0001",
         output=str(tmp_path / "scan-out"),
-        language=None,
         max_iterations=2,
         stop_when_critical_complete=True,
         critical_stop_mode="min",
@@ -246,3 +294,8 @@ def test_run_single_target_scan_passes_critical_stop_flag(monkeypatch, tmp_path)
     assert ok is True
     assert captured["stop_when_critical_complete"] is True
     assert captured["critical_stop_mode"] == "min"
+    assert captured["languages"] == ["python", "javascript"]
+    assert captured["codeql_database_names"] == {
+        "python": "target-repo-targetha-python",
+        "javascript": "target-repo-targetha-javascript",
+    }

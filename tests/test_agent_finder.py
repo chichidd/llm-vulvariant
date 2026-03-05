@@ -15,7 +15,7 @@ class DummyLLM:
 
 
 class DummyToolkit:
-    def __init__(self, repo_path, codeql_database_name=None):
+    def __init__(self, repo_path, **kwargs):
         self.repo_path = repo_path
 
     def set_memory_manager(self, memory):

@@ -38,7 +38,8 @@ class AgenticVulnFinder:
         max_tokens: int = 65536,
         verbose: bool = True,
         output_dir: Optional[Path] = None,
-        codeql_database_name: Optional[str] = None,
+        languages: Optional[List[str]] = None,
+        codeql_database_names: Optional[Dict[str, str]] = None,
     ):
         self.llm_client = llm_client
         self.repo_path = repo_path
@@ -57,7 +58,11 @@ class AgenticVulnFinder:
         self.max_tokens = max_tokens
         self.verbose = verbose
         self.output_dir = output_dir
-        self.toolkit = AgenticToolkit(repo_path, codeql_database_name=codeql_database_name)
+        self.toolkit = AgenticToolkit(
+            repo_path,
+            languages=languages,
+            codeql_database_names=codeql_database_names,
+        )
         self.found_vulnerabilities: List[Dict[str, Any]] = []
         self.conversation_history: List[Dict[str, Any]] = []
         
@@ -146,7 +151,7 @@ class AgenticVulnFinder:
                     logger.info(f"- {tool_calls[0].function.name=}\n- {tool_calls[0].function.arguments=}\n")
                 
             # the token limitation handling
-            if tool_calls is None or (messages_token_len > int(0.9 * (self.llm_client.context_limit - self.llm_client.config.max_tokens))):
+            if tool_calls is None or (messages_token_len > int(0.8 * (self.llm_client.context_limit - self.llm_client.config.max_tokens))):
                 self.conversation_history += messages[len(self.conversation_history) :]
                 return sub_turn
 

@@ -80,43 +80,43 @@ scanner --vuln-repo NeMo --cve CVE-2025-23361 --target-repo Megatron-LM --target
 
 
 # exploitability verification
-# python3 -m cli.exploitability     --scan-results-dir scan-results-withmem-codeql-selfmark/     --folder cve-tencent-nemo1/Megatron-LM-a845aa7e12b3     --repo-profile-dir repo-profile
+# python3 -m cli.exploitability     --scan-results-dir scan-results-withmem-codeql-selfmark/     --folder cve-tencent-nemo1/Megatron-LM-a845aa7e12b3     --soft-profile-dir soft
 
 # TODO
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1040/autogen-13e144e5476a --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-22603/autogen-13e144e5476a --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1040/autogen-13e144e5476a --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-22603/autogen-13e144e5476a --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1040/langflow-a59ade4d613a --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-22603/langflow-a59ade4d613a --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1040/langflow-a59ade4d613a --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-22603/langflow-a59ade4d613a --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1040/moltbot-3f83afe4a6f2 --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-22603/moltbot-3f83afe4a6f2 --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1040/moltbot-3f83afe4a6f2 --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-22603/moltbot-3f83afe4a6f2 --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-6984/autogen-13e144e5476a --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-6984/autogen-13e144e5476a --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-53002/ms-swift-b5b61b6b6f4a --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-53002/NeMo-2919fedf2601 --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-53002/llama_index-aa9db7aaea61 --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-53002/ms-swift-b5b61b6b6f4a --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-53002/NeMo-2919fedf2601 --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-53002/llama_index-aa9db7aaea61 --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1793/dify-91532ef42979 --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1793/ragflow-627c11c42912 --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1793/LLaMA-Factory-ca75f1edf3cb --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1793/dify-91532ef42979 --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1793/ragflow-627c11c42912 --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-1793/LLaMA-Factory-ca75f1edf3cb --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23348/ms-swift-b5b61b6b6f4a --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23348/NeMo-2919fedf2601 --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23348/Megatron-Bridge-da980700aaef --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23348/ms-swift-b5b61b6b6f4a --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23348/NeMo-2919fedf2601 --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23348/Megatron-Bridge-da980700aaef --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-41419/LLaMA-Factory-ca75f1edf3cb --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-41419/NeMo-2919fedf2601 --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-41419/Megatron-LM-a845aa7e12b3 --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-41419/LLaMA-Factory-ca75f1edf3cb --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-41419/NeMo-2919fedf2601 --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-41419/Megatron-LM-a845aa7e12b3 --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo1/LLaMA-Factory-ca75f1edf3cb --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo2/LLaMA-Factory-ca75f1edf3cb --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23361/LLaMA-Factory-ca75f1edf3cb --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo1/LLaMA-Factory-ca75f1edf3cb --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo2/LLaMA-Factory-ca75f1edf3cb --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23361/LLaMA-Factory-ca75f1edf3cb --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo1/ms-swift-b5b61b6b6f4a --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo2/ms-swift-b5b61b6b6f4a --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23361/ms-swift-b5b61b6b6f4a --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo1/ms-swift-b5b61b6b6f4a --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo2/ms-swift-b5b61b6b6f4a --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23361/ms-swift-b5b61b6b6f4a --soft-profile-dir soft
 
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo2/Megatron-LM-a845aa7e12b3 --repo-profile-dir repo-profile
-python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23361/Megatron-LM-a845aa7e12b3 --repo-profile-dir repo-profile
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder cve-tencent-nemo2/Megatron-LM-a845aa7e12b3 --soft-profile-dir soft
+python3 -m cli.exploitability --scan-results-dir scan-results-withmem-codeql-selfmark/ --folder CVE-2025-23361/Megatron-LM-a845aa7e12b3 --soft-profile-dir soft

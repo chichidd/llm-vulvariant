@@ -291,6 +291,20 @@ class CodeQLAnalyzer:
             return False, "", str(e)
 
     @staticmethod
+    def _has_cpp_build_system(source_path: str) -> bool:
+        """Return True when common C/C++ build-system indicators are present."""
+        root = Path(source_path)
+        indicators = {
+            "CMakeLists.txt",
+            "Makefile",
+            "configure",
+            "meson.build",
+            "build.ninja",
+            "compile_commands.json",
+        }
+        return any((root / marker).exists() for marker in indicators)
+
+    @staticmethod
     def _is_complete_database(db_path: str) -> bool:
         """Check whether a CodeQL database directory looks complete.
         
@@ -393,6 +407,33 @@ class CodeQLAnalyzer:
                 args.extend(extra_args)
             return self._run_codeql(args, timeout=1800)  # 30-minute timeout
 
+        # C/C++ repos frequently have no build metadata at repo root (mixed-language monorepos).
+        # In that case, autobuild is expected to fail and only adds noisy errors.
+        if normalized_lang == "cpp" and not self._has_cpp_build_system(source_path):
+            logger.info(
+                "No C/C++ build system detected at %s; using --build-mode=none directly.",
+                source_path,
+            )
+            buildless_success, buildless_stdout, buildless_stderr = _create_db(["--build-mode=none"])
+            if buildless_success:
+                return True, db_path
+            buildless_error = self._format_codeql_error(buildless_stdout, buildless_stderr)
+            logger.info(
+                "C/C++ buildless mode failed; retrying default build mode. Error: %s",
+                buildless_error,
+            )
+            if os.path.exists(db_path):
+                shutil.rmtree(db_path, ignore_errors=True)
+            primary_success, primary_stdout, primary_stderr = _create_db()
+            if primary_success:
+                return True, db_path
+            primary_error = self._format_codeql_error(primary_stdout, primary_stderr)
+            return False, (
+                "Failed to create database. "
+                f"Buildless (--build-mode=none) error: {buildless_error}\n"
+                f"Default mode error: {primary_error}"
+            )
+
         # Primary attempt (default build mode, usually autobuild for compiled languages)
         success, stdout, stderr = _create_db()
         if success:
@@ -402,11 +443,11 @@ class CodeQLAnalyzer:
 
         # C/C++ fallback: buildless extraction avoids fragile project-specific autobuilds.
         if normalized_lang == "cpp":
-            logger.warning(
+            logger.info(
                 "CodeQL database create failed for C/C++ with default build mode; "
-                "retrying with --build-mode=none. Error: %s",
-                primary_error
+                "retrying with --build-mode=none."
             )
+            logger.debug("C/C++ default build-mode error: %s", primary_error)
             if os.path.exists(db_path):
                 shutil.rmtree(db_path, ignore_errors=True)
             fallback_success, fallback_stdout, fallback_stderr = _create_db(["--build-mode=none"])
@@ -773,4 +814,3 @@ class CodeQLAnalyzer:
         
         return paths
     
-

@@ -4,12 +4,13 @@ set -euo pipefail
 
 ROOT="${ROOT:-/mnt/raid/home/dongtian/vuln}"
 APP_DIR="$ROOT/llm-vulvariant"
+PROFILES_ROOT="${PROFILES_ROOT:-$ROOT/profiles}"
 VULN_JSON="${VULN_JSON:-$ROOT/data/vuln.json}"
 REPOS_NVIDIA="${REPOS_NVIDIA:-$ROOT/data/repos-nvidia}"
 SOURCE_REPOS_ROOT="${SOURCE_REPOS_ROOT:-$ROOT/data/repos}"
-REPO_PROFILES_NVIDIA="${REPO_PROFILES_NVIDIA:-$APP_DIR/repo-profiles-nvidia}"
-SOURCE_REPO_PROFILES="${SOURCE_REPO_PROFILES:-$APP_DIR/repo-profiles}"
-VULN_PROFILES_DIR="${VULN_PROFILES_DIR:-$APP_DIR/vuln-profiles}"
+REPO_PROFILES_NVIDIA="${REPO_PROFILES_NVIDIA:-$PROFILES_ROOT/soft-nvidia}"
+SOURCE_REPO_PROFILES="${SOURCE_REPO_PROFILES:-$PROFILES_ROOT/soft}"
+VULN_PROFILES_DIR="${VULN_PROFILES_DIR:-$PROFILES_ROOT/vuln}"
 SCAN_OUTPUT_DIR="${SCAN_OUTPUT_DIR:-$ROOT/results/nvidia-batch-scan}"
 EXP_OUTPUT_DIR="${EXP_OUTPUT_DIR:-$ROOT/results/nvidia-batch-exploitability}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-$ROOT/results/claude-runtime}"
@@ -27,6 +28,24 @@ EXP_LOG="$LOG_DIR/output-nvidia-exploitability-$RUN_ID.log"
 STATUS_LOG="$LOG_DIR/output-nvidia-status-$RUN_ID.log"
 
 mkdir -p "$REPO_PROFILES_NVIDIA" "$SCAN_OUTPUT_DIR" "$EXP_OUTPUT_DIR" "$RUNTIME_ROOT"
+
+cleanup_codeql_temp_artifacts() {
+  local repo_dir="$1"
+  [[ -d "$repo_dir" ]] || return 0
+
+  local cleaned=0
+  if [[ -L "$repo_dir/_codeql_detected_source_root" || -e "$repo_dir/_codeql_detected_source_root" ]]; then
+    rm -f "$repo_dir/_codeql_detected_source_root"
+    cleaned=1
+  fi
+  if [[ -d "$repo_dir/_codeql_build_dir" ]]; then
+    rm -rf "$repo_dir/_codeql_build_dir"
+    cleaned=1
+  fi
+  if [[ "$cleaned" -eq 1 ]]; then
+    echo "[$(date -Iseconds)] cleaned CodeQL temp artifacts: $repo_dir" | tee -a "$STATUS_LOG"
+  fi
+}
 
 echo "[$(date -Iseconds)] RUN_ID=$RUN_ID" | tee -a "$STATUS_LOG"
 echo "[$(date -Iseconds)] PROFILE_LOG=$PROFILE_LOG" | tee -a "$STATUS_LOG"
@@ -57,7 +76,7 @@ for i, repo, cve, p in missing:
     print(f"  missing [{i}] {repo} {cve} -> {p}")
 PY
 
-echo "[$(date -Iseconds)] Stage 2/5: link source software profiles for vuln entries into repo-profiles-nvidia" | tee -a "$STATUS_LOG"
+echo "[$(date -Iseconds)] Stage 2/5: link source software profiles for vuln entries into soft-nvidia" | tee -a "$STATUS_LOG"
 python - <<'PY' "$VULN_JSON" "$SOURCE_REPO_PROFILES" "$REPO_PROFILES_NVIDIA" | tee -a "$STATUS_LOG"
 import json
 import shutil
@@ -115,6 +134,7 @@ for d in "$REPOS_NVIDIA"/*; do
   idx=$((idx+1))
   repo="$(basename "$d")"
   commit="$(git -C "$d" rev-parse HEAD)"
+  cleanup_codeql_temp_artifacts "$d"
   profile="$REPO_PROFILES_NVIDIA/$repo/$commit/software_profile.json"
 
   if [[ -f "$profile" ]]; then
@@ -144,7 +164,7 @@ echo "[$(date -Iseconds)] Stage 4/5: run batch scanner" | tee -a "$STATUS_LOG"
 python -m cli.batch_scanner \
   --vuln-json "$VULN_JSON" \
   --repos-root "$REPOS_NVIDIA" \
-  --repo-profiles-dir "$REPO_PROFILES_NVIDIA" \
+  --soft-profiles-dir "$REPO_PROFILES_NVIDIA" \
   --vuln-profiles-dir "$VULN_PROFILES_DIR" \
   --scan-output-dir "$SCAN_OUTPUT_DIR" \
   --similarity-threshold "$SIMILARITY_THRESHOLD" \
@@ -158,7 +178,7 @@ echo "[$(date -Iseconds)] Stage 4 completed" | tee -a "$STATUS_LOG"
 echo "[$(date -Iseconds)] Stage 5/5: run exploitability and generate reports" | tee -a "$STATUS_LOG"
 python -m cli.exploitability \
   --scan-results-dir "$SCAN_OUTPUT_DIR" \
-  --repo-profile-dir "$REPO_PROFILES_NVIDIA" \
+  --soft-profile-dir "$REPO_PROFILES_NVIDIA" \
   --repo-base-path "$REPOS_NVIDIA" \
   --generate-report \
   --report-only-exploitable \

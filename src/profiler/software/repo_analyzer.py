@@ -38,6 +38,7 @@ logger = get_logger(__name__)
 # ========== Dependency parser constants ==========
 
 C_FAMILY_EXTS = {'.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh'}
+C_FAMILY_SOURCE_EXTS = {'.c', '.cpp', '.cc', '.cxx'}
 JS_TS_EXTS = {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'}
 
 VENDOR_PREFIXES = {'3rdparty', 'third_party', 'thirdparty', 'external', 'extern', 'vendor', 'vendors', 'deps', 'dependencies'}
@@ -260,15 +261,19 @@ class RepoAnalyzer:
         logger.info(f"Using CodeQL version: {self.codeql_analyzer.version}")
 
         supported = set(self.codeql_analyzer.SUPPORTED_LANGUAGES.keys())
-        self.codeql_languages = [lang for lang in self.languages if lang in supported]
+        codeql_candidates = [lang for lang in self.languages if lang in supported]
+        self.codeql_languages = self._filter_codeql_languages(codeql_candidates)
         if not self.codeql_languages:
             logger.warning(
                 "No CodeQL-supported languages detected in %s. Call graph/function extraction will be skipped.",
                 self.repo_path,
             )
-        elif len(self.codeql_languages) != len(self.languages):
+        else:
             skipped = [lang for lang in self.languages if lang not in supported]
-            logger.info("Skipping unsupported CodeQL languages: %s", ", ".join(skipped))
+            skipped.extend([lang for lang in codeql_candidates if lang not in self.codeql_languages])
+            skipped = self._dedupe_preserve_order(skipped)
+            if skipped:
+                logger.info("Skipping unsupported CodeQL languages: %s", ", ".join(skipped))
         
         # Data storage
         self._call_graph_edges: List[CallGraphEdge] = []
@@ -361,6 +366,38 @@ class RepoAnalyzer:
 
         langs = detect_languages(self.repo_path)
         return langs or ["python"]
+
+    def _has_cpp_translation_units(self) -> bool:
+        """Return True when repository contains C/C++ source units (not headers only)."""
+        ignored_dirs = {
+            ".git",
+            "node_modules",
+            "__pycache__",
+            "build",
+            "dist",
+            ".tox",
+            "venv",
+            ".venv",
+        }
+        for root, dirs, files in os.walk(self.repo_path):
+            dirs[:] = [d for d in dirs if d not in ignored_dirs]
+            for fname in files:
+                if Path(fname).suffix.lower() in C_FAMILY_SOURCE_EXTS:
+                    return True
+        return False
+
+    def _filter_codeql_languages(self, languages: List[str]) -> List[str]:
+        """Filter out languages that are technically supported but not analyzable."""
+        filtered: List[str] = []
+        for lang in languages:
+            if lang == "cpp" and not self._has_cpp_translation_units():
+                logger.info(
+                    "Skipping CodeQL language cpp for %s: no C/C++ source files (*.c/*.cc/*.cpp/*.cxx) detected.",
+                    self.repo_path,
+                )
+                continue
+            filtered.append(lang)
+        return filtered
 
     def _resolve_languages(
         self,

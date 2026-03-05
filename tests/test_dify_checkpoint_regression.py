@@ -3,17 +3,24 @@ from pathlib import Path
 
 import pytest
 
+from config import _path_config
 from profiler.software.analyzer import SoftwareProfiler
 
 
 _DIFY_CHECKPOINT = Path(
-    "repo-profiles/dify/fbacb9f7a279611190f0476256d94dff9a38d991/checkpoints"
+    _path_config["profile_base_path"]
+    / "soft"
+    / "dify"
+    / "fbacb9f7a279611190f0476256d94dff9a38d991"
+    / "checkpoints"
 )
 
 
 def _load_dify_checkpoint():
-    root = Path(__file__).resolve().parents[1]
-    checkpoint_dir = root / _DIFY_CHECKPOINT
+    checkpoint_dir = _DIFY_CHECKPOINT
+    if not checkpoint_dir.is_absolute():
+        root = Path(__file__).resolve().parents[1]
+        checkpoint_dir = root / checkpoint_dir
     if not checkpoint_dir.exists():
         pytest.skip(f"Dify checkpoint not found: {checkpoint_dir}")
 

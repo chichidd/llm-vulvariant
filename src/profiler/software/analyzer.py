@@ -15,7 +15,13 @@ from datetime import datetime
 from llm import BaseLLMClient, create_llm_client, LLMConfig
 from config import _path_config
 from profiler.profile_storage import ProfileStorageManager
-from utils.git_utils import get_git_commit, checkout_commit
+from utils.git_utils import (
+    checkout_commit,
+    get_git_commit,
+    get_git_restore_target,
+    has_uncommitted_changes,
+    restore_git_position,
+)
 from utils.logger import get_logger
 
 from .models import SoftwareProfile, ModuleInfo, DataFlowPattern
@@ -214,9 +220,15 @@ class SoftwareProfiler:
         
         logger.info(f"Starting profile generation for: {repo_name}")
         self._save_config_to_output_dir()
+
+        if target_version and has_uncommitted_changes(str(repo_path)):
+            raise RuntimeError(
+                f"Repository {repo_name} has local changes; please clean/stash before profiling {target_version[:8]}"
+            )
         
         # 获取版本信息
         original_version = get_git_commit(str(repo_path))
+        original_restore_target = get_git_restore_target(str(repo_path))
         changed_commit = False
         if target_version:
             logger.info(f"Target version: {target_version[:8]}...")
@@ -287,12 +299,12 @@ class SoftwareProfiler:
             logger.info(f"Profile generation completed for: {repo_name}")
             return profile
         finally:
-            if changed_commit and original_version:
-                restored = checkout_commit(str(repo_path), original_version)
+            if changed_commit and original_restore_target:
+                restored = restore_git_position(str(repo_path), original_restore_target)
                 if restored:
-                    logger.info(f"Restored repository to original version: {original_version[:8]}...")
+                    logger.info(f"Restored repository to original position: {original_restore_target}")
                 else:
-                    logger.error(f"Failed to restore repository to original version: {original_version[:8]}...")
+                    logger.error(f"Failed to restore repository to original position: {original_restore_target}")
     
     def _generate_profile_full(self, repo_path: Path, repo_name: str, version: str) -> SoftwareProfile:
         """执行完整的profile分析"""

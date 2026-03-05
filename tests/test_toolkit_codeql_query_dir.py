@@ -55,6 +55,7 @@ def _make_toolkit(
     with_memory: bool = True,
     with_template_ymls: bool = True,
     language: str = "python",
+    languages=None,
 ):
     """Build an AgenticToolkit wired to temp directories.
 
@@ -64,16 +65,23 @@ def _make_toolkit(
     repo_path.mkdir()
     # Create a dummy .py so language detection won't be needed
     (repo_path / "main.py").write_text("print('hi')\n")
+    (repo_path / "main.js").write_text("console.log('hi')\n")
 
     output_dir = tmp_path / "output"
     output_dir.mkdir()
 
+    resolved_languages = list(languages or [language])
     template_base = tmp_path / "template_root" / ".codeql-queries" / language
-    template_base.mkdir(parents=True)
+    for lang in resolved_languages:
+        template_dir = tmp_path / "template_root" / ".codeql-queries" / lang
+        template_dir.mkdir(parents=True)
+        if with_template_ymls:
+            (template_dir / "qlpack.yml").write_text("name: test-pack\n")
+            (template_dir / "codeql-pack.lock.yml").write_text("lockfileVersion: 1.0.0\n")
 
     if with_template_ymls:
-        (template_base / "qlpack.yml").write_text("name: test-pack\n")
-        (template_base / "codeql-pack.lock.yml").write_text("lockfileVersion: 1.0.0\n")
+        # Keep reference path used by existing tests.
+        template_base.mkdir(parents=True, exist_ok=True)
 
     memory = FakeMemoryManager(output_dir) if with_memory else None
 
@@ -84,12 +92,12 @@ def _make_toolkit(
 
     with patch("scanner.agent.toolkit._path_config", fake_path_config), \
          patch("scanner.agent.toolkit.CodeQLAnalyzer", FakeCodeQLAnalyzer), \
-         patch("scanner.agent.toolkit.detect_repo_language", return_value=language):
+         patch("scanner.agent.toolkit.detect_repo_languages", return_value=resolved_languages):
         from scanner.agent.toolkit import AgenticToolkit
         tk = AgenticToolkit(
             repo_path=repo_path,
             memory_manager=memory,
-            language=language,
+            languages=languages,
         )
 
     return tk, repo_path, output_dir, template_base
@@ -104,15 +112,15 @@ class TestInitCodeql:
 
     def test_template_dir_points_to_language_subdir(self, tmp_path):
         tk, _, _, template_base = _make_toolkit(tmp_path, language="python")
-        assert tk._codeql_query_template_dir == template_base
+        assert tk._codeql_query_template_dirs["python"] == template_base
 
     def test_query_dir_is_none_after_init(self, tmp_path):
         tk, _, _, _ = _make_toolkit(tmp_path)
-        assert tk._codeql_query_dir is None
+        assert tk._codeql_query_dirs == {}
 
     def test_query_dir_ready_is_false_after_init(self, tmp_path):
         tk, _, _, _ = _make_toolkit(tmp_path)
-        assert tk._codeql_query_dir_ready is False
+        assert tk._codeql_query_dirs_ready == set()
 
 
 class TestSetupQueryDir:
@@ -124,7 +132,7 @@ class TestSetupQueryDir:
         assert result is True
         expected = output_dir / "codeql-queries" / "python"
         assert expected.is_dir()
-        assert tk._codeql_query_dir == expected
+        assert tk._codeql_query_dirs.get("python") == expected
 
     def test_copies_yml_files(self, tmp_path):
         tk, _, output_dir, _ = _make_toolkit(tmp_path)
@@ -147,17 +155,17 @@ class TestSetupQueryDir:
         assert (query_dir / "qlpack.yml").read_text() == "custom content\n"
 
     def test_idempotent_second_call(self, tmp_path):
-        tk, _, output_dir, _ = _make_toolkit(tmp_path)
+        tk, _, _, _ = _make_toolkit(tmp_path)
         assert tk._setup_query_dir() is True
-        first_dir = tk._codeql_query_dir
+        first_dir = tk._codeql_query_dirs.get("python")
         # Second call should return True without re-creating
         assert tk._setup_query_dir() is True
-        assert tk._codeql_query_dir is first_dir
+        assert tk._codeql_query_dirs.get("python") == first_dir
 
     def test_returns_false_without_memory_manager(self, tmp_path):
         tk, _, _, _ = _make_toolkit(tmp_path, with_memory=False)
         assert tk._setup_query_dir() is False
-        assert tk._codeql_query_dir is None
+        assert tk._codeql_query_dirs == {}
 
     def test_works_without_template_ymls(self, tmp_path):
         tk, _, output_dir, _ = _make_toolkit(tmp_path, with_template_ymls=False)
@@ -174,7 +182,7 @@ class TestSetupQueryDir:
         tk._setup_query_dir()
         expected = output_dir / "codeql-queries" / "go"
         assert expected.is_dir()
-        assert tk._codeql_query_dir == expected
+        assert tk._codeql_query_dirs.get("go") == expected
 
 
 class TestEnsureQueryPack:
@@ -197,7 +205,7 @@ class TestEnsureQueryPack:
 
         # Manually create qlpack.yml so we skip the get_codeql_pack path
         tk._setup_query_dir()
-        (tk._codeql_query_dir / "qlpack.yml").write_text("name: test\n")
+        (tk._codeql_query_dirs["python"] / "qlpack.yml").write_text("name: test\n")
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -218,7 +226,7 @@ class TestRunCodeqlQuery:
 
         # Create a fake database so path check passes
         db_name = "test-db-python"
-        tk._codeql_database_name = db_name
+        tk._codeql_database_names = {"python": db_name}
         db_dir = tk._codeql_db_base_path / db_name
         db_dir.mkdir(parents=True)
 
@@ -234,7 +242,7 @@ class TestRunCodeqlQuery:
     def test_query_name_sanitized_in_filename(self, tmp_path):
         tk, _, output_dir, _ = _make_toolkit(tmp_path)
         db_name = "test-db-python"
-        tk._codeql_database_name = db_name
+        tk._codeql_database_names = {"python": db_name}
         (tk._codeql_db_base_path / db_name).mkdir(parents=True)
 
         result = tk._run_codeql_query(
@@ -247,7 +255,7 @@ class TestRunCodeqlQuery:
 
     def test_fails_without_database(self, tmp_path):
         tk, _, _, _ = _make_toolkit(tmp_path)
-        tk._codeql_database_name = "nonexistent-db"
+        tk._codeql_database_names = {"python": "nonexistent-db"}
         result = tk._run_codeql_query(query="select 1", query_name="test")
         assert result.success is False
         assert "not found" in result.error.lower()
@@ -278,22 +286,70 @@ class TestSetMemoryManagerLate:
         assert expected.is_dir()
         assert (expected / "qlpack.yml").exists()
 
+
+class TestMultiLanguageBehavior:
+    def test_iter_source_files_uses_all_configured_languages(self, tmp_path):
+        tk, repo_path, _, _ = _make_toolkit(
+            tmp_path,
+            language="python",
+            languages=["python", "javascript"],
+        )
+        files = sorted(
+            str(path.relative_to(repo_path))
+            for path in tk._iter_source_files(repo_path, recursive=False)
+        )
+        assert files == ["main.js", "main.py"]
+
+    def test_run_codeql_query_routes_to_matching_language_database(self, tmp_path):
+        tk, _, output_dir, _ = _make_toolkit(
+            tmp_path,
+            language="python",
+            languages=["python", "javascript"],
+        )
+
+        db_python = "test-db-python"
+        db_js = "test-db-javascript"
+        (tk._codeql_db_base_path / db_python).mkdir(parents=True)
+        (tk._codeql_db_base_path / db_js).mkdir(parents=True)
+        tk._codeql_database_names = {
+            "python": db_python,
+            "javascript": db_js,
+        }
+
+        captured = {}
+
+        def fake_run_query(database_path, query, output_format="sarif-latest"):
+            captured["database_path"] = database_path
+            captured["query"] = query
+            captured["output_format"] = output_format
+            return True, {"runs": [{"results": []}]}
+
+        tk._codeql_analyzer = SimpleNamespace(run_query=fake_run_query)
+
+        result = tk._run_codeql_query(query="import javascript\nselect 1", query_name="js_query")
+
+        assert result.success is True
+        normalized_query_path = captured["query"].replace("\\", "/")
+        assert captured["database_path"].endswith(db_js)
+        assert "/codeql-queries/javascript/js_query.ql" in normalized_query_path
+        assert (output_dir / "codeql-queries" / "javascript" / "js_query.ql").exists()
+
     def test_switch_memory_manager_rebuilds_query_dir_under_new_output(self, tmp_path):
         tk, _, first_output_dir, _ = _make_toolkit(tmp_path, with_memory=True)
         assert tk._setup_query_dir() is True
 
         first_query_dir = first_output_dir / "codeql-queries" / "python"
-        assert tk._codeql_query_dir == first_query_dir
-        assert tk._codeql_query_dir_ready is True
+        assert tk._codeql_query_dirs.get("python") == first_query_dir
+        assert "python" in tk._codeql_query_dirs_ready
 
         second_output_dir = tmp_path / "second_output"
         second_output_dir.mkdir()
         tk.set_memory_manager(FakeMemoryManager(second_output_dir))
 
-        assert tk._codeql_query_dir is None
-        assert tk._codeql_query_dir_ready is False
+        assert tk._codeql_query_dirs == {}
+        assert tk._codeql_query_dirs_ready == set()
 
         assert tk._setup_query_dir() is True
         second_query_dir = second_output_dir / "codeql-queries" / "python"
-        assert tk._codeql_query_dir == second_query_dir
+        assert tk._codeql_query_dirs.get("python") == second_query_dir
         assert second_query_dir.is_dir()

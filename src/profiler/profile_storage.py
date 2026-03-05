@@ -32,7 +32,7 @@ class ProfileStorageManager:
         Initialize the storage manager.
 
         Args:
-            base_dir: Base storage directory (e.g., repo-profiles/ or vuln-profiles/)
+            base_dir: Base storage directory (e.g., ~/vuln/profiles/soft or ~/vuln/profiles/vuln)
             profile_type: Profile type label used in log messages.
         """
         self.base_dir = Path(base_dir) if base_dir else None

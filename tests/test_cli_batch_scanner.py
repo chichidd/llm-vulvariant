@@ -1,5 +1,7 @@
+from argparse import Namespace
+
 from profiler.software.models import ModuleInfo, SoftwareProfile
-from scanner.similarity.retriever import ProfileRef, ProfileSimilarityMetrics
+from scanner.similarity.retriever import ProfileRef, ProfileSimilarityMetrics, SimilarProfileCandidate
 
 import cli.batch_scanner as batch_scanner
 
@@ -75,3 +77,71 @@ def test_select_similar_targets_fallback_top_n_when_all_below_threshold(monkeypa
 
     assert fallback_used is True
     assert [item.profile_ref.repo_name for item in selected] == ["repo-a", "repo-b"]
+
+
+def test_resolve_profile_dirs_from_args_with_relative_dirnames(tmp_path):
+    args = Namespace(
+        profile_base_path=str(tmp_path / "profiles"),
+        soft_profiles_dir="soft",
+        vuln_profiles_dir="vuln",
+    )
+
+    soft_dir, vuln_dir = batch_scanner._resolve_profile_dirs_from_args(args)
+
+    assert soft_dir == tmp_path / "profiles" / "soft"
+    assert vuln_dir == tmp_path / "profiles" / "vuln"
+
+
+def test_resolve_profile_dirs_from_args_with_absolute_paths(tmp_path):
+    soft_abs = tmp_path / "custom-soft"
+    vuln_abs = tmp_path / "custom-vuln"
+    args = Namespace(
+        profile_base_path=str(tmp_path / "profiles"),
+        soft_profiles_dir=str(soft_abs),
+        vuln_profiles_dir=str(vuln_abs),
+    )
+
+    soft_dir, vuln_dir = batch_scanner._resolve_profile_dirs_from_args(args)
+
+    assert soft_dir == soft_abs
+    assert vuln_dir == vuln_abs
+
+
+def test_run_target_scan_passes_profile_base_path_and_dirname(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_single_target_scan(*, args, vulnerability_profile, llm_client, target):
+        captured["profile_base_path"] = getattr(args, "profile_base_path", None)
+        captured["software_profile_dirname"] = getattr(args, "software_profile_dirname", None)
+        return True
+
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_run_single_target_scan", fake_run_single_target_scan)
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+
+    ok = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        repo_profiles_dir=tmp_path / "profiles" / "soft-nvidia",
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert ok is True
+    assert captured["profile_base_path"] == str(tmp_path / "profiles")
+    assert captured["software_profile_dirname"] == "soft-nvidia"
