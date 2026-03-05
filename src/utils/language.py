@@ -8,7 +8,7 @@ here instead of hard-coding values.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 
 # ──────────────────────────────────────────────
@@ -159,16 +159,10 @@ def get_run_cmd(language: str) -> str:
     return LANGUAGE_CONFIG[language]["run_cmd"]
 
 
-def detect_language(repo_path: Path) -> str:
-    """Detect the primary programming language of a repository.
-
-    Strategy:
-    1. Check for language-specific indicator files (weighted higher).
-    2. Count source files by extension.
-    3. Return the language with the highest score; falls back to ``"python"``
-       only if *nothing* is detected (empty repository).
-    """
+def _collect_language_scores(repo_path: Path) -> Tuple[Dict[str, float], Dict[str, int]]:
+    """Collect weighted language scores and per-language file counts."""
     scores: Dict[str, float] = {lang: 0.0 for lang in LANGUAGE_CONFIG}
+    file_counts: Dict[str, int] = {lang: 0 for lang in LANGUAGE_CONFIG}
 
     # Indicator-file bonus
     INDICATOR_WEIGHT = 15
@@ -181,7 +175,6 @@ def detect_language(repo_path: Path) -> str:
     IGNORED_DIRS = {".git", "node_modules", "__pycache__", "build", "dist",
                     ".tox", "venv", ".venv", "vendor", "third_party"}
 
-
     for root, dirs, files in __import__("os").walk(repo_path):
         dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
         for fname in files:
@@ -189,9 +182,37 @@ def detect_language(repo_path: Path) -> str:
             for lang, cfg in LANGUAGE_CONFIG.items():
                 if ext in cfg["extensions"]:
                     scores[lang] += 1
+                    file_counts[lang] += 1
                     break  # one file counted once
 
-    best = max(scores, key=scores.get)  # type: ignore[arg-type]
-    if scores[best] == 0:
-        return "python"  # truly empty / unrecognised → safe fallback
-    return best
+    return scores, file_counts
+
+
+def detect_languages(repo_path: Path, limit: Optional[int] = None) -> List[str]:
+    """Detect all programming languages present in a repository (ranked).
+
+    Languages are ranked by indicator-file + extension-count score.
+    """
+    scores, _ = _collect_language_scores(repo_path)
+    ranked = [
+        lang
+        for lang, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        if score > 0
+    ]
+    if not ranked:
+        ranked = ["python"]  # truly empty / unrecognised → safe fallback
+    if limit is not None:
+        return ranked[:max(limit, 0)]
+    return ranked
+
+
+def detect_language(repo_path: Path) -> str:
+    """Detect the primary programming language of a repository.
+
+    Strategy:
+    1. Check for language-specific indicator files (weighted higher).
+    2. Count source files by extension.
+    3. Return the language with the highest score; falls back to ``"python"``
+       only if *nothing* is detected (empty repository).
+    """
+    return detect_languages(repo_path, limit=1)[0]

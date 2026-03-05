@@ -179,7 +179,7 @@ When identifying modules, classify each module according to the following AI Inf
 {{
   "name": "Data Preprocessing",
   "category": "data_knowledge.preprocess_tokenization",
-  "paths": ["src/data/preprocessing"],
+  "files": ["src/data/preprocessing"],
   "key_functions": ["tokenize", "normalize"],
   "dependencies": ["transformers", "numpy"],
   "purpose": "Handles text tokenization and normalization for model input"

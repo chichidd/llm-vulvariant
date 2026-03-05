@@ -9,7 +9,7 @@ import json
 import re
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from llm import BaseLLMClient, create_llm_client, LLMConfig
@@ -331,7 +331,7 @@ class SoftwareProfiler:
                 
             self.repo_analyzer = RepoAnalyzer(
                 repo_path=str(repo_path),
-                language=self.repo_analyzer_config.get('language'),
+                languages=self.repo_analyzer_config.get('languages'),
                 cache_dir=str(cache_dir) if cache_dir else None,
                 max_slice_depth=self.repo_analyzer_config.get('max_slice_depth'),
                 max_slice_files=self.repo_analyzer_config.get('max_slice_files'),
@@ -395,7 +395,11 @@ class SoftwareProfiler:
             
             base_modules = modules_result.get('modules', []) if modules_result else []
             logger.debug(f"[DEBUG] Base modules: {len(base_modules)}, first type: {type(base_modules[0]).__name__ if base_modules else 'N/A'}")
-            modules = self._enhance_modules_with_repo_analysis(base_modules, repo_info['repo_analysis'])
+            modules = self._enhance_modules_with_repo_analysis(
+                base_modules,
+                repo_info['repo_analysis'],
+                repo_files=repo_info.get('files', []),
+            )
             logger.debug(f"[DEBUG] Enhanced modules: {len(modules)}, first type: {type(modules[0]).__name__ if modules else 'N/A'}")
             if modules:
                 logger.debug(f"[DEBUG] First module enhanced data - external_deps: {len(modules[0].external_dependencies)}, called_by: {len(modules[0].called_by_modules)}, calls: {len(modules[0].calls_modules)}")
@@ -428,6 +432,7 @@ class SoftwareProfiler:
         self,
         base_modules: List[Dict],
         repo_analysis: Dict,
+        repo_files: Optional[List[str]] = None,
     ) -> List[ModuleInfo]:
         """用 CodeQL 静态分析数据增强模块信息"""
         modules = []
@@ -443,7 +448,14 @@ class SoftwareProfiler:
         
         call_graph_edges = repo_analysis.get('call_graph_edges', [])
         dependencies = repo_analysis.get('dependencies', [])
-        all_files = list(functions_by_file.keys())
+        normalized_repo_files: List[str] = []
+        for raw_file in (repo_files or []):
+            if not isinstance(raw_file, str):
+                continue
+            file_path = raw_file.replace('\\', '/').strip()
+            if file_path:
+                normalized_repo_files.append(file_path)
+        all_files = sorted(set(functions_by_file.keys()) | set(normalized_repo_files))
         all_files_set = set(all_files)
         
         # 构建模块名到文件的映射
@@ -480,6 +492,16 @@ class SoftwareProfiler:
         for module_name, files in module_name_to_files.items():
             for file in files:
                 file_to_module[file] = module_name
+
+        # 按文件索引调用边，避免在模块循环中重复全量扫描 call_graph_edges。
+        edges_by_file: Dict[str, List[Dict]] = {}
+        for edge in call_graph_edges:
+            caller_file = edge.get('caller_file', '')
+            callee_file = edge.get('callee_file', '')
+            if caller_file:
+                edges_by_file.setdefault(caller_file, []).append(edge)
+            if callee_file and callee_file != caller_file:
+                edges_by_file.setdefault(callee_file, []).append(edge)
         
         # 构建依赖关系图（外部依赖）
         dependencies_by_file = {}
@@ -508,27 +530,39 @@ class SoftwareProfiler:
         for module in base_modules:
             module_name = module.get('name', '')
             module_files = module_name_to_files.get(module_name, [])
+            module_file_set = set(module_files)
             
             # 提取模块级别的函数和调用图
             module_functions = []
             module_call_graph = []
             
-            for file_path in module_files:
+            for file_path in module_file_set:
                 # 直接添加该文件中的所有函数
                 if file_path in functions_by_file:
                     module_functions.extend(functions_by_file[file_path])
-                
-                for edge in call_graph_edges:
-                    caller_file = edge.get('caller_file', '')
-                    callee_file = edge.get('callee_file', '')
-                    if caller_file in module_files or callee_file in module_files:
-                        module_call_graph.append(edge)
+
+            seen_module_edges = set()
+            for file_path in module_file_set:
+                for edge in edges_by_file.get(file_path, []):
+                    edge_key = (
+                        edge.get('caller', ''),
+                        edge.get('caller_file', ''),
+                        edge.get('caller_line', 0),
+                        edge.get('callee', ''),
+                        edge.get('callee_file', ''),
+                        edge.get('callee_line', 0),
+                        edge.get('call_site_line', 0),
+                    )
+                    if edge_key in seen_module_edges:
+                        continue
+                    seen_module_edges.add(edge_key)
+                    module_call_graph.append(edge)
             
             # 函数名 + 该模块函数调用的 API 名称（例如 C/C++ stdlib）共同参与模式检测
             pattern_candidates = list(module_functions)
             outgoing_callee_names = set()
             for edge in module_call_graph:
-                if edge.get('caller_file', '') not in module_files:
+                if edge.get('caller_file', '') not in module_file_set:
                     continue
                 callee_name = edge.get('callee', '')
                 if callee_name and callee_name != '<module>':
@@ -557,13 +591,13 @@ class SoftwareProfiler:
                 callee_file = edge.get('callee_file', '')
                 
                 # 如果当前模块的文件被调用
-                if callee_file in module_files and caller_file in file_to_module:
+                if callee_file in module_file_set and caller_file in file_to_module:
                     caller_module = file_to_module[caller_file]
                     if caller_module != module_name:
                         called_by_modules.add(caller_module)
                 
                 # 如果当前模块调用了其他模块
-                if caller_file in module_files and callee_file in file_to_module:
+                if caller_file in module_file_set and callee_file in file_to_module:
                     callee_module = file_to_module[callee_file]
                     if callee_module != module_name:
                         calls_modules.add(callee_module)
@@ -584,6 +618,7 @@ class SoftwareProfiler:
             
             enhanced_module = ModuleInfo(
                 name=module_name,
+                category=module.get('category', ''),
                 description=module.get('description', ''),
                 files=module_files,
                 key_functions=module.get('key_functions', []),

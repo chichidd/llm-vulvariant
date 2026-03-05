@@ -38,7 +38,6 @@ class ModuleInfo:
     files: List[str] = field(default_factory=list)
     
     # 功能特征（从 RepoAnalyzer 提取）
-    public_apis: List[str] = field(default_factory=list)              # 对外接口（函数/类）
     key_functions: List[str] = field(default_factory=list)            # 关键函数
     
     # 数据流特征
@@ -60,7 +59,6 @@ class ModuleInfo:
             "category": self.category,
             "description": self.description,
             "files": self.files,
-            "public_apis": self.public_apis,
             "key_functions": self.key_functions,
             "data_sources": self.data_sources,
             "data_formats": self.data_formats,
@@ -70,9 +68,6 @@ class ModuleInfo:
             "called_by_modules": self.called_by_modules,
             "calls_modules": self.calls_modules,
         }
-        # Keep compatibility with module analyzer output schema.
-        data["paths"] = self.files
-        data["dependencies"] = self.internal_dependencies
         return data
     
     @classmethod
@@ -81,14 +76,13 @@ class ModuleInfo:
             name=data.get("name", ""),
             category=data.get("category", ""),
             description=data.get("description", ""),
-            files=data.get("files", data.get("paths", [])),
-            public_apis=data.get("public_apis", []),
+            files=data.get("files", []),
             key_functions=data.get("key_functions", []),
             data_sources=data.get("data_sources", []),
             data_formats=data.get("data_formats", []),
             processing_operations=data.get("processing_operations", []),
             external_dependencies=data.get("external_dependencies", []),
-            internal_dependencies=data.get("internal_dependencies", data.get("dependencies", [])),
+            internal_dependencies=data.get("internal_dependencies", []),
             called_by_modules=data.get("called_by_modules", []),
             calls_modules=data.get("calls_modules", []),
         )

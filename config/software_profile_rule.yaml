@@ -369,8 +369,9 @@ module_analyzer_config:
 
 # RepoAnalyzer 深度静态分析配置
 repo_analyzer_config:
-  # 编程语言（"auto" 为自动检测，或指定 "python", "javascript" 等）
-  language: auto
+  # 语言配置：支持 "auto"（自动检测）或显式列表（按优先级）
+  languages: auto
+  # languages: ["python", "javascript"]
   
   # 数据流切片最大深度
   max_slice_depth: 3

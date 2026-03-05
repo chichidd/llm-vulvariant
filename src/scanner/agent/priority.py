@@ -52,7 +52,7 @@ def calculate_module_priorities(
             called_by = set(getattr(m, 'called_by_modules', []) or [])
         elif isinstance(m, dict):
             name = m.get('name', '')
-            files = m.get('files', m.get('paths', []))
+            files = m.get('files', [])
             calls = set(m.get('calls_modules', []))
             called_by = set(m.get('called_by_modules', []))
         else:

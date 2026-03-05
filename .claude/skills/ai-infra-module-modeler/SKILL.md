@@ -50,9 +50,9 @@ Typical inputs:
      --max-files 20000 \
      --max-bytes 200000 \
      --group-depth <to-be-determined> \
-     --llm-provider lab \
+     --llm-provider deepseek \
      --max-workers 10 \
-     --llm-model "DeepSeek-V3.2"
+     --llm-model "deepseek-chat"
    ```
    - Use `--require-llm` to fail fast if the LLM is unavailable or returns invalid JSON.
    - Adjust grouping with `--group-depth`, `--group-sample-files`, `--group-snippets`, `--snippet-bytes`, `--batch-size`. Choose `--group-depth` based on repository structure to balance runtime and classification accuracy.

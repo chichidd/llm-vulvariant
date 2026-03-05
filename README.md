@@ -123,7 +123,7 @@ pip install transformers sentence-transformers torch
   - `skill`（默认，使用 `.claude/skills/ai-infra-module-modeler`）
   - `agent`
 - `repo_analyzer_config`:
-  - `language`
+  - `languages`（支持 `"auto"` 或多语言列表）
   - `max_slice_depth`
   - `max_slice_files`
 - 文件扫描范围:

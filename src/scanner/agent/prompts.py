@@ -106,7 +106,7 @@ def build_initial_user_message(
         key_modules.append({
             "name": module.get("name"),
             "priority": priority_label,
-            "files": module.get("files", module.get("paths", []))[:5],
+            "files": module.get("files", [])[:5],
             "description": module.get("description", "")[:150],
             "key_functions": module.get("key_functions", [])[:5],
             "external_dependencies": module.get("external_dependencies", [])[:5],

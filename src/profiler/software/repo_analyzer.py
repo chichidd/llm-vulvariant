@@ -8,7 +8,7 @@ Capabilities:
 5. Entry point detection: identify HTTP endpoints, CLI entries, etc.
 
 Example:
-    analyzer = RepoAnalyzer("/path/to/repo", language="python")
+    analyzer = RepoAnalyzer("/path/to/repo", languages=["python"])
 
     # Get call graph
     call_graph = analyzer.call_graph
@@ -24,15 +24,12 @@ import os
 import pickle
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Dict, List, Optional, Any, Set, Tuple, Union
 from dataclasses import dataclass, field, asdict
 from collections import defaultdict
 
 from utils.codeql_native import CodeQLAnalyzer, load_codeql_config, CallGraphEdge
 from utils.git_utils import get_git_commit
-
-from pathlib import Path
-from typing import Dict, Any, Optional
 
 from utils.logger import get_logger
 
@@ -196,7 +193,7 @@ class RepoAnalyzer:
 
     Args:
         repo_path: Repository path
-        language: Language (auto, python, cpp)
+        languages: Optional explicit language config ("auto" or list)
         cache_dir: Cache directory
         max_slice_depth: Max program slice depth (default: 3)
         max_slice_files: Max number of files in a slice (default: 10)
@@ -206,7 +203,7 @@ class RepoAnalyzer:
     def __init__(
         self,
         repo_path: str,
-        language: str = "auto",
+        languages: Optional[Union[str, List[str]]] = "auto",
         cache_dir: Optional[str] = None,
         max_slice_depth: int = 3,
         max_slice_files: int = 10,
@@ -219,14 +216,11 @@ class RepoAnalyzer:
         
         self.max_slice_depth = max_slice_depth
         self.max_slice_files = max_slice_files
-        
-        # Auto-detect language
-        if language == "auto":
-            self.language = self._detect_language()
-        else:
-            self.language = language
-        
-        logger.info(f"Detected language: {self.language}")
+
+        # Resolve analysis languages (multi-language aware).
+        self.languages = self._resolve_languages(languages=languages)
+        self.language = self.languages[0] if self.languages else "python"
+        logger.info(f"Detected languages: {', '.join(self.languages)}")
         
         # Set cache directory
         if cache_dir is None:
@@ -264,9 +258,21 @@ class RepoAnalyzer:
                              "Please install from https://github.com/github/codeql-cli-binaries/releases")
         
         logger.info(f"Using CodeQL version: {self.codeql_analyzer.version}")
+
+        supported = set(self.codeql_analyzer.SUPPORTED_LANGUAGES.keys())
+        self.codeql_languages = [lang for lang in self.languages if lang in supported]
+        if not self.codeql_languages:
+            logger.warning(
+                "No CodeQL-supported languages detected in %s. Call graph/function extraction will be skipped.",
+                self.repo_path,
+            )
+        elif len(self.codeql_languages) != len(self.languages):
+            skipped = [lang for lang in self.languages if lang not in supported]
+            logger.info("Skipping unsupported CodeQL languages: %s", ", ".join(skipped))
         
         # Data storage
         self._call_graph_edges: List[CallGraphEdge] = []
+        self._codeql_db_paths: Dict[str, str] = {}
         self._functions: Dict[str, FunctionInfo] = {}
         self._functions_by_name: Dict[str, List[str]] = defaultdict(list)
         self._function_key_index: Dict[Tuple[str, str, int], str] = {}
@@ -276,7 +282,12 @@ class RepoAnalyzer:
         self._load_or_build(rebuild_cache)
     
     def get_info(self):
+        active_codeql_languages = list(getattr(self, '_codeql_db_paths', {}).keys())
+        if not active_codeql_languages:
+            active_codeql_languages = list(getattr(self, 'codeql_languages', []))
         info = {
+            'languages': list(getattr(self, 'languages', []) or [getattr(self, 'language', 'python')]),
+            'codeql_languages': active_codeql_languages,
             'call_graph_edges': [],
             'functions': [],
             'dependencies': []
@@ -334,16 +345,57 @@ class RepoAnalyzer:
         logger.info(f"Deep analysis completed successfully")
         return info
     
-    def _detect_language(self) -> str:
-        """Auto-detect the repository's primary language."""
-        from utils.language import detect_language
-        return detect_language(self.repo_path)
+    @staticmethod
+    def _dedupe_preserve_order(items: List[str]) -> List[str]:
+        seen = set()
+        ordered: List[str] = []
+        for item in items:
+            if item and item not in seen:
+                seen.add(item)
+                ordered.append(item)
+        return ordered
+
+    def _detect_languages(self) -> List[str]:
+        """Auto-detect repository languages ranked by relevance."""
+        from utils.language import detect_languages
+
+        langs = detect_languages(self.repo_path)
+        return langs or ["python"]
+
+    def _resolve_languages(
+        self,
+        languages: Optional[Union[str, List[str]]],
+    ) -> List[str]:
+        """Resolve configured analysis languages into a canonical list."""
+        if languages is not None:
+            if isinstance(languages, str):
+                normalized_value = languages.strip().lower()
+                if not normalized_value or normalized_value == "auto":
+                    return self._detect_languages()
+                return [normalized_value]
+
+            if isinstance(languages, list):
+                normalized = [
+                    str(lang).strip().lower()
+                    for lang in languages
+                    if isinstance(lang, str) and str(lang).strip()
+                ]
+                normalized = self._dedupe_preserve_order(normalized)
+                normalized = [lang for lang in normalized if lang != "auto"]
+                return normalized or self._detect_languages()
+
+            logger.warning(
+                "Invalid `languages` type (%s), fallback to auto-detection.",
+                type(languages).__name__,
+            )
+        return self._detect_languages()
     
 
     def _load_or_build(self, rebuild: bool = False, cache_path: Optional[Path] = None):
         """Load cache or rebuild analysis data."""
         if cache_path is None:
-            cache_path = self.cache_dir / f"{self.repo_path.name}-{self.commit_hash[:8]}-{self.language}.pkl"
+            language_key = "-".join(self.languages) if self.languages else self.language
+            cache_path = self.cache_dir / f"{self.repo_path.name}-{self.commit_hash[:8]}-{language_key}.pkl"
         
         # Try loading cache
         if not rebuild and cache_path.exists():
@@ -353,10 +405,18 @@ class RepoAnalyzer:
                     cache_data = pickle.load(f)
                 
                 self._call_graph_edges = cache_data['call_graph_edges']
+                self._codeql_db_paths = cache_data.get('codeql_db_paths', {})
                 self._functions = cache_data['functions']
                 self._functions_by_name = cache_data.get('functions_by_name', defaultdict(list))
                 self._function_key_index = cache_data.get('function_key_index', {})
                 self._dependencies = cache_data['dependencies']
+                cached_languages = cache_data.get('languages')
+                if isinstance(cached_languages, list):
+                    self.languages = self._dedupe_preserve_order(
+                        [str(lang).strip().lower() for lang in cached_languages if str(lang).strip()]
+                    ) or self.languages
+                    if self.languages:
+                        self.language = self.languages[0]
 
                 self._rebuild_function_indexes()
 
@@ -379,7 +439,9 @@ class RepoAnalyzer:
         """Persist current analysis cache to disk."""
         try:
             cache_data = {
+                'languages': self.languages,
                 'call_graph_edges': self._call_graph_edges,
+                'codeql_db_paths': self._codeql_db_paths,
                 'functions': self._functions,
                 'functions_by_name': dict(self._functions_by_name),
                 'function_key_index': self._function_key_index,
@@ -441,21 +503,29 @@ class RepoAnalyzer:
     
     def _build_analysis(self):
         """Build the full analysis dataset."""
-        # Step 1: Create CodeQL database
-        logger.info("[1/4] Creating CodeQL database...")
-        db_name = f"{self.repo_path.name}-{self.commit_hash[:8]}-{self.language}"
-        success, db_path = self.codeql_analyzer.create_database(
-            source_path=str(self.repo_path),
-            language=self.language,
-            database_name=db_name,
-            overwrite=False
-        )
-        
-        if not success:
-            raise RuntimeError(f"Failed to create CodeQL database: {db_path}")
-        
-        self.db_path = db_path
-        logger.info(f"    Database created: {db_path}")
+        # Step 1: Create CodeQL databases (one per detected language)
+        logger.info("[1/4] Creating CodeQL database(s)...")
+        self._codeql_db_paths = {}
+        db_errors: Dict[str, str] = {}
+
+        for lang in self.codeql_languages:
+            db_name = f"{self.repo_path.name}-{self.commit_hash[:8]}-{lang}"
+            success, db_path_or_error = self.codeql_analyzer.create_database(
+                source_path=str(self.repo_path),
+                language=lang,
+                database_name=db_name,
+                overwrite=False,
+            )
+            if success:
+                self._codeql_db_paths[lang] = db_path_or_error
+                logger.info("    Database created [%s]: %s", lang, db_path_or_error)
+            else:
+                db_errors[lang] = db_path_or_error
+                logger.warning("    Failed to create database for %s: %s", lang, db_path_or_error)
+
+        if self.codeql_languages and not self._codeql_db_paths:
+            detail = "; ".join(f"{lang}={err}" for lang, err in sorted(db_errors.items()))
+            raise RuntimeError(f"Failed to create CodeQL database(s): {detail}")
         
         # Step 2: Build call graph
         logger.info("[2/4] Building call graph...")
@@ -477,19 +547,41 @@ class RepoAnalyzer:
     
     def _build_call_graph(self):
         """Build the call graph (using CodeQL)."""
-        try:
-            logger.info(f"Building call graph with CodeQL for database: {self.db_path}")
-            self._call_graph_edges = self.codeql_analyzer._build_call_graph(
-                self.db_path,
-                self.language
-            )
-            logger.info(f"CodeQL returned {len(self._call_graph_edges)} call graph edges")
-        except Exception as e:
-            logger.warning(f"Failed to build call graph via CodeQL: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
+        merged_edges: List[CallGraphEdge] = []
+        seen_edge_keys = set()
+
+        if not self._codeql_db_paths:
+            logger.info("No CodeQL database available; call graph will be empty.")
             self._call_graph_edges = []
-    
+            return
+
+        for lang, db_path in self._codeql_db_paths.items():
+            try:
+                logger.info("Building call graph with CodeQL for %s database: %s", lang, db_path)
+                language_edges = self.codeql_analyzer._build_call_graph(db_path, lang)
+                logger.info("CodeQL returned %s call graph edges for %s", len(language_edges), lang)
+                for edge in language_edges:
+                    key = (
+                        edge.caller_name,
+                        edge.caller_file,
+                        int(edge.caller_line or 0),
+                        edge.callee_name,
+                        edge.callee_file,
+                        int(edge.callee_line or 0),
+                        int(edge.call_site_line or 0),
+                    )
+                    if key in seen_edge_keys:
+                        continue
+                    seen_edge_keys.add(key)
+                    merged_edges.append(edge)
+            except Exception as e:
+                logger.warning(f"Failed to build call graph via CodeQL for {lang}: {e}")
+                import traceback
+
+                logger.debug(traceback.format_exc())
+
+        self._call_graph_edges = merged_edges
+
 
     
     def _extract_functions(self):
@@ -545,8 +637,15 @@ class RepoAnalyzer:
         self._dependencies = {}
         self._reset_dependency_analysis_caches()
 
-        # Build set of extensions to scan for this language
-        lang_exts = get_extensions(self.language)
+        # Build set of extensions to scan for all active languages
+        active_languages = getattr(self, "languages", None) or [getattr(self, "language", "python")]
+        lang_exts: Set[str] = set()
+        for lang in active_languages:
+            try:
+                lang_exts |= get_extensions(lang)
+            except ValueError:
+                logger.debug("Skip unsupported dependency language: %s", lang)
+                continue
 
         for root, dirs, files in os.walk(self.repo_path):
             dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__', 'node_modules'}]
