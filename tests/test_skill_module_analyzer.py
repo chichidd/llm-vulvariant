@@ -26,10 +26,7 @@ def test_skill_build_modules_fallback_keeps_paths_and_files_consistent():
     assert modules
 
     for module in modules:
-        assert "paths" in module
         assert "files" in module
-        assert sorted(module["paths"]) == sorted(module["files"])
-
 
 def test_skill_attach_dependencies_supports_modules_without_paths_field():
     analyzer = SkillModuleAnalyzer()

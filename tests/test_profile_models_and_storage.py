@@ -12,7 +12,7 @@ from profiler.vulnerability.models import (
 )
 
 
-def test_moduleinfo_to_dict_and_from_dict_compat_fields():
+def test_moduleinfo_to_dict_and_from_dict_fields():
     module = ModuleInfo(
         name="api",
         files=["src/api.py"],
@@ -21,10 +21,10 @@ def test_moduleinfo_to_dict_and_from_dict_compat_fields():
     )
 
     data = module.to_dict()
-    assert data["paths"] == ["src/api.py"]
-    assert data["dependencies"] == ["core"]
+    assert data["internal_dependencies"] == ["core"]
+    assert "dependencies" not in data
 
-    restored = ModuleInfo.from_dict({"name": "x", "paths": ["a.py"], "dependencies": ["b"]})
+    restored = ModuleInfo.from_dict({"name": "x", "files": ["a.py"], "internal_dependencies": ["b"]})
     assert restored.files == ["a.py"]
     assert restored.internal_dependencies == ["b"]
 
