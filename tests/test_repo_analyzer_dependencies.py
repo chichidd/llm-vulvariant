@@ -112,6 +112,30 @@ def test_analyze_dependencies_extracts_cpp_headers(tmp_path):
     assert "utils" not in analyzer._dependencies
 
 
+def test_analyze_dependencies_classifies_cpp_stdlib_as_builtin(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.cpp").write_text(
+        '#include <stdio.h>\n'
+        '#include <vector>\n'
+        '#include <string>\n'
+        '#include <cuda_runtime.h>\n',
+        encoding="utf-8",
+    )
+
+    analyzer = _build_analyzer(repo, language="cpp")
+    analyzer._analyze_dependencies()
+
+    assert "stdio" in analyzer._dependencies
+    assert "vector" in analyzer._dependencies
+    assert "string" in analyzer._dependencies
+    assert analyzer._dependencies["stdio"].is_builtin is True
+    assert analyzer._dependencies["vector"].is_builtin is True
+    assert analyzer._dependencies["string"].is_builtin is True
+    assert analyzer._dependencies["cuda_runtime"].is_builtin is False
+    assert analyzer._dependencies["cuda_runtime"].is_third_party is True
+
+
 def test_analyze_dependencies_filters_repo_namespace_in_cpp(tmp_path):
     repo = tmp_path / "TensorRT-LLM"
     repo.mkdir()

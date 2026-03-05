@@ -97,6 +97,7 @@ TEXT_EXTS = {
     ".py", ".pyi", ".md", ".rst", ".txt", ".toml", ".ini", ".cfg", ".json", ".yaml", ".yml",
     ".sh", ".bash", ".ps1", ".go", ".rs", ".java", ".kt", ".scala", ".c", ".cc", ".cpp",
     ".h", ".hpp", ".cu", ".cuh", ".cmake", ".gradle", ".dockerfile",
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
 }
 
 # A small set of "high-signal" files to read even if extension is unknown.
@@ -494,7 +495,7 @@ def build_module_profile(file_index: Dict[str, str]) -> List[Dict[str, Any]]:
             "name": module_name,
             "category": coarse,
             "description": _describe_module(module_name, files),
-            "paths": sorted(set(files)),
+            "files": sorted(set(files)),
         }
         modules.append(module)
     return modules

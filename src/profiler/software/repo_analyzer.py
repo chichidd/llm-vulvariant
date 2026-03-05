@@ -58,6 +58,29 @@ NODE_BUILTIN_MODULES = {
 
 RUBY_BUILTINS = {'json', 'set', 'time', 'uri', 'yaml', 'pathname', 'fileutils', 'tempfile', 'digest', 'date', 'csv'}
 
+# C/C++ standard library headers normalized to Path(...).stem used by _normalize_dependency_name.
+# Example: stdio.h -> stdio, vector -> vector
+C_CPP_BUILTIN_HEADERS = {
+    # C standard library (and common C++ wrappers)
+    'assert', 'cassert', 'ctype', 'cctype', 'errno', 'cerrno', 'fenv', 'cfenv', 'float', 'cfloat',
+    'inttypes', 'cinttypes', 'iso646', 'limits', 'climits', 'locale', 'clocale', 'math', 'cmath',
+    'setjmp', 'csetjmp', 'signal', 'csignal', 'stdarg', 'cstdarg', 'stdbool', 'cstdbool',
+    'stddef', 'cstddef', 'stdint', 'cstdint', 'stdio', 'cstdio', 'stdlib', 'cstdlib', 'string',
+    'cstring', 'tgmath', 'ctgmath', 'time', 'ctime', 'uchar', 'cuchar', 'wchar', 'cwchar',
+    'wctype', 'cwctype', 'stdatomic', 'stdnoreturn', 'threads',
+    # C++ standard library
+    'algorithm', 'any', 'array', 'atomic', 'barrier', 'bit', 'bitset', 'charconv', 'chrono',
+    'codecvt', 'compare', 'complex', 'concepts', 'condition_variable', 'coroutine', 'deque',
+    'exception', 'execution', 'expected', 'filesystem', 'format', 'forward_list', 'fstream',
+    'functional', 'future', 'initializer_list', 'iomanip', 'ios', 'iosfwd', 'iostream', 'istream',
+    'iterator', 'latch', 'list', 'map', 'memory', 'memory_resource', 'mutex', 'new', 'numbers',
+    'numeric', 'optional', 'ostream', 'print', 'queue', 'random', 'ranges', 'ratio', 'regex',
+    'scoped_allocator', 'semaphore', 'set', 'shared_mutex', 'source_location', 'span', 'sstream',
+    'stack', 'stacktrace', 'stdexcept', 'stop_token', 'streambuf', 'string_view', 'strstream',
+    'syncstream', 'system_error', 'thread', 'tuple', 'type_traits', 'typeindex', 'typeinfo',
+    'unordered_map', 'unordered_set', 'utility', 'valarray', 'variant', 'vector', 'version',
+}
+
 
 # ========== Data structures ==========
 
@@ -1026,6 +1049,8 @@ class RepoAnalyzer:
             import sys
 
             return module in sys.builtin_module_names or module in {'os', 'sys', 'json', 'time', 're', 'math'}
+        if ext in C_FAMILY_EXTS:
+            return module in C_CPP_BUILTIN_HEADERS
         if ext == '.go':
             return '.' not in module.split('/', 1)[0]
         if ext == '.rs':
