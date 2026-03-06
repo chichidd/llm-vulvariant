@@ -1,0 +1,4 @@
+interface:
+  display_name: "LLM-VulVariant Full Workflow"
+  short_description: "Run full scan-to-report workflow"
+  default_prompt: "Execute complete llm-vulvariant scan, exploitability, and reporting workflow."

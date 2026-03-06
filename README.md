@@ -123,7 +123,7 @@ pip install transformers sentence-transformers torch
 关注以下项:
 
 - `module_analyzer_config.analyzer_type`:
-  - `skill`（默认，使用 `.claude/skills/ai-infra-module-modeler`）
+  - `skill`（默认，使用 `_path_config['skill_path']/ai-infra-module-modeler`；当前仓库内的 workflow skills 放在 `.agents/skills`，并可通过工作区根目录的 `.agents/` symlink 访问）
   - `agent`
 - `repo_analyzer_config`:
   - `languages`（支持 `"auto"` 或多语言列表）
@@ -357,7 +357,8 @@ pytest -q tests/test_cli_batch_scanner.py tests/test_cli_exploitability.py tests
 
 3. `Claude CLI not found`:
    - 安装 Claude CLI 并确保 `claude` 在 `PATH`
-   - 确认 `.claude/skills/check-exploitability` 与 `.claude/skills/ai-infra-module-modeler` 存在
+   - 确认配置中的 `skill_path` 下存在 `check-exploitability` 与 `ai-infra-module-modeler`
+   - 仓库内的 workflow skills 当前放在 `.agents/skills`，也可通过工作区根目录的 `.agents/` symlink 访问
 
 4. CodeQL 工具不可用:
    - 安装 CodeQL CLI
