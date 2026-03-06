@@ -20,6 +20,7 @@ def run_agent_analysis(
     storage_manager: Optional[Any] = None,
     conversation_name: str = None,
     path_parts: tuple = None,
+    resume_from_saved: bool = True,
 ) -> Tuple[bool, Dict[str, Any], int, List[Dict[str, Any]]]:
     """
     Shared helper to run an LLM agent analysis.
@@ -49,7 +50,7 @@ def run_agent_analysis(
     messages = None
     start_iteration = 0
     
-    if storage_manager and conversation_name and path_parts:
+    if resume_from_saved and storage_manager and conversation_name and path_parts:
         # Load the corresponding conversation from the module_analysis directory
         saved_conv = storage_manager.load_conversation("module_analysis", *path_parts)
         if saved_conv and saved_conv.get('conversation_name') == conversation_name:

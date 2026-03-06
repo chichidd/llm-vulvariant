@@ -10,6 +10,7 @@ SOFT_PROFILE_DIRNAME="${SOFT_PROFILE_DIRNAME:-soft}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
 LLM_NAME="${LLM_NAME:-}"
+FORCE_REGENERATE=0
 EXTRA_ARGS=()
 
 cleanup_codeql_temp_artifacts() {
@@ -43,13 +44,14 @@ Options:
   --output-dir PATH              Explicit output dir (overrides profile-base + soft-profile-dirname)
   --llm-provider NAME            LLM provider (default: $LLM_PROVIDER)
   --llm-name NAME                Optional LLM model override
+  --force-regenerate             Ignore existing software profile/checkpoints and rebuild
   -h, --help                     Show help
 
 Examples:
   $0
   $0 --profile-base-path ~/vuln/profiles --soft-profile-dirname soft
   $0 --output-dir /tmp/soft-profiles --llm-provider deepseek
-  $0 -- --force-full-analysis
+  $0 --force-regenerate
 EOF
 }
 
@@ -69,6 +71,8 @@ while [[ $# -gt 0 ]]; do
       LLM_PROVIDER="$2"; shift 2 ;;
     --llm-name)
       LLM_NAME="$2"; shift 2 ;;
+    --force-regenerate)
+      FORCE_REGENERATE=1; shift ;;
     -h|--help)
       usage; exit 0 ;;
     --)
@@ -99,6 +103,9 @@ echo "OUTPUT_DIR:     $OUTPUT_DIR"
 echo "LLM_PROVIDER:   $LLM_PROVIDER"
 if [[ -n "$LLM_NAME" ]]; then
   echo "LLM_NAME:       $LLM_NAME"
+fi
+if [[ "$FORCE_REGENERATE" -eq 1 ]]; then
+  echo "FORCE_REGENERATE: enabled"
 fi
 echo ""
 
@@ -142,10 +149,12 @@ for entry in "${entries[@]}"; do
     --target-version "$commit"
     --llm-provider "$LLM_PROVIDER"
     --output-dir "$OUTPUT_DIR"
-    --force-full-analysis
   )
   if [[ -n "$LLM_NAME" ]]; then
     cmd+=(--llm-name "$LLM_NAME")
+  fi
+  if [[ "$FORCE_REGENERATE" -eq 1 ]]; then
+    cmd+=(--force-regenerate)
   fi
   cmd+=("${EXTRA_ARGS[@]}")
 

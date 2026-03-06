@@ -62,7 +62,8 @@ class ModuleAnalyzer:
         repo_path: Path = None,
         storage_manager = None,
         repo_name: str = None,
-        version: str = None
+        version: str = None,
+        resume_from_conversation: bool = True,
     ) -> Dict[str, Any]:
         """Analyze module structure.
 
@@ -123,6 +124,7 @@ class ModuleAnalyzer:
                 storage_manager=storage_manager,
                 conversation_name="module_analysis",
                 path_parts=path_parts,
+                resume_from_saved=resume_from_conversation,
             )
             
             # Save conversation history

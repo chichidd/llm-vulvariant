@@ -8,18 +8,14 @@
       ├── checkpoints/
       │   ├── repo_info.json
       │   ├── basic_info.json
-      │   ├── file_summaries.json
       │   └── modules.json
             ├── conversations/                    # new directory
       │   ├── 20251211_143025_123_basic_info.json
-      │   ├── 20251211_143026_456_file_summary_main.py.json
-      │   ├── 20251211_143027_789_file_summary_utils.py.json
       │   ├── 20251211_143030_012_module_analysis_iter_01.json
       │   ├── 20251211_143031_345_module_analysis_iter_02.json
       │   ├── 20251211_143032_678_module_analysis_iter_03.json
       │   └── 20251211_143040_901_module_analysis_fallback.json
       └── software_profile.json
-    profile_info.json
 ```
 
 
@@ -68,15 +64,6 @@ cat conversations/20251211_143025_123_basic_info.json | jq .prompt
 
 # Print only response
 cat conversations/20251211_143025_123_basic_info.json | jq .response
-```
-
-
-```bash
-# Find failed summaries
-grep -l "Failed to parse" conversations/*file_summary*.json
-
-# View the failed response
-cat conversations/20251211_143026_456_file_summary_problematic.py.json | jq .response
 ```
 
 
@@ -161,9 +148,7 @@ def show_conversation_summary(conversations_dir: Path):
             logger.info(f"  Timestamp: {timestamp}")
             
             # Show step-specific details.
-            if step == "file_summary":
-                logger.info(f"  File: {conv.get('file_path', 'N/A')}")
-            elif step == "module_analysis_iteration":
+            if step == "module_analysis_iteration":
                 logger.info(f"  Iteration: {conv.get('iteration', 'N/A')}")
             
             # Show prompt/response lengths.

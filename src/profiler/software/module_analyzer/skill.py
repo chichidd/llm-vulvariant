@@ -7,6 +7,7 @@ adapts their outputs into the software profiler module schema.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,7 @@ class SkillModuleAnalyzer:
         storage_manager: Any = None,
         repo_name: Optional[str] = None,
         version: Optional[str] = None,
+        force_regenerate: bool = False,
     ) -> Dict[str, Any]:
         repo_path = Path(repo_path).resolve()
         if not self.taxonomy:
@@ -51,6 +53,8 @@ class SkillModuleAnalyzer:
             return {"modules": [], "llm_calls": 0}
 
         output_dir = self._resolve_output_dir(storage_manager, repo_name, version)
+        if force_regenerate:
+            self._reset_output_dir(output_dir)
         if not self._run_claude_analysis(repo_path, output_dir, repo_name):
             return {"modules": [], "llm_calls": 0}
 
@@ -149,6 +153,12 @@ class SkillModuleAnalyzer:
         except FileNotFoundError:
             logger.error("Claude CLI not found. Please install it first.")
             return False
+
+    def _reset_output_dir(self, output_dir: Path) -> None:
+        """Remove persisted skill outputs so a force-regenerated run starts clean."""
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_json(self, path: Path) -> Optional[Dict[str, Any]]:
         if not path.exists():

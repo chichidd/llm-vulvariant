@@ -41,8 +41,8 @@ def parse_args():
     )
     parser.add_argument('--repo-base-path', default=None, help='Base path containing repos (default from config/paths.yaml)')
     parser.add_argument('--target-version', default=None, help='Target commit hash/version. Default is the current version.')
+    parser.add_argument('--force-regenerate', action='store_true', help='Ignore existing software profile/checkpoints and rebuild from scratch')
 
-    parser.add_argument('--force-full-analysis', action='store_true', help='Force full analysis')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
     return parser.parse_args()
 
@@ -90,7 +90,7 @@ def main():
     logger.info("Generating software profile...")
     profiler.generate_profile(
         repo_path=repo_path, 
-        force_full_analysis=args.force_full_analysis, 
+        force_regenerate=args.force_regenerate,
         target_version=args.target_version
     )
     

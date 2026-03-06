@@ -10,9 +10,8 @@ import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from datetime import datetime
 
-from llm import BaseLLMClient, create_llm_client, LLMConfig
+from llm import BaseLLMClient
 from config import _path_config
 from profiler.profile_storage import ProfileStorageManager
 from utils.git_utils import (
@@ -28,8 +27,6 @@ from .models import SoftwareProfile, ModuleInfo, DataFlowPattern
 from .repo_collector import RepoInfoCollector
 from .basic_info_analyzer import BasicInfoAnalyzer
 from .module_analyzer import ModuleAnalyzer, SkillModuleAnalyzer
-
-from .file_summarizer import FileSummarizer
 from .repo_analyzer import RepoAnalyzer
 
 logger = get_logger(__name__)
@@ -128,26 +125,6 @@ class SoftwareProfiler:
             "build", "dist", ".eggs", "*.egg-info"
         ])
         
-        # 文件摘要配置
-
-        self.file_summary_llm_config = analyzer_config.get('file_summary_llm', {})
-        self.file_summary_llm_client = None
-        self.enable_llm_file_summary = self.file_summary_llm_config.get('enabled', False)
-
-        if self.enable_llm_file_summary:
-            try:
-                llm_config = LLMConfig(
-                    provider=self.file_summary_llm_config.get('provider', 'deepseek'),
-                    model=self.file_summary_llm_config.get('model', ''),
-                    temperature=self.file_summary_llm_config.get('temperature', 0.7),
-                    max_tokens=self.file_summary_llm_config.get('max_tokens', 131072),
-                )
-                self.file_summary_llm_client = create_llm_client(llm_config)
-                logger.info(f"Initialized file summary LLM: {llm_config.provider}/{llm_config.model or 'default'}")
-            except Exception as e:
-                logger.warning(f"Failed to initialize file summary LLM: {e}")
-                self.file_summary_llm_client = None
-        
         # RepoAnalyzer配置
         self.repo_analyzer_config = all_config.get('repo_analyzer_config', {})
 
@@ -203,15 +180,10 @@ class SoftwareProfiler:
                 max_iterations=max_agent_iterations
             )
         
-        # 文件摘要器
-        summary_llm = self.file_summary_llm_client or self.llm_client
-        self.file_summarizer = FileSummarizer(llm_client=summary_llm)
-
-    
     def generate_profile(
         self,
         repo_path: str,
-        force_full_analysis: bool = False,
+        force_regenerate: bool = False,
         target_version: str = None
     ) -> SoftwareProfile:
         """生成完整的软件画像"""
@@ -245,57 +217,22 @@ class SoftwareProfiler:
             else:
                 logger.warning("Could not get git commit hash, using 'unknown'")
                 version = "unknown"
-            
-            # 加载或创建 profile_info
-            profile_info = self.storage_manager.load_profile_info(repo_name) if self.storage_manager else None
-            is_first_run = (profile_info is None)
-            
-            if is_first_run:
-                logger.info("First run detected, performing full analysis")
-                profile_info = {
-                    "repo_name": repo_name,
-                    "base_commit": version,
-                    "first_analysis_date": datetime.now().isoformat(),
-                    "llm_config": {
-                        "model": self.llm_client.config.model if self.llm_client else "none",
-                        "temperature": self.llm_client.config.temperature if self.llm_client else 0.0,
-                    } if self.llm_client else {},
-                    "analysis_history": [{
-                        "version": version,
-                        "date": datetime.now().isoformat(),
-                        "type": "full_analysis"
-                    }]
-                }
-                if self.storage_manager:
-                    self.storage_manager.save_profile_info(profile_info, repo_name)
-            else:
-                base_commit = profile_info.get("base_commit")
-                logger.info(f"Found existing profile. Base commit: {base_commit[:8] if base_commit else 'N/A'}...")
-            
-            # 检查是否已有完成的画像
-            if self.storage_manager and not force_full_analysis:
-                path_parts = (repo_name, version) if version else (repo_name,)
+
+            path_parts = (repo_name, version) if version else (repo_name,)
+            if self.storage_manager and not force_regenerate:
                 existing_profile_json = self.storage_manager.load_final_result("software_profile.json", *path_parts)
                 if existing_profile_json:
-                    logger.info(f"Found completed profile, loading from cache...")
-                    existing_profile = json.loads(existing_profile_json)
-                    return SoftwareProfile.from_dict(existing_profile)
-            
+                    logger.info("Found completed profile, loading from cache...")
+                    return SoftwareProfile.from_dict(json.loads(existing_profile_json))
+
             logger.info("Performing full analysis...")
-            profile = self._generate_profile_full(repo_path, repo_name, version)
-            
-            # 更新分析历史
-            if not is_first_run:
-                if "analysis_history" not in profile_info:
-                    profile_info["analysis_history"] = []
-                profile_info["analysis_history"].append({
-                    "version": version,
-                    "date": datetime.now().isoformat(),
-                    "type": "full_analysis"
-                })
-                if self.storage_manager:
-                    self.storage_manager.save_profile_info(profile_info, repo_name)
-            
+            profile = self._generate_profile_full(
+                repo_path,
+                repo_name,
+                version,
+                force_regenerate=force_regenerate,
+            )
+
             logger.info(f"Profile generation completed for: {repo_name}")
             return profile
         finally:
@@ -306,14 +243,20 @@ class SoftwareProfiler:
                 else:
                     logger.error(f"Failed to restore repository to original position: {original_restore_target}")
     
-    def _generate_profile_full(self, repo_path: Path, repo_name: str, version: str) -> SoftwareProfile:
+    def _generate_profile_full(
+        self,
+        repo_path: Path,
+        repo_name: str,
+        version: str,
+        force_regenerate: bool = False,
+    ) -> SoftwareProfile:
         """执行完整的profile分析"""
         path_parts = (repo_name, version) if version else (repo_name,)
         
         # Step 1: 收集仓库信息
         logger.info("Step 1/4: Collecting repo info...")
         repo_info = None
-        if self.storage_manager:
+        if self.storage_manager and not force_regenerate:
             repo_info = self.storage_manager.load_checkpoint("repo_info", *path_parts)
         
         if repo_info:
@@ -321,41 +264,24 @@ class SoftwareProfiler:
         else:
             repo_info = self.repo_collector.collect(repo_path)
             repo_info['commit_hash'] = version
-            
-            # 文件摘要
-            if self.enable_llm_file_summary:
-                logger.info("Generating file summaries with LLM...")
-                file_summaries = self.file_summarizer.summarize_files(
-                    repo_path,
-                    repo_info['files'],
-                    storage_manager=self.storage_manager,
-                    repo_name=repo_name,
-                    version=version,
-                )
-                repo_info['file_summaries'] = file_summaries
-            else:
-                repo_info['file_summaries'] = {}
-            
-            # CodeQL分析
-            
+
             logger.info("Performing deep static analysis...")
             cache_dir = self.output_dir / repo_name / ".cache" / "repo_analyzer" if self.output_dir else None
-                
+
             self.repo_analyzer = RepoAnalyzer(
                 repo_path=str(repo_path),
                 languages=self.repo_analyzer_config.get('languages'),
                 cache_dir=str(cache_dir) if cache_dir else None,
-                rebuild_cache=self.repo_analyzer_config.get('rebuild_cache')
+                rebuild_cache=force_regenerate or self.repo_analyzer_config.get('rebuild_cache', False)
             )
 
             repo_info['repo_analysis'] = self.repo_analyzer.get_info()
-            
             if self.storage_manager:
                 self.storage_manager.save_checkpoint("repo_info", repo_info, *path_parts)
         
         # Step 2: 分析基本信息
         logger.info("Step 2/4: Analyzing basic info...")
-        basic_info = self.storage_manager.load_checkpoint("basic_info", *path_parts) if self.storage_manager else None
+        basic_info = self.storage_manager.load_checkpoint("basic_info", *path_parts) if self.storage_manager and not force_regenerate else None
         if basic_info:
             logger.info("Loaded basic_info from checkpoint")
         else:
@@ -367,21 +293,26 @@ class SoftwareProfiler:
         
         # Step 3: 分析模块
         logger.info("Step 3/4: Analyzing modules...")
-        modules_result = self.storage_manager.load_checkpoint("modules", *path_parts) if self.storage_manager else None
+        modules_result = self.storage_manager.load_checkpoint("modules", *path_parts) if self.storage_manager and not force_regenerate else None
         
         if modules_result and modules_result.get('modules'):
             logger.info("Loaded modules from checkpoint")
         else:
             if modules_result and not modules_result.get('modules'):
                 logger.warning("Loaded modules checkpoint is empty, re-analyzing...")
-            # 使用当前配置的模块分析器（skill 或 agent）
-            modules_result = self.module_analyzer.analyze(
-                repo_info, 
-                repo_path,
-                storage_manager=self.storage_manager,
-                repo_name=repo_name,
-                version=version
-            )
+            module_analyze_kwargs = {
+                "repo_info": repo_info,
+                "repo_path": repo_path,
+                "storage_manager": self.storage_manager,
+                "repo_name": repo_name,
+                "version": version,
+            }
+            if isinstance(self.module_analyzer, ModuleAnalyzer):
+                module_analyze_kwargs["resume_from_conversation"] = not force_regenerate
+            elif isinstance(self.module_analyzer, SkillModuleAnalyzer):
+                module_analyze_kwargs["force_regenerate"] = force_regenerate
+
+            modules_result = self.module_analyzer.analyze(**module_analyze_kwargs)
             
             if self.storage_manager:
                 self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)

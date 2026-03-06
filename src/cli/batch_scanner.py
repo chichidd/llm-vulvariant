@@ -7,7 +7,7 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config
 from llm import LLMConfig, create_llm_client
@@ -246,9 +246,14 @@ def _ensure_software_profile(
     llm_client,
     force_regenerate: bool,
     cache: Dict[Tuple[str, str], object],
+    regenerated_keys: Set[Tuple[str, str]],
 ) -> Optional[object]:
     key = (repo_name, commit_hash)
-    if key in cache:
+    if force_regenerate and key in regenerated_keys and key in cache:
+        return cache[key]
+    if force_regenerate:
+        cache.pop(key, None)
+    elif key in cache:
         return cache[key]
 
     profile_path = repo_profiles_dir / repo_name / commit_hash / "software_profile.json"
@@ -256,7 +261,7 @@ def _ensure_software_profile(
         profile_path.unlink()
 
     profile = load_software_profile(repo_name, commit_hash, base_dir=repo_profiles_dir)
-    if profile:
+    if profile and not force_regenerate:
         cache[key] = profile
         return profile
 
@@ -272,13 +277,15 @@ def _ensure_software_profile(
     )
     profiler.generate_profile(
         repo_path=str(repo_path),
-        force_full_analysis=False,
+        force_regenerate=force_regenerate,
         target_version=commit_hash,
     )
 
     profile = load_software_profile(repo_name, commit_hash, base_dir=repo_profiles_dir)
     if profile:
         cache[key] = profile
+        if force_regenerate:
+            regenerated_keys.add(key)
     return profile
 
 
@@ -294,6 +301,7 @@ def _ensure_vulnerability_profile(
     llm_client,
     force_regenerate: bool,
     software_cache: Dict[Tuple[str, str], object],
+    regenerated_software_keys: Set[Tuple[str, str]],
     cache: Dict[Tuple[str, str], object],
     verbose: bool,
     vuln_json_path: Optional[str] = None,
@@ -319,6 +327,7 @@ def _ensure_vulnerability_profile(
         llm_client=llm_client,
         force_regenerate=force_regenerate,
         cache=software_cache,
+        regenerated_keys=regenerated_software_keys,
     )
     if not source_profile:
         return None
@@ -362,6 +371,7 @@ def _discover_latest_repo_refs(
     llm_client,
     force_regenerate_profiles: bool,
     software_cache: Dict[Tuple[str, str], object],
+    regenerated_software_keys: Set[Tuple[str, str]],
 ) -> Dict[str, ProfileRef]:
     refs: Dict[str, ProfileRef] = {}
     for repo_dir in sorted(repos_root.iterdir()):
@@ -380,6 +390,7 @@ def _discover_latest_repo_refs(
             llm_client=llm_client,
             force_regenerate=force_regenerate_profiles,
             cache=software_cache,
+            regenerated_keys=regenerated_software_keys,
         )
         if not profile:
             logger.warning(f"Skip repo without software profile: {repo_name}@{commit_hash[:12]}")
@@ -517,6 +528,7 @@ def main() -> int:
     )
 
     software_cache: Dict[Tuple[str, str], object] = {}
+    regenerated_software_keys: Set[Tuple[str, str]] = set()
     vulnerability_cache: Dict[Tuple[str, str], object] = {}
 
     logger.info("Ensuring latest software profiles for candidate repositories...")
@@ -526,6 +538,7 @@ def main() -> int:
         llm_client=profile_llm,
         force_regenerate_profiles=args.force_regenerate_profiles,
         software_cache=software_cache,
+        regenerated_software_keys=regenerated_software_keys,
     )
     logger.info(f"Candidate repositories with latest profiles: {len(latest_repo_refs)}")
 
@@ -563,6 +576,7 @@ def main() -> int:
             llm_client=profile_llm,
             force_regenerate=args.force_regenerate_profiles,
             cache=software_cache,
+            regenerated_keys=regenerated_software_keys,
         )
         vulnerability_profile = _ensure_vulnerability_profile(
             vuln_index=vuln_index,
@@ -575,6 +589,7 @@ def main() -> int:
             llm_client=profile_llm,
             force_regenerate=args.force_regenerate_profiles,
             software_cache=software_cache,
+            regenerated_software_keys=regenerated_software_keys,
             cache=vulnerability_cache,
             verbose=args.verbose,
             vuln_json_path=str(vuln_json),

@@ -183,6 +183,8 @@ class SoftwareProfile:
         """从字典创建"""
         basic = data.get("basic_info", {})
         repo_info = data.get("repo_info", {})
+        if not isinstance(repo_info, dict):
+            repo_info = {}
         
         # 解析模块信息 - 统一从modules字段解析
         modules = []

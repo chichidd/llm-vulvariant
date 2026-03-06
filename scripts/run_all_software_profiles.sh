@@ -6,8 +6,9 @@ set -euo pipefail
 # Examples:
 #   ./run_profiles.sh
 #   ./run_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir ~/vuln/profiles/soft --verbose
+#   ./run_profiles.sh --force-regenerate
 #   ./run_profiles.sh -- --verbose --some-other-flag 123
-#.  under llm-vulvariant: ./scripts/run_all_software_profiles.sh --llm-provider deepseek --output-dir ~/vuln/profiles/soft --force-full-analysis
+#.  under llm-vulvariant: ./scripts/run_all_software_profiles.sh --llm-provider deepseek --output-dir ~/vuln/profiles/soft
 # Notes:
 # - Repo name A is the folder name under data/repos (first level only).
 # - You can pass any extra args; they will be forwarded to the command.
@@ -19,8 +20,19 @@ LLM_NAME=""       # optional; if empty, don't pass it (tool default applies)
 OUTPUT_DIR=""     # optional; if empty, don't pass it (tool default applies)
 PROFILE_BASE_PATH=""      # optional; used when OUTPUT_DIR is empty
 SOFT_PROFILE_DIRNAME="soft"  # optional; used when OUTPUT_DIR is empty
+FORCE_REGENERATE=0
 
 EXTRA_ARGS=()
+
+has_force_regenerate_arg() {
+  local arg
+  for arg in "${EXTRA_ARGS[@]}"; do
+    if [[ "$arg" == "--force-regenerate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 cleanup_codeql_temp_artifacts() {
   local repo_dir="$1"
@@ -42,7 +54,7 @@ cleanup_codeql_temp_artifacts() {
 
 usage() {
   cat <<EOF
-Usage: $0 [--root DIR] [--llm-provider X1] [--llm-name X2] [--output-dir C1] [--profile-base-path P] [--soft-profile-dirname N] [-- ...extra args...]
+Usage: $0 [--root DIR] [--llm-provider X1] [--llm-name X2] [--output-dir C1] [--profile-base-path P] [--soft-profile-dirname N] [--force-regenerate] [-- ...extra args...]
 
 Env overrides:
   ROOT_DIR=data/repos
@@ -50,6 +62,7 @@ Env overrides:
 Examples:
   $0
   $0 --llm-provider openai --llm-name gpt-4.1 --output-dir ~/vuln/profiles/soft --verbose
+  $0 --force-regenerate
   $0 -- --verbose --dry-run
 EOF
 }
@@ -69,6 +82,8 @@ while [[ $# -gt 0 ]]; do
       PROFILE_BASE_PATH="$2"; shift 2 ;;
     --soft-profile-dirname)
       SOFT_PROFILE_DIRNAME="$2"; shift 2 ;;
+    --force-regenerate)
+      FORCE_REGENERATE=1; shift ;;
     -h|--help)
       usage; exit 0 ;;
     --)
@@ -80,6 +95,10 @@ while [[ $# -gt 0 ]]; do
       shift ;;
   esac
 done
+
+if has_force_regenerate_arg; then
+  FORCE_REGENERATE=1
+fi
 
 
 # --- Normalize OUTPUT_DIR to an absolute path (relative to where the script was launched) ---
@@ -134,6 +153,9 @@ else
     BASE_CMD+=(--software-profile-dirname "$SOFT_PROFILE_DIRNAME")
   fi
 fi
+if [[ "$FORCE_REGENERATE" -eq 1 ]] && ! has_force_regenerate_arg; then
+  BASE_CMD+=(--force-regenerate)
+fi
 
 # Pass the root directory so software-profile knows where to find repos
 BASE_CMD+=(--repo-base-path "$ROOT_DIR")
@@ -158,7 +180,7 @@ for repo_dir in "$ROOT_DIR"/*; do
     repo_name="$(basename "$repo_dir")"
     
     # Skip if already completed (check for output file)
-    if [[ -n "$OUTPUT_DIR" ]]; then
+    if [[ -n "$OUTPUT_DIR" && "$FORCE_REGENERATE" -eq 0 ]]; then
       commit="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || true)"
       if [[ -n "$commit" ]] && [[ -f "$OUTPUT_DIR/${repo_name}/${commit}/software_profile.json" ]]; then
         echo "=== Skipping (already completed): $repo_name@$commit ==="

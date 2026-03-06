@@ -5,9 +5,6 @@ LLM Prompt Templates for Software Profiling
 SOFTWARE_BASIC_INFO_SYSTEM_PROMPT = """You are a senior software analysis assistant.
 Follow the user's task strictly, ground conclusions in provided repository evidence, and output JSON only."""
 
-SOFTWARE_FILE_SUMMARY_SYSTEM_PROMPT = """You are a precise code analyst.
-Summarize only what is supported by the file content and output JSON only."""
-
 BASIC_INFO_PROMPT = """Please carefully analyze the following software repository and accurately identify its application domain, target scenarios, and user groups.
 
 # Repository Information
@@ -55,75 +52,6 @@ Identify the software’s **primary users**. List as many relevant user groups a
 }}
 ```
 
-Begin your analysis now."""
-
-CODE_SNIPPET_PROMPT = """Please analyze the following code file and extract its functional characteristics and technical elements.
-
-# Code File
-
-**File path**: `{file_path}`
-
-**Code content**:
-```
-{file_content}
-```
-
-# Analysis Tasks
-
-## 1. main_purpose (primary purpose)
-- Summarize in one sentence the role this file plays in the overall project.
-- For example: “Provides user authentication and authorization”, “Implements HTTP request handling”, “Defines data models and database mappings”.
-
-## 2. key_functions (key functions/classes)
-- List the **most important** function names or class names in the file as complete as possible.
-- Prioritize:
-  * Public APIs (functions called by other modules)
-  * Core business-logic functions
-  * Important class definitions
-- Format: use the exact function/class names as they appear in the code; do not add parentheses or parameters.
-- Example: ["UserController", "authenticate", "validate_token", "get_user_profile"]
-
-## 3. dependencies (key dependencies)
-- List the **key external libraries or modules** imported by the file as complete as possible
-- Prioritize:
-  * Third-party libraries critical to core functionality
-  * Important internal modules referenced within the project
-- Ignore: common standard-library imports (e.g., os, sys, json), unless they are central to the file’s core functionality.
-- Format: use the actual library/module names.
-- Example: ["flask", "sqlalchemy", "jwt", "bcrypt"]
-
-## 4. functionality (core functionality description)
-- Describe what the file implements.
-- Explain what it does, how it does it, and what it interacts with.
-- Include: main logic, algorithm, data processing flow, and external interfaces.
-
-# Analysis Guidance
-
-**Understanding the code**:
-- Quickly scan import statements to understand dependencies.
-- Identify the main class and function definitions.
-- Understand call relationships and data flow between functions.
-
-**Accuracy first**:
-- Use names that actually appear in the code.
-- Do not guess or add content that does not exist.
-- If the code is short or single-purpose, the lists can be shorter.
-
-**Avoid**:
-- Do not include helper functions (e.g., _private_helper) unless they are important.
-- Do not list every function; select only the most critical ones.
-- Do not repeat lists of function names inside the functionality paragraph.
-
-# Output Format
-
-```json
-{{
-  "main_purpose": "One-sentence description of the file’s role",
-  "key_functions": ["function1", "ClassName1", "method2"],
-  "dependencies": ["library1", "module2"],
-  "functionality": "A detailed 2–4 sentence description of the core functionality"
-}}
-```
 Begin your analysis now."""
 
 

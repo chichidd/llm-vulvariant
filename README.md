@@ -177,13 +177,13 @@ software-profile \
   --target-version a1b2c3d4e5f6 \
   --profile-base-path ~/vuln/profiles \
   --software-profile-dirname soft \
-  --llm-provider deepseek \
-  --force-full-analysis
+  --llm-provider deepseek
 ```
 
 输出:
 
 - `~/vuln/profiles/soft/NeMo/<commit>/software_profile.json`
+- 若要忽略已有 `software_profile.json` 和 checkpoints，追加 `--force-regenerate`
 
 ### 7.2 生成漏洞画像
 
