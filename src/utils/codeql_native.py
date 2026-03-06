@@ -48,7 +48,7 @@ import subprocess
 import tempfile
 import shutil
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from utils.logger import get_logger
 
@@ -149,25 +149,6 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         }
         os.makedirs(default_config['database_dir'], exist_ok=True)
         return default_config
-
-
-@dataclass
-class CodeQLFinding:
-    """A finding reported by CodeQL."""
-    rule_id: str
-    severity: str
-    message: str
-    file_path: str
-    start_line: int
-    end_line: int
-    start_column: int
-    end_column: int
-    cwe_ids: List[str] = field(default_factory=list)
-    
-    # Data-flow path (for taint analysis results)
-    source: Optional[Dict[str, Any]] = None
-    sink: Optional[Dict[str, Any]] = None
-    path_nodes: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass 
@@ -547,107 +528,6 @@ class CodeQLAnalyzer:
         
         return None  # Cannot determine – caller must handle
     
-    def _parse_sarif_results(self, sarif: Dict) -> List[CodeQLFinding]:
-        """Parse SARIF-format results."""
-        findings = []
-        
-        for run in sarif.get("runs", []):
-            # Collect rule metadata
-            rules = {}
-            for rule in run.get("tool", {}).get("driver", {}).get("rules", []):
-                rules[rule["id"]] = rule
-            
-            # Parse results
-            for result in run.get("results", []):
-                rule_id = result.get("ruleId", "")
-                rule_info = rules.get(rule_id, {})
-                
-                # Extract location info
-                locations = result.get("locations", [{}])
-                if locations:
-                    location = locations[0].get("physicalLocation", {})
-                    artifact = location.get("artifactLocation", {})
-                    region = location.get("region", {})
-                    
-                    file_path = artifact.get("uri", "")
-                    start_line = region.get("startLine", 0)
-                    end_line = region.get("endLine", start_line)
-                    start_col = region.get("startColumn", 0)
-                    end_col = region.get("endColumn", 0)
-                else:
-                    file_path = ""
-                    start_line = end_line = start_col = end_col = 0
-                
-                # Determine severity
-                severity = "warning"
-                if "security-severity" in rule_info.get("properties", {}):
-                    sec_sev = float(rule_info["properties"]["security-severity"])
-                    if sec_sev >= 9.0:
-                        severity = "critical"
-                    elif sec_sev >= 7.0:
-                        severity = "high"
-                    elif sec_sev >= 4.0:
-                        severity = "medium"
-                    else:
-                        severity = "low"
-                
-                # Collect CWE IDs
-                cwe_ids = []
-                for tag in rule_info.get("properties", {}).get("tags", []):
-                    if tag.startswith("external/cwe/cwe-"):
-                        cwe_ids.append(tag.replace("external/cwe/", "").upper())
-                
-                # Parse data-flow path
-                source = None
-                sink = None
-                path_nodes = []
-                
-                code_flows = result.get("codeFlows", [])
-                if code_flows:
-                    thread_flows = code_flows[0].get("threadFlows", [])
-                    if thread_flows:
-                        locations = thread_flows[0].get("locations", [])
-                        for i, loc in enumerate(locations):
-                            node_info = self._parse_flow_location(loc)
-                            if i == 0:
-                                source = node_info
-                            elif i == len(locations) - 1:
-                                sink = node_info
-                            else:
-                                path_nodes.append(node_info)
-                
-                finding = CodeQLFinding(
-                    rule_id=rule_id,
-                    severity=severity,
-                    message=result.get("message", {}).get("text", ""),
-                    file_path=file_path,
-                    start_line=start_line,
-                    end_line=end_line,
-                    start_column=start_col,
-                    end_column=end_col,
-                    cwe_ids=cwe_ids,
-                    source=source,
-                    sink=sink,
-                    path_nodes=path_nodes
-                )
-                findings.append(finding)
-        
-        return findings
-    
-    def _parse_flow_location(self, location: Dict) -> Dict[str, Any]:
-        """Parse a data-flow location."""
-        phys_loc = location.get("location", {}).get("physicalLocation", {})
-        artifact = phys_loc.get("artifactLocation", {})
-        region = phys_loc.get("region", {})
-        
-        return {
-            "file": artifact.get("uri", ""),
-            "line": region.get("startLine", 0),
-            "column": region.get("startColumn", 0),
-            "snippet": region.get("snippet", {}).get("text", ""),
-            "message": location.get("location", {}).get("message", {}).get("text", "")
-        }
-    
     def _build_call_graph(self, database_path: str, language: str) -> List[CallGraphEdge]:
         """Build a call graph."""
         call_graph_query = os.path.join(
@@ -743,74 +623,4 @@ class CodeQLAnalyzer:
                     continue
         
         return edges
-    
-    def find_paths_to_sink(
-        self,
-        call_graph: List[CallGraphEdge],
-        sink_name: str,
-        max_depth: int = 10
-    ) -> List[List[str]]:
-        """
-        Find all paths that reach a sink in the call graph.
-        
-        Args:
-            call_graph: List of call graph edges
-            sink_name: Target sink function name (substring match)
-            max_depth: Maximum search depth
-        
-        Returns:
-            A list of paths; each path is a list of function names
-        """
-        # Build graphs
-        graph = {}  # caller -> [callees]
-        reverse_graph = {}  # callee -> [callers]
-        
-        for edge in call_graph:
-            caller = edge.caller_name
-            callee = edge.callee_name
-            
-            if caller not in graph:
-                graph[caller] = []
-            graph[caller].append(callee)
-            
-            if callee not in reverse_graph:
-                reverse_graph[callee] = []
-            reverse_graph[callee].append(caller)
-        
-        # Find matching sinks
-        sinks = [name for name in reverse_graph if sink_name in name]
-        
-        # Reverse search from sinks
-        all_paths = []
-        for sink in sinks:
-            paths = self._find_paths_bfs(reverse_graph, sink, max_depth)
-            all_paths.extend(paths)
-        
-        return all_paths
-    
-    def _find_paths_bfs(
-        self,
-        graph: Dict[str, List[str]],
-        start: str,
-        max_depth: int
-    ) -> List[List[str]]:
-        """BFS search for paths."""
-        paths = []
-        queue = [(start, [start])]
-        
-        while queue:
-            node, path = queue.pop(0)
-            
-            if len(path) > max_depth:
-                continue
-            
-            if node not in graph or not graph[node]:
-                # Reached entry point
-                paths.append(list(reversed(path)))
-            else:
-                for next_node in graph[node]:
-                    if next_node not in path:  # Avoid cycles
-                        queue.append((next_node, path + [next_node]))
-        
-        return paths
     

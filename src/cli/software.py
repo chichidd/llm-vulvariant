@@ -88,7 +88,7 @@ def main():
     
     # Generate the profile
     logger.info("Generating software profile...")
-    profile = profiler.generate_profile(
+    profiler.generate_profile(
         repo_path=repo_path, 
         force_full_analysis=args.force_full_analysis, 
         target_version=args.target_version

@@ -402,32 +402,3 @@ def _text_similarity(
 
     return _jaccard_similarity(_tokenize_text(left), _tokenize_text(right))
 
-
-class SimilarityRetriever:
-    """Backward-compatible wrapper around `compute_profile_similarity`."""
-
-    def __init__(self, embedding_config: Optional[EmbeddingRetrievalConfig] = None):
-        self.embedding_config = embedding_config or EmbeddingRetrievalConfig(
-            model_name="BAAI--bge-large-en-v1.5",
-            device="cpu",
-            batch_size=32,
-            normalize=True,
-        )
-        self.text_retriever: Optional[EmbeddingRetriever]
-        try:
-            self.text_retriever = EmbeddingRetriever(config=self.embedding_config)
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(f"SimilarityRetriever falls back to lexical mode: {exc}")
-            self.text_retriever = None
-
-    def compute_profile_similarity(
-        self,
-        profile1: SoftwareProfile,
-        profile2: SoftwareProfile,
-    ) -> Dict[str, float]:
-        metrics = compute_profile_similarity(
-            source_profile=profile1,
-            target_profile=profile2,
-            text_retriever=self.text_retriever,
-        )
-        return metrics.to_dict()

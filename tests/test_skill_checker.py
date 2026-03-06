@@ -52,7 +52,6 @@ def test_build_prompt_includes_output_json_path(tmp_path):
     prompt = checker._build_prompt(
         vuln={"file_path": "x.py", "vulnerability_type": "x", "evidence": "line", "description": "desc"},
         repo_path=tmp_path,
-        software_profile_path=None,
         result_json_path=result_json_path,
     )
 
@@ -79,7 +78,6 @@ def test_analyze_single_vuln_falls_back_to_output_file(monkeypatch, tmp_path):
         vuln={"file_path": "x.py", "vulnerability_type": "x"},
         finding_id="vuln_000",
         repo_path=tmp_path,
-        software_profile_path=None,
         evidence_dir=evidence_dir,
     )
 
@@ -105,7 +103,6 @@ def test_analyze_single_vuln_ignores_stale_output_file(monkeypatch, tmp_path):
         vuln={"file_path": "x.py", "vulnerability_type": "x"},
         finding_id="vuln_000",
         repo_path=tmp_path,
-        software_profile_path=None,
         evidence_dir=evidence_dir,
     )
 

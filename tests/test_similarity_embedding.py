@@ -31,26 +31,3 @@ def test_similarity_uses_cosine_when_not_normalized(monkeypatch):
 
     score = retriever.similarity("left", "right")
     assert abs(score - 1.0) < 1e-9
-
-
-def test_retrieve_top_k_returns_sorted_candidates(monkeypatch):
-    retriever = _make_retriever(normalize=True)
-
-    def fake_embed(snippets):
-        if len(snippets) == 1:
-            return [[1.0, 0.0]]
-        return [[0.1, 0.0], [0.9, 0.0], [0.4, 0.0]]
-
-    monkeypatch.setattr(retriever, "embed", fake_embed)
-
-    results = retriever.retrieve_top_k("query", ["a", "b", "c"], top_k=2)
-
-    assert [r["index"] for r in results] == [1, 2]
-    assert [r["snippet"] for r in results] == ["b", "c"]
-
-
-def test_retrieve_top_k_with_non_positive_k_returns_empty(monkeypatch):
-    retriever = _make_retriever(normalize=True)
-    monkeypatch.setattr(retriever, "embed", lambda snippets: [[1.0]])
-
-    assert retriever.retrieve_top_k("q", ["a"], top_k=0) == []

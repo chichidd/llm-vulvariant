@@ -3,10 +3,7 @@
 import json
 from typing import Any, Dict, List
 
-from utils.logger import get_logger
 from .utils import _to_dict
-
-logger = get_logger(__name__)
 
 def build_system_prompt(vulnerability_profile: Any, toolkit) -> str:
     vuln_dict = _to_dict(vulnerability_profile)

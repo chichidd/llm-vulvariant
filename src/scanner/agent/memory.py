@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List
 
 from utils.logger import get_logger
 
@@ -36,9 +36,6 @@ class ScanMemory:
     # Findings and issues
     findings: List[Dict[str, Any]] = field(default_factory=list)
     issues: List[str] = field(default_factory=list)
-    
-    # Iteration logs: [{iteration, actions, timestamp}]
-    iterations: List[Dict[str, Any]] = field(default_factory=list)
     
     # Summary (LLM generated)
     summary: str = ""
@@ -116,13 +113,6 @@ class AgentMemoryManager:
             self.memory.file_status[file_path] = status
             self.save()
     
-    def mark_files(self, file_paths: List[str], status: str):
-        """Batch update file status."""
-        for f in file_paths:
-            if f in self.memory.file_status:
-                self.memory.file_status[f] = status
-        self.save()
-    
     def add_finding(self, finding: Dict[str, Any]) -> bool:
         """Record a vulnerability finding.
         
@@ -159,15 +149,6 @@ class AgentMemoryManager:
     def add_issue(self, issue: str):
         """Record an issue encountered during scan."""
         self.memory.issues.append(issue)
-        self.save()
-    
-    def log_iteration(self, iteration: int, actions: List[str]):
-        """Log an iteration's actions."""
-        self.memory.iterations.append({
-            "iteration": iteration,
-            "actions": actions,
-            "timestamp": datetime.now().isoformat(),
-        })
         self.save()
     
     def get_pending_files(self, max_priority: int = 3) -> List[str]:

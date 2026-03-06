@@ -16,8 +16,6 @@ from .models import (
     ModuleInfo,
     DataFlowPattern,
     SoftwareProfile,
-    FolderModule,
-    ModuleTree,
 )
 from .analyzer import SoftwareProfiler
 from .repo_collector import RepoInfoCollector
@@ -33,8 +31,6 @@ __all__ = [
     "ModuleInfo",
     "DataFlowPattern",
     "SoftwareProfile",
-    "FolderModule",
-    "ModuleTree",
     # Main profiler
     "SoftwareProfiler",
     # Sub-component analyzers (can be used standalone)

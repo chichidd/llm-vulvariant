@@ -13,8 +13,5 @@ class DSTokenizerCompute:
             tokenizer_dir, trust_remote_code=True
         )
 
-    def encode_len(self, text: str):
-        return len(self.tokenizer.encode(text))
-    
     def apply_chat_template_len(self, messages: List[Dict]):
         return len(self.tokenizer.apply_chat_template(messages))

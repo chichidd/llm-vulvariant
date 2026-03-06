@@ -446,12 +446,12 @@ class DeepSeekClient(BaseLLMClient):
 class MockLLMClient(BaseLLMClient):
     """Mock LLM client for tests."""
     
-    def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> str:
+    def chat(self, _messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **_kwargs) -> str:
         if tools is not None:
             return '{"content": "mock response", "tool_calls": [{"id": "mock_1", "type": "function", "function": {"name": "mock_tool", "arguments": "{}"}}]}'
         return '{"status": "mock_response", "message": "This is a mock response for testing"}'
     
-    def complete(self, prompt: str, **kwargs) -> str:
+    def complete(self, prompt: str, **_kwargs) -> str:
         """Send a completion request (mock implementation)."""
         return '{"status": "mock_completion", "prompt": "' + prompt[:50] + '..."}'
     

@@ -2,32 +2,16 @@
 
 Capabilities:
 1. Call graph analysis: extract inter-function call relationships
-2. Data flow analysis: track data flows from sources to sinks
-3. Program slicing: extract code relevant to a specific line
-4. Dependency analysis: analyze third-party library dependencies
-5. Entry point detection: identify HTTP endpoints, CLI entries, etc.
-
-Example:
-    analyzer = RepoAnalyzer("/path/to/repo", languages=["python"])
-
-    # Get call graph
-    call_graph = analyzer.call_graph
-
-    # Get code context around a specific line
-    context = analyzer.get_code_context("main.py", 42, window=20)
-
-    # Program slicing: find all code that influences line 42
-    slice_result = analyzer.backward_slice("main.py", 42, max_depth=3)
+2. Dependency analysis: analyze third-party library dependencies
+3. Entry point detection: identify HTTP endpoints, CLI entries, etc.
 """
 
 import os
 import pickle
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Set, Tuple, Union
-from dataclasses import dataclass, field, asdict
-from collections import defaultdict
-
+from typing import Dict, List, Optional, Set, Tuple, Union
+from dataclasses import dataclass, field
 from utils.codeql_native import CodeQLAnalyzer, load_codeql_config, CallGraphEdge
 from utils.git_utils import get_git_commit
 
@@ -110,8 +94,6 @@ class FunctionInfo:
     start_line: int
     end_line: int
     parameters: List[str] = field(default_factory=list)
-    calls: List[str] = field(default_factory=list)  # Called function IDs
-    called_by: List[str] = field(default_factory=list)  # Caller function IDs
     
     def __str__(self):
         return f"{self.name} @ {self.file}:{self.start_line}"
@@ -127,59 +109,6 @@ class DependencyInfo:
     is_third_party: bool = True
 
 
-@dataclass
-class SliceResult:
-    """Program slicing result."""
-    target: CodeLocation
-    related_locations: List[Dict[str, Any]] = field(default_factory=list)
-    data_flow_paths: List[List[str]] = field(default_factory=list)
-    files_involved: Set[str] = field(default_factory=set)
-    depth: int = 0
-    
-    def to_dict(self):
-        """Convert to a dict (for serialization)."""
-        return {
-            "target": {
-                "file": self.target.file,
-                "line": self.target.line,
-                "code": self.target.code
-            },
-            "related_locations": self.related_locations,
-            "data_flow_paths": self.data_flow_paths,
-            "files_involved": list(self.files_involved),
-            "depth": self.depth
-        }
-    
-    def to_markdown(self) -> str:
-        """Convert to Markdown (for human reading)."""
-        md = f"## Program Slicing Result\n\n"
-        md += f"**Target location**: `{self.target.file}:{self.target.line}`\n\n"
-        
-        if self.target.code:
-            md += f"```{self.language if hasattr(self, 'language') else 'python'}\n{self.target.code}\n```\n\n"
-        
-        md += f"**Analysis depth**: {self.depth}\n"
-        md += f"**Files involved**: {len(self.files_involved)}\n"
-        md += f"**Related code locations**: {len(self.related_locations)}\n\n"
-        
-        if self.data_flow_paths:
-            md += "### Data Flow Paths\n\n"
-            for i, path in enumerate(self.data_flow_paths, 1):
-                md += f"{i}. {' → '.join(path)}\n"
-            md += "\n"
-        
-        if self.related_locations:
-            md += "### Related Code\n\n"
-            for loc in self.related_locations[:10]:  # Only show the first 10
-                md += f"#### {loc['file']}:{loc['start_line']}-{loc['end_line']}\n"
-                md += f"**Relationship**: {loc['relationship']}\n\n"
-                if loc.get('code'):
-                    lang_hint = getattr(self, 'language', 'python') if hasattr(self, 'language') else 'python'
-                    md += f"```{lang_hint}\n{loc['code']}\n```\n\n"
-        
-        return md
-
-
 # ========== Main class ==========
 
 class RepoAnalyzer:
@@ -189,15 +118,13 @@ class RepoAnalyzer:
     Features:
     - Automatic language detection (supports Python, C/C++)
     - Commit-hash-based caching
-    - Call graph, data flow, and program slicing
+    - Call graph extraction
     - Dependency analysis, entry point detection, and sensitive data tracking
 
     Args:
         repo_path: Repository path
         languages: Optional explicit language config ("auto" or list)
         cache_dir: Cache directory
-        max_slice_depth: Max program slice depth (default: 3)
-        max_slice_files: Max number of files in a slice (default: 10)
     """
     
 
@@ -206,17 +133,12 @@ class RepoAnalyzer:
         repo_path: str,
         languages: Optional[Union[str, List[str]]] = "auto",
         cache_dir: Optional[str] = None,
-        max_slice_depth: int = 3,
-        max_slice_files: int = 10,
         rebuild_cache: bool = False
     ):
         """Initialize the analyzer."""
         self.repo_path = Path(repo_path).resolve()
         if not self.repo_path.exists():
             raise ValueError(f"Repository path does not exist: {repo_path}")
-        
-        self.max_slice_depth = max_slice_depth
-        self.max_slice_files = max_slice_files
 
         # Resolve analysis languages (multi-language aware).
         self.languages = self._resolve_languages(languages=languages)
@@ -279,7 +201,6 @@ class RepoAnalyzer:
         self._call_graph_edges: List[CallGraphEdge] = []
         self._codeql_db_paths: Dict[str, str] = {}
         self._functions: Dict[str, FunctionInfo] = {}
-        self._functions_by_name: Dict[str, List[str]] = defaultdict(list)
         self._function_key_index: Dict[Tuple[str, str, int], str] = {}
         self._dependencies: Dict[str, DependencyInfo] = {}
 
@@ -444,7 +365,6 @@ class RepoAnalyzer:
                 self._call_graph_edges = cache_data['call_graph_edges']
                 self._codeql_db_paths = cache_data.get('codeql_db_paths', {})
                 self._functions = cache_data['functions']
-                self._functions_by_name = cache_data.get('functions_by_name', defaultdict(list))
                 self._function_key_index = cache_data.get('function_key_index', {})
                 self._dependencies = cache_data['dependencies']
                 cached_languages = cache_data.get('languages')
@@ -480,7 +400,6 @@ class RepoAnalyzer:
                 'call_graph_edges': self._call_graph_edges,
                 'codeql_db_paths': self._codeql_db_paths,
                 'functions': self._functions,
-                'functions_by_name': dict(self._functions_by_name),
                 'function_key_index': self._function_key_index,
                 'dependencies': self._dependencies,
             }
@@ -495,8 +414,7 @@ class RepoAnalyzer:
         return f"{file_path}::{name}@{start_line}"
 
     def _rebuild_function_indexes(self):
-        """Rebuild name and location indexes from function table."""
-        rebuilt_by_name: Dict[str, List[str]] = defaultdict(list)
+        """Rebuild location indexes from function table."""
         rebuilt_key_index: Dict[Tuple[str, str, int], str] = {}
 
         for key, func in list(self._functions.items()):
@@ -506,10 +424,7 @@ class RepoAnalyzer:
             func.id = func_id
 
             rebuilt_key_index[(func.name, func.file, int(func.start_line))] = func_id
-            if func.name:
-                rebuilt_by_name[func.name].append(func_id)
 
-        self._functions_by_name = rebuilt_by_name
         self._function_key_index = rebuilt_key_index
 
     def _register_function(self, name: str, file_path: str, start_line: int) -> Optional[str]:
@@ -529,8 +444,6 @@ class RepoAnalyzer:
             )
 
         self._function_key_index[(name, file_path, line)] = func_id
-        if func_id not in self._functions_by_name[name]:
-            self._functions_by_name[name].append(func_id)
         return func_id
 
     def _resolve_function_id(self, name: str, file_path: str, line: int) -> str:
@@ -628,15 +541,13 @@ class RepoAnalyzer:
         standard library, third-party packages, and unresolved dynamic calls).
         """
         self._functions = {}
-        self._functions_by_name = defaultdict(list)
         self._function_key_index = {}
         skipped_unresolved = 0
         
         for edge in self._call_graph_edges:
             # Add caller (module-level callers may use line=0)
-            caller_id = None
             if edge.caller_file:
-                caller_id = self._register_function(
+                self._register_function(
                     edge.caller_name,
                     edge.caller_file,
                     edge.caller_line,
@@ -644,24 +555,14 @@ class RepoAnalyzer:
             
             # Add callee only if it has a valid file path
             # Skip builtins, stdlib, third-party, and unresolved dynamic calls
-            callee_id = None
             if edge.callee_file and edge.callee_line > 0:
-                callee_id = self._register_function(
+                self._register_function(
                     edge.callee_name,
                     edge.callee_file,
                     edge.callee_line,
                 )
             else:
                 skipped_unresolved += 1
-            
-            # Build call relationships (only for resolved functions)
-            if caller_id and callee_id and caller_id in self._functions and callee_id in self._functions:
-                caller = self._functions[caller_id]
-                callee = self._functions[callee_id]
-                if callee_id not in caller.calls:
-                    caller.calls.append(callee_id)
-                if caller_id not in callee.called_by:
-                    callee.called_by.append(caller_id)
         
         if skipped_unresolved > 0:
             logger.debug(f"Skipped {skipped_unresolved} unresolved callee references (builtins/stdlib/third-party)")
@@ -1310,326 +1211,4 @@ class RepoAnalyzer:
         self._go_module_name_cache = module_name
         return module_name
     
-    # ========== Public properties ==========
-    
-    @property
-    def call_graph(self) -> List[CallGraphEdge]:
-        """Get the call graph."""
-        return self._call_graph_edges
-    
-    @property
-    def functions(self) -> Dict[str, FunctionInfo]:
-        """Get all function information."""
-        return self._functions
-    
-    @property
-    def dependencies(self) -> Dict[str, DependencyInfo]:
-        """Get dependency information."""
-        return self._dependencies
-    
-
-    # ========== Public methods ==========
-    
-    def _resolve_function_refs(self, func_ref: str) -> List[str]:
-        """Resolve a function reference string to function IDs."""
-        if func_ref in self._functions:
-            return [func_ref]
-        return list(self._functions_by_name.get(func_ref, []))
-
-    def get_function_callers(self, func_ref: str) -> List[FunctionInfo]:
-        """Get all caller functions for a function ID or name."""
-        target_ids = self._resolve_function_refs(func_ref)
-        if not target_ids:
-            return []
-
-        caller_ids = []
-        seen = set()
-        for target_id in target_ids:
-            for caller_id in self._functions[target_id].called_by:
-                if caller_id in self._functions and caller_id not in seen:
-                    seen.add(caller_id)
-                    caller_ids.append(caller_id)
-        return [self._functions[func_id] for func_id in caller_ids]
-    
-    def get_function_callees(self, func_ref: str) -> List[FunctionInfo]:
-        """Get all callee functions for a function ID or name."""
-        target_ids = self._resolve_function_refs(func_ref)
-        if not target_ids:
-            return []
-
-        callee_ids = []
-        seen = set()
-        for target_id in target_ids:
-            for callee_id in self._functions[target_id].calls:
-                if callee_id in self._functions and callee_id not in seen:
-                    seen.add(callee_id)
-                    callee_ids.append(callee_id)
-        return [self._functions[func_id] for func_id in callee_ids]
-    
-    def get_code_context(
-        self,
-        file: str,
-        line: int,
-        window: int = 20
-    ) -> str:
-        """
-        Get code context around a specific location.
-        
-        Args:
-            file: File path (relative to the repository root)
-            line: Line number
-            window: Context window size (lines before/after)
-        
-        Returns:
-            Code snippet (with line numbers)
-        """
-        file_path = self.repo_path / file
-        if not file_path.exists():
-            return f"File not found: {file}"
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = f.readlines()
-            
-            start = max(0, line - window - 1)
-            end = min(len(lines), line + window)
-            
-            context_lines = []
-            for i in range(start, end):
-                line_num = i + 1
-                marker = ">>>" if line_num == line else "   "
-                context_lines.append(f"{marker} {line_num:4d} | {lines[i].rstrip()}")
-            
-            return "\n".join(context_lines)
-        except Exception as e:
-            return f"Error reading file: {e}"
-    
-    def backward_slice(
-        self,
-        file: str,
-        line: int,
-        max_depth: Optional[int] = None,
-        max_files: Optional[int] = None
-    ) -> SliceResult:
-        """
-        Backward program slicing: find all code that influences a given line.
-        
-        Args:
-            file: File path
-            line: Line number
-            max_depth: Maximum tracing depth (None uses default)
-            max_files: Maximum number of files (None uses default)
-        
-        Returns:
-            A SliceResult
-        """
-        if max_depth is None:
-            max_depth = self.max_slice_depth
-        if max_files is None:
-            max_files = self.max_slice_files
-        
-        target = CodeLocation(file=file, line=line)
-        
-        # Read target line code
-        code = self._read_line(file, line)
-        target.code = code
-        
-        # Find functions affecting this line
-        affected_functions = self._find_functions_in_file(file, line)
-        
-        # Trace the call chain backwards
-        related_locations = []
-        data_flow_paths = []
-        files_involved = {file}
-        
-        for func in affected_functions:
-            # Get callers
-            callers = self.get_function_callers(func.id or func.name)
-            
-            for depth in range(1, max_depth + 1):
-                if len(files_involved) >= max_files:
-                    break
-                
-                for caller in callers:
-                    files_involved.add(caller.file)
-                    
-                    # Extract caller code
-                    caller_code = self.get_code_context(caller.file, caller.start_line, window=10)
-                    
-                    related_locations.append({
-                        "file": caller.file,
-                        "start_line": caller.start_line,
-                        "end_line": caller.end_line,
-                        "code": caller_code,
-                        "relationship": f"caller (depth {depth})",
-                        "function_name": caller.name
-                    })
-                    
-                    # Build a data-flow path
-                    path = [f"{caller.file}:{caller.start_line}", f"{file}:{line}"]
-                    data_flow_paths.append(path)
-                
-                # Continue tracing upwards
-                next_callers = []
-                for caller in callers:
-                    next_callers.extend(self.get_function_callers(caller.id or caller.name))
-                callers = next_callers
-                
-                if not callers:
-                    break
-        
-        result = SliceResult(
-            target=target,
-            related_locations=related_locations,
-            data_flow_paths=data_flow_paths,
-            files_involved=files_involved,
-            depth=max_depth
-        )
-        
-        return result
-    
-    def forward_slice(
-        self,
-        file: str,
-        line: int,
-        max_depth: Optional[int] = None,
-        max_files: Optional[int] = None
-    ) -> SliceResult:
-        """
-        Forward program slicing: find all code influenced by a given line.
-        
-        Args:
-            file: File path
-            line: Line number
-            max_depth: Maximum tracing depth
-            max_files: Maximum number of files
-        
-        Returns:
-            A SliceResult
-        """
-        if max_depth is None:
-            max_depth = self.max_slice_depth
-        if max_files is None:
-            max_files = self.max_slice_files
-        
-        target = CodeLocation(file=file, line=line)
-        code = self._read_line(file, line)
-        target.code = code
-        
-        # Find the function containing this line
-        affected_functions = self._find_functions_in_file(file, line)
-        
-        # Trace the call chain forwards
-        related_locations = []
-        data_flow_paths = []
-        files_involved = {file}
-        
-        for func in affected_functions:
-            # Get callees
-            callees = self.get_function_callees(func.id or func.name)
-            
-            for depth in range(1, max_depth + 1):
-                if len(files_involved) >= max_files:
-                    break
-                
-                for callee in callees:
-                    files_involved.add(callee.file)
-                    
-                    # Extract callee code
-                    callee_code = self.get_code_context(callee.file, callee.start_line, window=10)
-                    
-                    related_locations.append({
-                        "file": callee.file,
-                        "start_line": callee.start_line,
-                        "end_line": callee.end_line,
-                        "code": callee_code,
-                        "relationship": f"callee (depth {depth})",
-                        "function_name": callee.name
-                    })
-                    
-                    # Build a data-flow path
-                    path = [f"{file}:{line}", f"{callee.file}:{callee.start_line}"]
-                    data_flow_paths.append(path)
-                
-                # Continue tracing downwards
-                next_callees = []
-                for callee in callees:
-                    next_callees.extend(self.get_function_callees(callee.id or callee.name))
-                callees = next_callees
-                
-                if not callees:
-                    break
-        
-        result = SliceResult(
-            target=target,
-            related_locations=related_locations,
-            data_flow_paths=data_flow_paths,
-            files_involved=files_involved,
-            depth=max_depth
-        )
-        
-        return result
-    
-    def search_pattern(self, pattern: str) -> List[CodeLocation]:
-        """
-        Search for a code pattern (simple text search).
-        
-        Args:
-            pattern: Search pattern (regular expression)
-        
-        Returns:
-            List of matching code locations
-        """
-        import re
-        
-        results = []
-        regex = re.compile(pattern, re.IGNORECASE)
-        
-        for root, dirs, files in os.walk(self.repo_path):
-            dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__'}]
-            
-            for file in files:
-                if file.endswith(('.py', '.c', '.cpp', '.h')):
-                    file_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(file_path, self.repo_path)
-                    
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            for line_num, line in enumerate(f, 1):
-                                if regex.search(line):
-                                    loc = CodeLocation(
-                                        file=rel_path,
-                                        line=line_num,
-                                        code=line.strip()
-                                    )
-                                    results.append(loc)
-                    except Exception:
-                        continue
-        
-        return results
-    
-    
-    # ========== Helper methods ==========
-    
-    def _read_line(self, file: str, line: int) -> str:
-        """Read the specified line from a file."""
-        file_path = self.repo_path / file
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                for i, l in enumerate(f, 1):
-                    if i == line:
-                        return l.strip()
-        except Exception as e:
-            logger.debug(f"Failed to read line {line} from {file}: {e}")
-        return ""
-    
-    def _find_functions_in_file(self, file: str, line: int) -> List[FunctionInfo]:
-        """Find functions in a file that contain the specified line."""
-        results = []
-        
-        for func in self._functions.values():
-            if func.file == file and func.start_line <= line <= func.end_line:
-                results.append(func)
-        
-        return results
     

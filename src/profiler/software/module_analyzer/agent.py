@@ -3,10 +3,9 @@
 Uses a native tool-calling pattern and follows the structure of src/scanner/agent.
 """
 
-import json
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 from llm import BaseLLMClient
 from config import _path_config
@@ -187,4 +186,3 @@ When identifying modules, classify each module according to the following AI Inf
 ```
 
 IMPORTANT: Every module you identify MUST have a valid "category" field matching one of the taxonomy categories listed above."""
-

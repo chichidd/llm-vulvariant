@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence
 import math
 import logging
 
@@ -48,7 +48,7 @@ class EmbeddingRetrievalConfig:
 
 
 class EmbeddingRetriever:
-	"""Generate embeddings for code snippets and perform similarity retrieval."""
+	"""Generate embeddings for code snippets and compare their similarity."""
 
 	def __init__(
 		self,
@@ -130,37 +130,6 @@ class EmbeddingRetriever:
 			return sum(x * y for x, y in zip(va, vb))
 		return cosine_similarity(va, vb)
 
-	def retrieve_top_k(
-		self,
-		query: str,
-		candidates: Sequence[str],
-		*,
-		top_k: int = 5,
-	) -> List[Dict[str, Any]]:
-		"""Return top-k most similar candidates.
-
-		Returns a list of dicts: {"index": int, "score": float, "snippet": str}
-		"""
-		if top_k <= 0:
-			return []
-
-		query_vec = self.embed([query])[0]
-		cand_vecs = self.embed(list(candidates))
-
-		scored: List[Tuple[int, float]] = []
-		if self.config.normalize:
-			for i, v in enumerate(cand_vecs):
-				scored.append((i, sum(x * y for x, y in zip(query_vec, v))))
-		else:
-			for i, v in enumerate(cand_vecs):
-				scored.append((i, cosine_similarity(query_vec, v)))
-
-		scored.sort(key=lambda t: t[1], reverse=True)
-		results = []
-		for idx, score in scored[: min(top_k, len(scored))]:
-			results.append({"index": idx, "score": float(score), "snippet": candidates[idx]})
-		return results
-
 	def _embed_sentence_transformers(self, snippets: Sequence[str]) -> List[List[float]]:
 		# SentenceTransformer can handle batching/normalization natively.
 		normalize = bool(self.config.normalize)
@@ -223,5 +192,3 @@ class EmbeddingRetriever:
 				outputs.extend([list(map(float, vec)) for vec in pooled])
 
 		return outputs
-
-

@@ -133,7 +133,3 @@ def set_global_log_level(level: int):
         logger = logging.getLogger(name)
         if logger.handlers:  # Only update configured loggers.
             set_log_level(logger, level)
-
-
-# A default logger for convenience.
-default_logger = setup_logger('vulvariant')

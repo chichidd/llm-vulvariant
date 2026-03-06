@@ -91,8 +91,6 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 
-from transformers import AutoTokenizer
-from typing import List, Dict
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -301,101 +299,5 @@ def main():
         logger.info(f"Unknown command: {command}")
         sys.exit(1)
 
-
-def count_conversation_tokens(
-    conversation_messages: List[Dict[str, str]], 
-    tokenizer_path: str,
-    add_generation_prompt: bool = False
-) -> int:
-    """
-    Compute the number of tokens for a conversation under a specific tokenizer.
-
-    This function uses `tokenizer.apply_chat_template` to ensure the conversation is formatted
-    and tokenized consistently with model inference, enabling accurate token counting.
-
-    Args:
-        conversation_messages (List[Dict[str, str]]):
-            Conversation history; each item is a dict with 'role' (e.g., 'user', 'assistant', 'system')
-            and 'content'. Example:
-            [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "I'm fine"}]
-        tokenizer_path (str):
-            Path to a pretrained tokenizer or a Hugging Face model name (e.g., 'deepseek-chat', './my_model_path').
-        add_generation_prompt (bool):
-            Whether to add a special token at the end of the conversation to prompt generation.
-            Set to True when counting a full input prompt used for generation; set to False when counting
-            an existing conversation history. Default is False.
-
-    Returns:
-        int: Total token count of the conversation history.
-    """
-    try:
-        # 1. Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        
-        # 2. Apply chat template and tokenize
-        # tokenize=True: returns a list of token IDs (List[int])
-        # add_generation_prompt: whether to add extra special tokens (e.g., <|im_start|>assistant)
-        inputs: List[int] = tokenizer.apply_chat_template(
-            conversation_messages, 
-            tokenize=True, 
-            add_generation_prompt=add_generation_prompt
-        )
-        
-        # 3. Return token count
-        return len(inputs)
-        
-    except Exception as e:
-        logger.info(f"Error while counting tokens: {e}")
-        return 0
-
-
 if __name__ == "__main__":
     main()
-
-    import json
-    
-    # Assume your conv.json roughly looks like:
-    # {
-    #     "conversation_history": [
-    #         {"role": "system", "content": "You are a helpful assistant."},
-    #         {"role": "user", "content": "What is the highest mountain in China?"},
-    #         {"role": "assistant", "content": "The highest mountain in China is Mount Everest."}
-    #     ]
-    # }
-    
-    # Example file reading logic (kept consistent with the original code)
-    filepath = "conv.json"
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        messages = data['conversation_history']
-        
-        # Model path or name
-        # Note: if your model is local, replace 'deepseek-chat' with a local path.
-        model_name_or_path = 'deepseek-chat'
-        
-        # Example 1: Token count for the conversation history (without generation prompt)
-        token_count_history = count_conversation_tokens(
-            conversation_messages=messages, 
-            tokenizer_path=model_name_or_path,
-            add_generation_prompt=False
-        )
-        logger.info(f"Conversation history tokens (no generation prompt): {token_count_history}")
-
-        # Example 2: Token count for inference input (often needs generation prompt)
-        # Only set to False when 'assistant' is the last role.
-        # If the last role is 'user', setting True more accurately simulates inference input.
-        token_count_for_inference = count_conversation_tokens(
-            conversation_messages=messages, 
-            tokenizer_path=model_name_or_path,
-            add_generation_prompt=True
-        )
-        logger.info(f"Inference input tokens (with generation prompt): {token_count_for_inference}")
-
-    except FileNotFoundError:
-        logger.info(f"Error: file not found: {filepath}. Please ensure the file exists and the path is correct.")
-    except json.JSONDecodeError:
-        logger.info(f"Error: file {filepath} is not valid JSON.")
-    except Exception as e:
-        logger.info(f"Error while running main program: {e}")

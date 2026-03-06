@@ -345,8 +345,6 @@ class SoftwareProfiler:
                 repo_path=str(repo_path),
                 languages=self.repo_analyzer_config.get('languages'),
                 cache_dir=str(cache_dir) if cache_dir else None,
-                max_slice_depth=self.repo_analyzer_config.get('max_slice_depth'),
-                max_slice_files=self.repo_analyzer_config.get('max_slice_files'),
                 rebuild_cache=self.repo_analyzer_config.get('rebuild_cache')
             )
 

@@ -247,11 +247,6 @@ dependencies:
             logger.error(f"Failed to install CodeQL pack: {e}")
             return False
     
-    def set_codeql_database(self, database_name: str, language: Optional[str] = None):
-        """Set or update the CodeQL database name."""
-        query_language = self._resolve_query_language(language)
-        self._codeql_database_names[query_language] = database_name
-    
     def _get_codeql_database_name(self, language: Optional[str] = None) -> Optional[str]:
         query_language = self._resolve_query_language(language)
         if query_language in self._codeql_database_names:

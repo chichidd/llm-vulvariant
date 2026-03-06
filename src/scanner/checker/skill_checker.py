@@ -19,7 +19,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from config import _path_config
 from utils.logger import get_logger
@@ -150,7 +150,6 @@ class SkillExploitabilityChecker:
                 vuln=vuln,
                 finding_id=finding_id,
                 repo_path=repo_path,
-                software_profile_path=software_profile_path,
                 commit_hash=commit_hash,
                 evidence_dir=evidence_dir,
             )
@@ -180,7 +179,6 @@ class SkillExploitabilityChecker:
         vuln: Dict[str, Any],
         finding_id: str,
         repo_path: Path,
-        software_profile_path: Optional[Path],
         commit_hash: str = "",
         evidence_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
@@ -190,7 +188,6 @@ class SkillExploitabilityChecker:
             vuln: Vulnerability dictionary from findings
             finding_id: Unique ID for this vulnerability
             repo_path: Path to the repository
-            software_profile_path: Optional path to software profile
             commit_hash: Commit hash to check out inside Docker
             evidence_dir: Directory for PoC script and Docker build artefacts
             
@@ -205,7 +202,7 @@ class SkillExploitabilityChecker:
             fallback_min_mtime = time.time()
 
         prompt = self._build_prompt(
-            vuln, repo_path, software_profile_path,
+            vuln, repo_path,
             commit_hash=commit_hash,
             evidence_dir=evidence_dir,
             result_json_path=result_json_path,
@@ -251,7 +248,6 @@ class SkillExploitabilityChecker:
         self,
         vuln: Dict[str, Any],
         repo_path: Path,
-        software_profile_path: Optional[Path],
         commit_hash: str = "",
         evidence_dir: Optional[Path] = None,
         result_json_path: Optional[Path] = None,
@@ -784,40 +780,3 @@ class SkillExploitabilityChecker:
             "message": message,
             "results": []
         }
-
-
-def check_exploitability_single(
-    findings_path: Path,
-    repo_path: Path,
-    output_path: Path,
-    software_profile_path: Optional[Path] = None,
-    timeout: int = 300,
-    commit_hash: str = "",
-    run_id: Optional[str] = None,
-    claude_config_dir: str | Path | None = None,
-) -> Dict[str, Any]:
-    """Convenience function to check exploitability for a single findings file.
-    
-    Args:
-        findings_path: Path to agentic_vuln_findings.json
-        repo_path: Path to the target repository
-        output_path: Path to write exploitability.json
-        software_profile_path: Optional path to software_profile.json
-        timeout: Timeout in seconds for each Claude CLI call
-        commit_hash: Commit hash for reproducible Docker builds
-        run_id: Optional run identifier for metadata
-        claude_config_dir: Optional runtime directory for Claude CLI
-        
-    Returns:
-        Analysis result dictionary
-    """
-    checker = SkillExploitabilityChecker(timeout=timeout, claude_config_dir=claude_config_dir)
-    return checker.check_single(
-        findings_path=findings_path,
-        repo_path=repo_path,
-        output_path=output_path,
-        software_profile_path=software_profile_path,
-        commit_hash=commit_hash,
-        run_id=run_id,
-        claude_config_dir=claude_config_dir,
-    )

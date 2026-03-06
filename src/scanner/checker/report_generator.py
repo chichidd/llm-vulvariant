@@ -207,7 +207,7 @@ class ReportGenerator:
         cwe_id, cwe_name = cwe_map.get(vuln_type.lower(), ("CWE-20", "Improper Input Validation"))
 
         # Determine severity
-        severity = self._determine_severity(vuln_type, verdict, exploitability)
+        severity = self._determine_severity(vuln_type, verdict)
         cvss_vector = self._generate_cvss_vector(vuln_type, exploitability)
 
         # Title
@@ -366,7 +366,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
 ```
 
 ### Manual Reproduction
-{self._manual_reproduction_steps(vuln_type, file_path, attack_scenario, evidence)}
+{self._manual_reproduction_steps(vuln_type, file_path, attack_scenario)}
 
 ## Remediation
 
@@ -791,9 +791,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                 summary["generation_failed"] += 1
         return summary
 
-    def _determine_severity(
-        self, vuln_type: str, verdict: str, exploitability: Dict[str, Any]
-    ) -> str:
+    def _determine_severity(self, vuln_type: str, verdict: str) -> str:
         """Determine severity level based on vulnerability type and verdict."""
         high_severity_types = {
             "deserialization", "command_injection", "code_injection",
@@ -864,7 +862,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         return impacts.get(vuln_type.lower(), "Security impact dependent on context")
 
     def _manual_reproduction_steps(
-        self, vuln_type: str, file_path: str, attack_scenario: str, evidence: str
+        self, vuln_type: str, file_path: str, attack_scenario: str
     ) -> str:
         """Generate manual reproduction steps."""
         steps = [

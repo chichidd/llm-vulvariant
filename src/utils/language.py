@@ -8,7 +8,7 @@ here instead of hard-coding values.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 
 # ──────────────────────────────────────────────
@@ -141,28 +141,14 @@ def get_codeql_pack(language: str) -> Optional[str]:
     return cfg["codeql_pack"]
 
 
-def get_glob_patterns(language: str, recursive: bool = True) -> List[str]:
-    """Return glob patterns for all source files of *language*.
-
-    >>> get_glob_patterns("python")
-    ['**/*.py']
-    >>> get_glob_patterns("cpp", recursive=False)
-    ['*.c', '*.cpp', '*.cc', '*.cxx', '*.h', '*.hpp', '*.hh']
-    """
-    exts = get_extensions(language)
-    prefix = "**/" if recursive else ""
-    return [f"{prefix}*{ext}" for ext in sorted(exts)]
-
-
 def get_run_cmd(language: str) -> str:
     """Return the default Docker run command for executing the PoC."""
     return LANGUAGE_CONFIG[language]["run_cmd"]
 
 
-def _collect_language_scores(repo_path: Path) -> Tuple[Dict[str, float], Dict[str, int]]:
-    """Collect weighted language scores and per-language file counts."""
+def _collect_language_scores(repo_path: Path) -> Dict[str, float]:
+    """Collect weighted language scores."""
     scores: Dict[str, float] = {lang: 0.0 for lang in LANGUAGE_CONFIG}
-    file_counts: Dict[str, int] = {lang: 0 for lang in LANGUAGE_CONFIG}
 
     # Indicator-file bonus
     INDICATOR_WEIGHT = 15
@@ -182,10 +168,9 @@ def _collect_language_scores(repo_path: Path) -> Tuple[Dict[str, float], Dict[st
             for lang, cfg in LANGUAGE_CONFIG.items():
                 if ext in cfg["extensions"]:
                     scores[lang] += 1
-                    file_counts[lang] += 1
                     break  # one file counted once
 
-    return scores, file_counts
+    return scores
 
 
 def detect_languages(repo_path: Path, limit: Optional[int] = None) -> List[str]:
@@ -193,7 +178,7 @@ def detect_languages(repo_path: Path, limit: Optional[int] = None) -> List[str]:
 
     Languages are ranked by indicator-file + extension-count score.
     """
-    scores, _ = _collect_language_scores(repo_path)
+    scores = _collect_language_scores(repo_path)
     ranked = [
         lang
         for lang, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))

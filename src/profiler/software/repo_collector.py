@@ -37,7 +37,7 @@ class RepoInfoCollector:
             "Pipfile", "poetry.lock", "package.json"
         ]
     
-    def collect(self, repo_path: Path, repo_name: str = None, version: str = None) -> Dict[str, Any]:
+    def collect(self, repo_path: Path) -> Dict[str, Any]:
         """
         Collect repository information.
         

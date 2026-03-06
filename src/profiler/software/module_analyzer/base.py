@@ -14,7 +14,7 @@ def run_agent_analysis(
     system_prompt: str,
     initial_message: str,
     tools: List[Dict[str, Any]],
-    toolkit: Any,  # FolderAnalyzerToolkit or ModuleAnalyzerToolkit
+    toolkit: Any,
     max_iterations: int,
     update_stats_callback: Optional[callable] = None,
     storage_manager: Optional[Any] = None,

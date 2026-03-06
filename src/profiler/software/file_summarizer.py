@@ -1,7 +1,7 @@
 """File summarizer - use an LLM to analyze files."""
 
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from llm import BaseLLMClient, safe_chat_call

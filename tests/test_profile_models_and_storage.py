@@ -78,7 +78,7 @@ def test_software_profile_from_dict_prefers_enhanced_modules_over_modules():
     assert profile.modules[0].external_dependencies == ["pandas"]
 
 
-def test_vulnerability_profile_json_roundtrip():
+def test_vulnerability_profile_dict_roundtrip():
     original = VulnerabilityProfile(
         repo_name="repo",
         affected_version="deadbeef",
@@ -91,8 +91,7 @@ def test_vulnerability_profile_json_roundtrip():
         affected_modules=["api"],
     )
 
-    encoded = original.to_json()
-    restored = VulnerabilityProfile.from_json(encoded)
+    restored = VulnerabilityProfile.from_dict(original.to_dict())
 
     assert restored.repo_name == "repo"
     assert restored.cve_id == "CVE-2025-0001"
