@@ -77,6 +77,43 @@ def test_summarize_chat_completion_usage_extracts_openai_style_usage():
     assert summary["response_id"] == "resp_123"
 
 
+def test_summarize_chat_completion_usage_coerces_mapping_usage_values():
+    summary = summarize_chat_completion_usage(
+        {
+            "id": "resp_map",
+            "model": "deepseek-chat",
+            "usage": {
+                "prompt_tokens": "120",
+                "completion_tokens": "45",
+                "context_window": "16384",
+                "service_tier": "priority",
+                "prompt_tokens_details": {
+                    "cached_tokens": "33",
+                    "cache_creation_tokens": "4",
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": "7",
+                    "accepted_prediction_tokens": "8",
+                    "rejected_prediction_tokens": "9",
+                },
+            },
+        },
+        requested_model="deepseek-chat",
+        provider="deepseek",
+    )
+
+    assert summary["service_tier"] == "priority"
+    assert summary["calls_total"] == 1
+    assert summary["selected_model_usage"]["input_tokens"] == 120
+    assert summary["selected_model_usage"]["output_tokens"] == 45
+    assert summary["selected_model_usage"]["cache_read_input_tokens"] == 33
+    assert summary["selected_model_usage"]["cache_creation_input_tokens"] == 4
+    assert summary["selected_model_usage"]["reasoning_tokens"] == 7
+    assert summary["selected_model_usage"]["accepted_prediction_tokens"] == 8
+    assert summary["selected_model_usage"]["rejected_prediction_tokens"] == 9
+    assert summary["selected_model_usage"]["context_window"] == 16384
+
+
 def test_execute_with_retry_does_not_append_empty_usage_for_pre_request_failure():
     client = _DummyClient()
 

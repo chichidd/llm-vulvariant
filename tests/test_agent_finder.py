@@ -315,3 +315,33 @@ def test_run_turn_commits_progress_when_next_request_hits_context_limit(monkeypa
     assert finder.toolkit.executed == [("mock_tool", {})]
     assert finder.conversation_history[-2].content == "need tool"
     assert finder.conversation_history[-1]["role"] == "tool"
+
+
+def test_run_invalid_critical_stop_mode_falls_back_to_min(monkeypatch):
+    monkeypatch.setattr(finder_module, "AgenticToolkit", DummyToolkit)
+    finder = finder_module.AgenticVulnFinder(
+        llm_client=DummyLLM(),
+        repo_path=Path("/tmp/demo"),
+        software_profile=SimpleNamespace(version="target123", modules=[]),
+        vulnerability_profile=SimpleNamespace(
+            cve_id="CVE-2025-0001",
+            to_dict=lambda: {"cve_id": "CVE-2025-0001"},
+        ),
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="unexpected",
+        verbose=False,
+        output_dir=None,
+    )
+    finder.memory = DummyMemory()
+
+    def fake_run_turn(iteration):
+        finder.conversation_history.append({"role": "assistant", "content": "keep going"})
+        return 1
+
+    monkeypatch.setattr(finder, "_run_turn", fake_run_turn)
+
+    result = finder.run()
+
+    assert finder.critical_stop_mode == "min"
+    assert result["iterations"] == 1
