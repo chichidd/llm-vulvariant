@@ -15,13 +15,21 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from config import _path_config
+from utils.claude_cli import (
+    DEFAULT_SELECTED_MODEL_HINT,
+    apply_claude_cli_usage_counters,
+    aggregate_usage_summaries,
+    coerce_aggregated_usage_summary,
+    count_claude_cli_attempts,
+    merge_aggregated_usage_summaries,
+    run_claude_cli,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -172,6 +180,7 @@ class SkillExploitabilityChecker:
             "output_path": str(output_path),
             "num_analyzed": len(vulnerabilities),
             "summary": result_doc.get("summary", {}),
+            "llm_usage_summary": result_doc.get("metadata", {}).get("llm_usage_summary", {}),
         }
 
     def _analyze_single_vuln(
@@ -195,9 +204,11 @@ class SkillExploitabilityChecker:
             Analysis result dictionary
         """
         result_json_path: Optional[Path] = None
+        claude_record_path: Optional[Path] = None
         fallback_min_mtime: Optional[float] = None
         if evidence_dir:
             result_json_path = evidence_dir / "analysis_output.json"
+            claude_record_path = evidence_dir / "claude_cli_invocation.json"
             self._prepare_result_json_path(result_json_path)
             fallback_min_mtime = time.time()
 
@@ -209,7 +220,10 @@ class SkillExploitabilityChecker:
         )
         
         # Run Claude and get JSON result
-        success, claude_result = self._run_claude(prompt)
+        success, claude_result, llm_usage = self._run_claude(
+            prompt,
+            record_path=claude_record_path,
+        )
 
         analysis: Optional[Dict[str, Any]] = None
         if success and claude_result:
@@ -232,6 +246,9 @@ class SkillExploitabilityChecker:
 
         analysis["finding_id"] = finding_id
         analysis["original_finding"] = vuln
+        analysis["llm_usage"] = llm_usage
+        if claude_record_path:
+            analysis["claude_cli_record_path"] = str(claude_record_path)
 
         # Recover and normalize docker verification using on-disk evidence.
         # This makes results robust when Claude returns non-JSON output,
@@ -379,66 +396,61 @@ class SkillExploitabilityChecker:
             logger.info(f"Loaded analysis JSON from file fallback: {output_json_path}")
         return payload
 
-    def _run_claude(self, prompt: str) -> Tuple[bool, Optional[Dict]]:
+    def _run_claude(
+        self,
+        prompt: str,
+        record_path: Optional[Path] = None,
+    ) -> Tuple[bool, Optional[Dict], Dict[str, Any]]:
         """Run Claude CLI and return the result.
         
         Returns:
-            Tuple of (success, claude_json_output)
+            Tuple of (success, claude_json_output, llm_usage_summary)
         """
-        cmd = [
-            "claude", "-p",
-            "--dangerously-skip-permissions",
-            "--output-format", "json",
-            prompt
-        ]
-        
         try:
             logger.debug(f"Running Claude with prompt length: {len(prompt)}")
             claude_env = os.environ.copy()
             claude_env["CLAUDE_CONFIG_DIR"] = str(self._active_claude_config_dir)
-            result = subprocess.run(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
+            response = run_claude_cli(
+                prompt=prompt,
                 cwd=str(_path_config['repo_root']),
                 env=claude_env,
                 timeout=self.timeout,
+                extra_args=["--dangerously-skip-permissions"],
+                record_path=record_path,
+                preferred_model_hint=DEFAULT_SELECTED_MODEL_HINT,
             )
+            llm_usage = apply_claude_cli_usage_counters(response.usage_summary, response)
             
-            logger.debug(f"Claude exit code: {result.returncode}")
+            logger.debug(f"Claude exit code: {response.returncode}")
             
-            if result.returncode != 0:
-                logger.warning(f"Claude returned code {result.returncode}")
-                if result.stderr:
-                    logger.warning(f"Claude stderr: {result.stderr[:500]}")
-                if result.stdout:
-                    logger.debug(f"Claude stdout (truncated): {result.stdout[:500]}")
-                return False, None
+            if response.returncode != 0:
+                if response.error_type == "FileNotFoundError":
+                    logger.error("Claude CLI not found")
+                elif response.timed_out:
+                    logger.error(f"Claude timed out after {self.timeout}s")
+                logger.warning(f"Claude returned code {response.returncode}")
+                if response.stderr:
+                    logger.warning(f"Claude stderr: {response.stderr[:500]}")
+                if response.stdout:
+                    logger.debug(f"Claude stdout (truncated): {response.stdout[:500]}")
+                return False, None, llm_usage
             
             # Parse Claude's JSON output
-            if result.stdout:
-                try:
-                    claude_output = json.loads(result.stdout)
-                    logger.debug(f"Claude output parsed successfully, type: {claude_output.get('type')}")
-                    return True, claude_output
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse Claude output: {e}")
-                    logger.debug(f"Raw output: {result.stdout[:500]}")
+            if response.parsed_output:
+                logger.debug(
+                    f"Claude output parsed successfully, type: {response.parsed_output.get('type')}"
+                )
+                return True, response.parsed_output, llm_usage
+            if response.stdout:
+                logger.warning(f"Failed to parse Claude output: {response.parse_error}")
+                logger.debug(f"Raw output: {response.stdout[:500]}")
             else:
                 logger.warning("Claude returned empty stdout")
             
-            return False, None
-            
-        except subprocess.TimeoutExpired:
-            logger.error(f"Claude timed out after {self.timeout}s")
-            return False, None
-        except FileNotFoundError:
-            logger.error("Claude CLI not found")
-            return False, None
+            return False, None, llm_usage
         except Exception as e:
             logger.error(f"Claude execution error: {e}")
-            return False, None
+            return False, None, {}
 
     def _parse_claude_result(self, claude_output: Dict) -> Optional[Dict[str, Any]]:
         """Parse the analysis result from Claude's JSON output.
@@ -660,26 +672,38 @@ class SkillExploitabilityChecker:
                 if "results" in existing and "metadata" in existing:
                     original_count = len(existing.get("results", []))
                     retained_results = []
+                    dropped_results = []
                     retry_count = 0
                     for item in existing.get("results", []):
                         verdict = str(item.get("verdict", "")).upper()
                         if verdict in {"ERROR", "UNKNOWN"}:
                             retry_count += 1
+                            dropped_results.append(item)
                             continue
                         retained_results.append(item)
 
+                    metadata = existing.setdefault("metadata", {})
+                    metadata.setdefault(
+                        "llm_usage_retried_attempts_summary",
+                        aggregate_usage_summaries([]),
+                    )
                     if retry_count > 0:
                         logger.info(
                             f"Resuming with retry: dropping {retry_count} ERROR/UNKNOWN results, "
                             f"retaining {len(retained_results)}/{original_count}"
                         )
                         existing["results"] = retained_results
-                        metadata = existing.setdefault("metadata", {})
+                        metadata["llm_usage_retried_attempts_summary"] = merge_aggregated_usage_summaries(
+                            [
+                                metadata.get("llm_usage_retried_attempts_summary"),
+                                self._aggregate_result_llm_usage_summary(dropped_results),
+                            ]
+                        )
                         metadata["completed_at"] = None
                         self._update_summary(existing)
                     else:
                         logger.info(f"Resuming from {original_count} existing results")
-                    metadata = existing.setdefault("metadata", {})
+                        metadata["llm_usage_summary"] = self._build_llm_usage_summary(existing)
                     if run_id:
                         metadata["run_id"] = run_id
                     if claude_config_dir:
@@ -698,6 +722,8 @@ class SkillExploitabilityChecker:
                 "completed_at": None,
                 "run_id": run_id,
                 "claude_runtime_dir": str(claude_config_dir) if claude_config_dir else None,
+                "llm_usage_retried_attempts_summary": aggregate_usage_summaries([]),
+                "llm_usage_summary": aggregate_usage_summaries([]),
             },
             "summary": {
                 "exploitable": 0,
@@ -734,6 +760,32 @@ class SkillExploitabilityChecker:
             summary[key] += 1
         
         result_doc["summary"] = summary
+        metadata = result_doc.setdefault("metadata", {})
+        metadata.setdefault("llm_usage_retried_attempts_summary", aggregate_usage_summaries([]))
+        metadata["llm_usage_summary"] = self._build_llm_usage_summary(result_doc)
+
+    @staticmethod
+    def _coerce_result_llm_usage_summary(llm_usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        return coerce_aggregated_usage_summary(llm_usage)
+
+    @classmethod
+    def _aggregate_result_llm_usage_summary(cls, results: Any) -> Dict[str, Any]:
+        return merge_aggregated_usage_summaries(
+            cls._coerce_result_llm_usage_summary(item.get("llm_usage"))
+            for item in (results or [])
+            if isinstance(item, dict)
+        )
+
+    def _build_llm_usage_summary(self, result_doc: Dict[str, Any]) -> Dict[str, Any]:
+        """Build cumulative LLM usage summary including retried attempts."""
+        metadata = result_doc.setdefault("metadata", {})
+        current_results_summary = self._aggregate_result_llm_usage_summary(result_doc.get("results", []))
+        return merge_aggregated_usage_summaries(
+            [
+                metadata.get("llm_usage_retried_attempts_summary"),
+                current_results_summary,
+            ]
+        )
 
     def _save_results(self, output_path: Path, result_doc: Dict[str, Any]) -> None:
         """Save results to file."""

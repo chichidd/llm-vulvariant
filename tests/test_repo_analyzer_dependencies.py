@@ -6,7 +6,7 @@ from profiler.software.repo_analyzer import CodeLocation, DependencyInfo, RepoAn
 def _build_analyzer(repo_path: Path, language: str = "python") -> RepoAnalyzer:
     analyzer = RepoAnalyzer.__new__(RepoAnalyzer)
     analyzer.repo_path = repo_path
-    analyzer.language = language
+    analyzer.languages = [language]
     analyzer._dependencies = {}
     return analyzer
 

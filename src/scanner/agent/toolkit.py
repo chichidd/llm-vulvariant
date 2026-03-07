@@ -71,12 +71,10 @@ class AgenticToolkit:
         self,
         languages: Optional[List[str]],
     ) -> List[str]:
-        if languages:
-            resolved = self._dedupe_languages(languages)
-            if resolved:
-                return resolved
+        if languages is not None:
+            return self._dedupe_languages(languages)
         detected = self._dedupe_languages(detect_repo_languages(self.repo_path))
-        return detected or ["python"]
+        return detected
 
     @staticmethod
     def _dedupe_languages(languages: List[str]) -> List[str]:
@@ -97,8 +95,6 @@ class AgenticToolkit:
                 extensions |= get_extensions(lang)
             except ValueError:
                 logger.warning("Unsupported language in scanner toolkit: %s", lang)
-        if not extensions:
-            extensions = get_extensions(self._primary_language())
         return extensions
 
     def _primary_language(self) -> str:
@@ -1270,8 +1266,6 @@ dependencies:
             "javascript": "javascript",
             "js": "javascript",
             "ruby": "ruby",
-            "csharp": "csharp",
-            "cs": "csharp",
         }
         return alias_map.get(import_key)
 

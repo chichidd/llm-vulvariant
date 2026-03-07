@@ -183,3 +183,15 @@ def test_generate_full_report_only_exploitable_hides_conditional_sections():
     assert "Report mode: only findings with verdict `EXPLOITABLE`" in report
     assert "Exploitable Vulnerabilities" in report
     assert "Conditionally Exploitable Vulnerabilities" not in report
+
+
+def test_report_generator_falls_back_to_python_for_unknown_language():
+    gen = ReportGenerator(
+        repo_name="demo",
+        commit_hash="abcdef1234567890",
+        repo_url="https://github.com/example/demo",
+        language="unknown",
+    )
+
+    assert gen.language == "python"
+    assert gen._exploit_file == "exploit.py"

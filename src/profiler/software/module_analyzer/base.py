@@ -3,8 +3,14 @@
 import json
 from typing import Any, Dict, List, Tuple, Optional
 
-from llm import BaseLLMClient
+from llm import (
+    BaseLLMClient,
+    aggregate_llm_usage_since,
+    capture_llm_usage_snapshot,
+)
+from utils.claude_cli import coerce_aggregated_usage_summary, merge_aggregated_usage_summaries
 from utils.logger import get_logger
+from utils.number_utils import to_int
 
 logger = get_logger(__name__)
 
@@ -49,6 +55,7 @@ def run_agent_analysis(
     # Try to resume from a checkpointed conversation (loaded from module_analysis)
     messages = None
     start_iteration = 0
+    prior_usage_summary = None
     
     if resume_from_saved and storage_manager and conversation_name and path_parts:
         # Load the corresponding conversation from the module_analysis directory
@@ -57,6 +64,8 @@ def run_agent_analysis(
             logger.info(f"Resuming from saved conversation: {conversation_name}")
             messages = saved_conv.get('messages', [])
             start_iteration = saved_conv.get('llm_calls', 0)
+            if saved_conv.get("llm_usage"):
+                prior_usage_summary = coerce_aggregated_usage_summary(saved_conv.get("llm_usage"))
             logger.info(f"Resuming from iteration {start_iteration}/{max_iterations}")
     
     # If no checkpoint is available, initialize a new conversation
@@ -65,6 +74,41 @@ def run_agent_analysis(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": initial_message},
         ]
+
+    usage_snapshot = capture_llm_usage_snapshot(llm_client)
+
+    def _build_conversation_usage_summary(total_llm_calls: int) -> Dict[str, Any]:
+        current_summary = coerce_aggregated_usage_summary(
+            aggregate_llm_usage_since(llm_client, usage_snapshot)
+        )
+        if isinstance(prior_usage_summary, dict) and to_int(prior_usage_summary.get("calls_total")) > 0:
+            merged_summary = merge_aggregated_usage_summaries(
+                [prior_usage_summary, current_summary]
+            )
+        else:
+            merged_summary = current_summary
+
+        merged_summary = dict(merged_summary)
+        expected_calls = max(0, to_int(total_llm_calls))
+        recorded_calls = to_int(merged_summary.get("calls_total"))
+        if expected_calls > recorded_calls:
+            missing_calls = expected_calls - recorded_calls
+            merged_summary["calls_total"] = expected_calls
+            merged_summary["calls_missing_selected_model_usage"] = to_int(
+                merged_summary.get("calls_missing_selected_model_usage")
+            ) + missing_calls
+            merged_summary["calls_missing_usage"] = to_int(
+                merged_summary.get("calls_missing_usage")
+            ) + missing_calls
+
+        llm_config = getattr(llm_client, "config", None)
+        if llm_config is not None:
+            if not merged_summary.get("provider"):
+                merged_summary["provider"] = getattr(llm_config, "provider", None)
+            if not merged_summary.get("requested_model"):
+                merged_summary["requested_model"] = getattr(llm_config, "model", None)
+        merged_summary["source"] = "llm_client"
+        return merged_summary
     
     # Process within a single turn, allowing up to max_iterations LLM calls
     for llm_call_idx in range(start_iteration, max_iterations):
@@ -103,7 +147,15 @@ def run_agent_analysis(
                     logger.info(f"Analysis completed with {llm_call_count} LLM calls (from content)")
                     # Save the final conversation
                     if storage_manager and conversation_name and path_parts:
-                        _save_conversation_final(storage_manager, conversation_name, messages, llm_call_count, result, path_parts)
+                        _save_conversation_final(
+                            storage_manager,
+                            conversation_name,
+                            messages,
+                            llm_call_count,
+                            result,
+                            path_parts,
+                            llm_usage=_build_conversation_usage_summary(llm_call_count),
+                        )
                     return True, result, llm_call_count, messages
                 except json.JSONDecodeError as e:
                     logger.debug(f"Failed to parse JSON from content: {e}")
@@ -139,7 +191,15 @@ def run_agent_analysis(
                     logger.info(f"Analysis completed with {llm_call_count} LLM calls")
                     # Save the final conversation
                     if storage_manager and conversation_name and path_parts:
-                        _save_conversation_final(storage_manager, conversation_name, messages, llm_call_count, finalize_result, path_parts)
+                        _save_conversation_final(
+                            storage_manager,
+                            conversation_name,
+                            messages,
+                            llm_call_count,
+                            finalize_result,
+                            path_parts,
+                            llm_usage=_build_conversation_usage_summary(llm_call_count),
+                        )
                     return True, finalize_result, llm_call_count, messages
                 except json.JSONDecodeError:
                     logger.error("Failed to parse finalize result")
@@ -164,7 +224,16 @@ def run_agent_analysis(
     logger.warning(f"Agent did not produce valid result after {max_iterations} LLM calls")
     # Save final (failed) state
     if storage_manager and conversation_name and path_parts:
-        _save_conversation_final(storage_manager, conversation_name, messages, max_iterations, {}, path_parts, success=False)
+        _save_conversation_final(
+            storage_manager,
+            conversation_name,
+            messages,
+            max_iterations,
+            {},
+            path_parts,
+            success=False,
+            llm_usage=_build_conversation_usage_summary(max_iterations),
+        )
     return False, {}, max_iterations, messages
 
 
@@ -175,16 +244,18 @@ def _save_conversation_final(
     llm_calls: int,
     result: Dict[str, Any],
     path_parts: tuple,
-    success: bool = True
+    success: bool = True,
+    llm_usage: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist the final conversation (saved under the module_analysis directory)."""
     try:
-        from utils.agent_conversation import make_serializable
+        from scanner.agent.utils import make_serializable
         from datetime import datetime
         conversation_data = {
             "conversation_name": conversation_name,
             "timestamp": datetime.now().isoformat(),
             "llm_calls": llm_calls,
+            "llm_usage": llm_usage,
             "status": "completed" if success else "failed",
             "messages": make_serializable(messages),
             "result": result,

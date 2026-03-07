@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from llm import BaseLLMClient
 from utils.logger import get_logger
+from utils.number_utils import to_int
 from scanner.agent.utils import (
     clear_reasoning_content,
     compress_iteration_conversation,
@@ -22,6 +23,15 @@ from .prompts import (
 from .toolkit import AgenticToolkit
 
 logger = get_logger(__name__)
+
+_CONTEXT_LIMIT_ERROR_PATTERNS = (
+    "maximum context length",
+    "context length exceeded",
+    "context window exceeded",
+    "prompt is too long",
+    "too many tokens",
+    "input is too long",
+)
 
 
 class AgenticVulnFinder:
@@ -119,21 +129,96 @@ class AgenticVulnFinder:
     def _clear_reasoning_content(self) -> List[Dict[str, Any]]:
         return clear_reasoning_content(self.conversation_history)
 
+    def _commit_messages(self, messages: List[Dict[str, Any]]) -> None:
+        self.conversation_history += messages[len(self.conversation_history):]
+
+    def _get_last_request_input_tokens(self) -> int:
+        getter = getattr(self.llm_client, "get_last_request_input_tokens", None)
+        if callable(getter):
+            return max(0, to_int(getter()))
+
+        summary_getter = getattr(self.llm_client, "get_last_usage_summary", None)
+        if not callable(summary_getter):
+            return 0
+
+        summary = summary_getter()
+        selected_usage = summary.get("selected_model_usage") if isinstance(summary, dict) else None
+        top_level_usage = summary.get("top_level_usage") if isinstance(summary, dict) else None
+        return max(
+            0,
+            to_int(
+                (selected_usage or {}).get("input_tokens")
+                or (top_level_usage or {}).get("input_tokens")
+            ),
+        )
+
+    def _get_last_request_output_tokens(self) -> int:
+        getter = getattr(self.llm_client, "get_last_request_output_tokens", None)
+        if callable(getter):
+            return max(0, to_int(getter()))
+
+        summary_getter = getattr(self.llm_client, "get_last_usage_summary", None)
+        if not callable(summary_getter):
+            return 0
+
+        summary = summary_getter()
+        selected_usage = summary.get("selected_model_usage") if isinstance(summary, dict) else None
+        top_level_usage = summary.get("top_level_usage") if isinstance(summary, dict) else None
+        return max(
+            0,
+            to_int(
+                (selected_usage or {}).get("output_tokens")
+                or (top_level_usage or {}).get("output_tokens")
+            ),
+        )
+
+    def _get_last_request_context_limit(self) -> int:
+        getter = getattr(self.llm_client, "get_last_request_context_limit", None)
+        if callable(getter):
+            return max(0, to_int(getter()))
+        return max(0, to_int(getattr(self.llm_client, "context_limit", 0)))
+
+    def _is_near_context_limit(
+        self,
+        input_tokens: int,
+        context_limit: int,
+        reserved_output_tokens: int = 0,
+    ) -> bool:
+        if input_tokens <= 0 or context_limit <= 0:
+            return False
+
+        reserved_output_tokens = max(0, reserved_output_tokens)
+        projected_total = input_tokens + min(reserved_output_tokens, context_limit)
+        threshold = int(0.8 * context_limit)
+        return projected_total >= threshold or projected_total >= context_limit
+
+    @staticmethod
+    def _is_context_limit_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return any(pattern in message for pattern in _CONTEXT_LIMIT_ERROR_PATTERNS)
+
     def _run_turn(self, iteration: int) -> int:
         sub_turn = 1
         messages = self._clear_reasoning_content()
         while True:
+            tools = self.toolkit.get_available_tools()
             try:
                 message = self.llm_client.chat(
                     messages,
-                    tools=self.toolkit.get_available_tools(),
+                    tools=tools,
                     tool_choice="auto",
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                 )
             except Exception as exc:  # pylint: disable=broad-except
-                logger.error(f"LLM call failed: {exc}")
-                break
+                if self._is_context_limit_error(exc):
+                    logger.warning(
+                        "LLM request hit the context limit; ending the current turn and rolling conversation forward"
+                    )
+                else:
+                    logger.error(f"LLM call failed: {exc}")
+                self._commit_messages(messages)
+                return sub_turn
             reasoning_content = getattr(message, "reasoning_content", None)
             content = getattr(message, "content", None)
             tool_calls = getattr(message, "tool_calls", None)
@@ -141,22 +226,24 @@ class AgenticVulnFinder:
                 logger.error("LLM returned no content and no tool calls.")
                 continue
             messages.append(message)
-            messages_token_len = self.llm_client.token_compute.apply_chat_template_len(messages) 
+            request_input_tokens = self._get_last_request_input_tokens()
+            request_output_tokens = self._get_last_request_output_tokens()
+            request_context_limit = self._get_last_request_context_limit()
 
             if self.verbose:
-                
                 logger.info(
-                    f"[Iteration {iteration + 1}.{sub_turn}]\n- Tokens: {messages_token_len}\n- {reasoning_content=}\n- {content=}\n")
+                    f"[Iteration {iteration + 1}.{sub_turn}]\n"
+                    f"- API input_tokens: {request_input_tokens}\n"
+                    f"- API output_tokens: {request_output_tokens}\n"
+                    f"- API context_limit: {request_context_limit}\n"
+                    f"- {reasoning_content=}\n"
+                    f"- {content=}\n"
+                )
                 if tool_calls is not None:
                     logger.info(f"- {tool_calls[0].function.name=}\n- {tool_calls[0].function.arguments=}\n")
-                
-            # the token limitation handling
-            if tool_calls is None or (messages_token_len > int(0.8 * (self.llm_client.context_limit - self.llm_client.config.max_tokens))):
-                self.conversation_history += messages[len(self.conversation_history) :]
-                return sub_turn
 
-            # temperary safeguard against infinite loops
-            if messages_token_len > 65536:
+            if tool_calls is None:
+                self._commit_messages(messages)
                 return sub_turn
             
             for tool in tool_calls:
@@ -201,8 +288,19 @@ class AgenticVulnFinder:
                 if len(tool_result_content) > 10000:
                     tool_result_content = tool_result_content[:10000] + "\n... [truncated]"
                 messages.append({"role": "tool", "tool_call_id": tool.id, "content": tool_result_content})
+
+            if self._is_near_context_limit(
+                request_input_tokens,
+                request_context_limit,
+                reserved_output_tokens=max(0, to_int(self.max_tokens)),
+            ):
+                if self.verbose:
+                    logger.info(
+                        "Stopping current turn because the last successful request is already near the model context limit"
+                    )
+                self._commit_messages(messages)
+                return sub_turn
             sub_turn += 1
-        return sub_turn
 
     def _extract_complementary_summary(self, summarized: Dict[str, Any]) -> str:
         """Extract only information complementary to _get_user_message.

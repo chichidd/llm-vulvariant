@@ -686,7 +686,7 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Groups per LLM call")
     ap.add_argument("--max-workers", type=int, default=4, help="Max parallel workers for LLM calls")
     ap.add_argument("--min-file-score", type=int, default=1, help="Minimum file score for module inclusion")
-    ap.add_argument("--llm-provider", default="deepseek", help="LLM provider (openai, deepseek, lab, mock)")
+    ap.add_argument("--llm-provider", default="deepseek", help="LLM provider (openai, deepseek)")
     ap.add_argument("--llm-model", default="", help="LLM model name (optional)")
     ap.add_argument("--require-llm", action="store_true", help="Fail if LLM is unavailable or returns invalid JSON")
     ap.add_argument("--file-list", default=None, help="Optional JSON file with relative paths to include in module mapping")

@@ -8,13 +8,18 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import _path_config
+from utils.claude_cli import (
+    DEFAULT_SELECTED_MODEL_HINT,
+    apply_claude_cli_usage_counters,
+    count_claude_cli_attempts,
+    run_claude_cli,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,6 +42,12 @@ class SkillModuleAnalyzer:
 
         self.skill_root = self._resolve_skill_root()
         self.taxonomy = self._load_taxonomy()
+        self._last_llm_usage: Dict[str, Any] = {}
+        self._last_claude_cli_record_path: Optional[str] = None
+
+    @staticmethod
+    def _count_claude_attempts(response: Any) -> int:
+        return count_claude_cli_attempts(response)
 
     def analyze(
         self,
@@ -55,8 +66,14 @@ class SkillModuleAnalyzer:
         output_dir = self._resolve_output_dir(storage_manager, repo_name, version)
         if force_regenerate:
             self._reset_output_dir(output_dir)
-        if not self._run_claude_analysis(repo_path, output_dir, repo_name):
-            return {"modules": [], "llm_calls": 0}
+        success, llm_usage, record_path = self._run_claude_analysis(repo_path, output_dir, repo_name)
+        if not success:
+            return {
+                "modules": [],
+                "llm_calls": self._infer_llm_call_count(llm_usage),
+                "llm_usage": llm_usage,
+                "claude_cli_record_path": str(record_path) if record_path else None,
+            }
 
         module_map = self._load_json(output_dir / "module_map.json") or {}
         file_index = self._load_json(output_dir / "file_index.json") or {}
@@ -72,7 +89,9 @@ class SkillModuleAnalyzer:
 
         result = {
             "modules": modules,
-            "llm_calls": 0,
+            "llm_calls": self._infer_llm_call_count(llm_usage),
+            "llm_usage": llm_usage,
+            "claude_cli_record_path": str(record_path) if record_path else None,
             "taxonomy": "ai_infra_taxonomy_v1",
             "module_map": module_map,
             "file_index": filtered_index,
@@ -123,9 +142,15 @@ class SkillModuleAnalyzer:
                 return out_dir
         return Path(tempfile.mkdtemp(prefix="skill_module_modeler_"))
 
-    def _run_claude_analysis(self, repo_path: Path, output_dir: Path, repo_name: Optional[str]) -> bool:
+    def _run_claude_analysis(
+        self,
+        repo_path: Path,
+        output_dir: Path,
+        repo_name: Optional[str],
+    ) -> Tuple[bool, Dict[str, Any], Path]:
         """Run Claude CLI to analyze repository module structure."""
         output_dir.mkdir(parents=True, exist_ok=True)
+        record_path = output_dir / "claude_cli_invocation.json"
         
         prompt = (
             f'Use the `ai-infra-module-modeler` skill to analyze the module structure of '
@@ -135,24 +160,57 @@ class SkillModuleAnalyzer:
             logger.info(f"Running Claude analysis for {repo_name} with prompt: {prompt}")
         else:
             logger.info(f"Running Claude analysis with prompt: {prompt}")
-        cmd = ["claude", "-p", prompt]
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                cwd=str(_path_config['repo_root']),
+
+        response = run_claude_cli(
+            prompt=prompt,
+            cwd=str(_path_config['repo_root']),
+            record_path=record_path,
+            preferred_model_hint=DEFAULT_SELECTED_MODEL_HINT,
+            allow_plain_text_fallback=True,
+        )
+        if response.fallback_from_json_output:
+            logger.warning(
+                "Claude CLI appears to lack --output-format json support; module analysis retried in text mode"
             )
-            logger.info(f"Claude analysis completed: {result.stdout}")
-            return True
-        except subprocess.CalledProcessError as exc:
-            logger.warning(f"Claude analysis failed: {exc.stderr}")
-            return False
-        except FileNotFoundError:
+        self._last_llm_usage = apply_claude_cli_usage_counters(response.usage_summary, response)
+        self._last_claude_cli_record_path = str(record_path)
+
+        if response.returncode == 0:
+            result_text = ""
+            if response.parsed_output:
+                result_text = str(response.parsed_output.get("result", "")).strip()
+            elif response.stdout:
+                result_text = response.stdout.strip()
+            if response.parse_error:
+                logger.warning(
+                    "Claude analysis stdout was not JSON; continuing because module artifacts are file-based"
+                )
+            logger.info(f"Claude analysis completed: {result_text[:500]}")
+            return True, response.usage_summary, record_path
+
+        if response.error_type == "FileNotFoundError":
             logger.error("Claude CLI not found. Please install it first.")
-            return False
+        elif response.timed_out:
+            logger.warning("Claude analysis timed out")
+        elif response.stderr:
+            logger.warning(f"Claude analysis failed: {response.stderr[:500]}")
+        elif response.parse_error:
+            logger.warning(f"Claude analysis returned invalid JSON: {response.parse_error}")
+        else:
+            logger.warning("Claude analysis failed without stderr output")
+        return False, response.usage_summary, record_path
+
+    @staticmethod
+    def _infer_llm_call_count(llm_usage: Optional[Dict[str, Any]]) -> int:
+        if not isinstance(llm_usage, dict):
+            return 0
+        if "sessions_total" in llm_usage:
+            return int(llm_usage.get("sessions_total", 0) or 0)
+        if "calls_total" in llm_usage:
+            return int(llm_usage.get("calls_total", 0) or 0)
+        if llm_usage.get("session_usage") or llm_usage.get("selected_model_usage") or llm_usage.get("top_level_usage"):
+            return 1
+        return 0
 
     def _reset_output_dir(self, output_dir: Path) -> None:
         """Remove persisted skill outputs so a force-regenerated run starts clean."""

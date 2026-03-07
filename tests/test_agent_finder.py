@@ -8,10 +8,13 @@ class DummyLLM:
     def __init__(self):
         self.config = SimpleNamespace(max_tokens=128)
         self.context_limit = 4096
-        self.token_compute = SimpleNamespace(apply_chat_template_len=lambda messages: 10)
+        self._last_usage_summary = {}
 
     def chat(self, *args, **kwargs):
         raise RuntimeError("not expected")
+
+    def get_last_usage_summary(self):
+        return dict(self._last_usage_summary)
 
 
 class DummyToolkit:
@@ -169,3 +172,146 @@ def test_finalize_memory_triggers_summary_and_markdown(monkeypatch):
 
     assert memory.summary_called is True
     assert memory.markdown_called is True
+
+
+class _ToolAwareToolkit:
+    def __init__(self):
+        self.executed = []
+
+    def get_available_tools(self):
+        return [{"type": "function", "function": {"name": "mock_tool"}}]
+
+    def execute_tool(self, tool_name, parameters):
+        self.executed.append((tool_name, parameters))
+        return SimpleNamespace(success=True, content='{"status":"ok"}', error=None)
+
+
+class _UsageDrivenLLM:
+    def __init__(self, responses, input_tokens, *, context_limit=4096, max_tokens=256):
+        self._responses = list(responses)
+        self._input_tokens = list(input_tokens)
+        self._response_index = 0
+        self._last_usage_summary = {}
+        self.context_limit = context_limit
+        self.config = SimpleNamespace(max_tokens=max_tokens)
+        self.chat_calls = 0
+
+    def chat(self, messages, tools=None, **kwargs):
+        _ = messages
+        _ = tools
+        _ = kwargs
+        self.chat_calls += 1
+        response = self._responses[self._response_index]
+        input_tokens = self._input_tokens[self._response_index]
+        self._response_index += 1
+        self._last_usage_summary = {
+            "selected_model_usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": 11,
+                "context_window": self.context_limit,
+            }
+        }
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    def get_last_usage_summary(self):
+        return dict(self._last_usage_summary)
+
+
+def _tool_call(name="mock_tool", arguments="{}"):
+    return SimpleNamespace(
+        id="tool_1",
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
+
+
+def test_run_turn_uses_api_usage_to_stop_before_next_request(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.max_tokens = 256
+    finder.llm_client = _UsageDrivenLLM(
+        responses=[
+            SimpleNamespace(
+                content="need tool",
+                reasoning_content=None,
+                tool_calls=[_tool_call()],
+            )
+        ],
+        input_tokens=[3500],
+        context_limit=4096,
+        max_tokens=256,
+    )
+    finder.toolkit = _ToolAwareToolkit()
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 1
+    assert finder.llm_client.chat_calls == 1
+    assert finder.toolkit.executed == [("mock_tool", {})]
+    assert finder.conversation_history[-2].content == "need tool"
+    assert finder.conversation_history[-1]["role"] == "tool"
+
+
+def test_run_turn_reserves_completion_budget_when_context_limit_matches_max_tokens(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.max_tokens = 65536
+    finder.llm_client = _UsageDrivenLLM(
+        responses=[
+            SimpleNamespace(
+                content="need tool",
+                reasoning_content=None,
+                tool_calls=[_tool_call()],
+            )
+        ],
+        input_tokens=[128],
+        context_limit=65536,
+        max_tokens=65536,
+    )
+    finder.toolkit = _ToolAwareToolkit()
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 1
+    assert finder.llm_client.chat_calls == 1
+    assert finder.toolkit.executed == [("mock_tool", {})]
+    assert finder.conversation_history[-2].content == "need tool"
+    assert finder.conversation_history[-1]["role"] == "tool"
+
+
+def test_run_turn_commits_progress_when_next_request_hits_context_limit(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.max_tokens = 256
+    finder.llm_client = _UsageDrivenLLM(
+        responses=[
+            SimpleNamespace(
+                content="need tool",
+                reasoning_content=None,
+                tool_calls=[_tool_call()],
+            ),
+            RuntimeError("maximum context length exceeded"),
+        ],
+        input_tokens=[1200, 0],
+        context_limit=4096,
+        max_tokens=256,
+    )
+    finder.toolkit = _ToolAwareToolkit()
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 2
+    assert finder.llm_client.chat_calls == 2
+    assert finder.toolkit.executed == [("mock_tool", {})]
+    assert finder.conversation_history[-2].content == "need tool"
+    assert finder.conversation_history[-1]["role"] == "tool"

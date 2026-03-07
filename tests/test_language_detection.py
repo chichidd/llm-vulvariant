@@ -29,3 +29,12 @@ def test_detect_languages_falls_back_to_python_for_empty_repo(tmp_path):
     assert detect_languages(repo) == ["python"]
     assert detect_languages(repo, limit=1) == ["python"]
     assert detect_language(repo) == "python"
+
+
+def test_detect_languages_returns_empty_for_removed_csharp_support(tmp_path):
+    repo = tmp_path / "csharp-only"
+    repo.mkdir()
+    (repo / "Program.cs").write_text("public class Program {}\n", encoding="utf-8")
+
+    assert detect_languages(repo) == []
+    assert detect_language(repo) == "unknown"

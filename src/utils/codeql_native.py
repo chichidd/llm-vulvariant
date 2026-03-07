@@ -179,7 +179,6 @@ class CodeQLAnalyzer:
         "python": ["python", "py"],
         "javascript": ["javascript", "js", "typescript", "ts"],
         "java": ["java"],
-        "csharp": ["csharp", "cs", "c#"],
         "cpp": ["cpp", "c++", "c"],
         "go": ["go", "golang"],
         "ruby": ["ruby", "rb"],

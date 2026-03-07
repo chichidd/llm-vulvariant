@@ -4,6 +4,7 @@ from utils.codeql_native import CallGraphEdge
 
 def _build_analyzer_with_edges(edges):
     analyzer = RepoAnalyzer.__new__(RepoAnalyzer)
+    analyzer.languages = []
     analyzer._call_graph_edges = edges
     analyzer._functions = {}
     analyzer._function_key_index = {}

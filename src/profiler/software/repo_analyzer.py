@@ -142,8 +142,10 @@ class RepoAnalyzer:
 
         # Resolve analysis languages (multi-language aware).
         self.languages = self._resolve_languages(languages=languages)
-        self.language = self.languages[0] if self.languages else "python"
-        logger.info(f"Detected languages: {', '.join(self.languages)}")
+        logger.info(
+            "Detected languages: %s",
+            ", ".join(self.languages) if self.languages else "none",
+        )
         
         # Set cache directory
         if cache_dir is None:
@@ -212,7 +214,7 @@ class RepoAnalyzer:
         if not active_codeql_languages:
             active_codeql_languages = list(getattr(self, 'codeql_languages', []))
         info = {
-            'languages': list(getattr(self, 'languages', []) or [getattr(self, 'language', 'python')]),
+            'languages': list(getattr(self, 'languages', [])),
             'codeql_languages': active_codeql_languages,
             'call_graph_edges': [],
             'functions': [],
@@ -285,8 +287,7 @@ class RepoAnalyzer:
         """Auto-detect repository languages ranked by relevance."""
         from utils.language import detect_languages
 
-        langs = detect_languages(self.repo_path)
-        return langs or ["python"]
+        return detect_languages(self.repo_path)
 
     def _has_cpp_translation_units(self) -> bool:
         """Return True when repository contains C/C++ source units (not headers only)."""
@@ -352,7 +353,7 @@ class RepoAnalyzer:
     def _load_or_build(self, rebuild: bool = False, cache_path: Optional[Path] = None):
         """Load cache or rebuild analysis data."""
         if cache_path is None:
-            language_key = "-".join(self.languages) if self.languages else self.language
+            language_key = "-".join(self.languages) if self.languages else "none"
             cache_path = self.cache_dir / f"{self.repo_path.name}-{self.commit_hash[:8]}-{language_key}.pkl"
         
         # Try loading cache
@@ -372,8 +373,6 @@ class RepoAnalyzer:
                     self.languages = self._dedupe_preserve_order(
                         [str(lang).strip().lower() for lang in cached_languages if str(lang).strip()]
                     ) or self.languages
-                    if self.languages:
-                        self.language = self.languages[0]
 
                 self._rebuild_function_indexes()
 
@@ -576,7 +575,7 @@ class RepoAnalyzer:
         self._reset_dependency_analysis_caches()
 
         # Build set of extensions to scan for all active languages
-        active_languages = getattr(self, "languages", None) or [getattr(self, "language", "python")]
+        active_languages = list(getattr(self, "languages", []) or [])
         lang_exts: Set[str] = set()
         for lang in active_languages:
             try:

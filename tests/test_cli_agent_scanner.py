@@ -124,6 +124,14 @@ def test_save_scan_outputs_writes_similarity_file(tmp_path):
     assert (tmp_path / "target_similarity.json").exists()
 
 
+def test_resolve_scan_languages_returns_empty_for_removed_csharp_support(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Program.cs").write_text("public class Program {}\n", encoding="utf-8")
+
+    assert agent_scanner._resolve_scan_languages(repo, _mk_profile("repo")) == []
+
+
 def test_resolve_soft_profiles_dir_for_scan_prefers_base_plus_dirname(tmp_path):
     args = Namespace(
         profile_base_path=str(tmp_path / "profiles"),

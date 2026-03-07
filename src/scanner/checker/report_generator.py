@@ -29,7 +29,6 @@ _EXPLOIT_FILES = {
     "javascript": "exploit.js",
     "ruby": "exploit.rb",
     "rust": "exploit.rs",
-    "csharp": "Exploit.cs",
 }
 
 
@@ -59,8 +58,21 @@ class ReportGenerator:
         self.repo_name = repo_name
         self.commit_hash = commit_hash
         self.repo_url = repo_url or f"https://github.com/OWNER/{repo_name}"
-        self.language = language
-        self._exploit_file = _EXPLOIT_FILES.get(language, "exploit.py")
+        self.language = self._normalize_language(language)
+        self._exploit_file = _EXPLOIT_FILES.get(self.language, "exploit.py")
+
+    @staticmethod
+    def _normalize_language(language: str) -> str:
+        normalized = str(language or "").strip().lower() or "python"
+        try:
+            get_run_cmd(normalized)
+        except Exception:
+            logger.warning(
+                "Unsupported report language %r; falling back to python templates.",
+                language,
+            )
+            return "python"
+        return normalized
 
     def generate_all(
         self,

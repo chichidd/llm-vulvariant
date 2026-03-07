@@ -48,6 +48,7 @@ def test_software_profile_roundtrip_keeps_module_and_dependency_fields():
         builtin_libraries=["json"],
         dependency_usage_count={"torch": 2},
         total_functions=11,
+        metadata={"llm_usage_summary": {"calls_total": 2}},
     )
 
     encoded = profile.to_dict()
@@ -61,6 +62,7 @@ def test_software_profile_roundtrip_keeps_module_and_dependency_fields():
     assert decoded.third_party_libraries == ["torch", "numpy"]
     assert decoded.dependency_usage_count == {"torch": 2}
     assert decoded.total_functions == 11
+    assert decoded.metadata == {"llm_usage_summary": {"calls_total": 2}}
 
 
 def test_software_profile_from_dict_prefers_enhanced_modules_over_modules():
@@ -89,6 +91,7 @@ def test_vulnerability_profile_dict_roundtrip():
         sink_features=SinkFeature(description="sink", type="command_injection", function="os.system"),
         exploit_scenarios=["attacker controls input"],
         affected_modules=["api"],
+        metadata={"llm_calls": 4},
     )
 
     restored = VulnerabilityProfile.from_dict(original.to_dict())
@@ -101,6 +104,7 @@ def test_vulnerability_profile_dict_roundtrip():
     assert restored.flow_features.operations == ["concat"]
     assert restored.sink_features is not None
     assert restored.sink_features.function == "os.system"
+    assert restored.metadata == {"llm_calls": 4}
 
 
 def test_profile_storage_manager_checkpoint_conversation_and_result(tmp_path):

@@ -4,7 +4,12 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from llm import BaseLLMClient, safe_chat_call
+from llm import (
+    BaseLLMClient,
+    aggregate_llm_usage_since,
+    capture_llm_usage_snapshot,
+    safe_chat_call,
+)
 from utils.logger import get_logger
 from utils.llm_utils import parse_llm_json, extract_message_content
 from profiler.profile_storage import ProfileStorageManager
@@ -48,6 +53,49 @@ class BasicInfoAnalyzer:
             config_files_formatted=config_files_text,
             # file_list="\n".join(repo_info.get("files", []))
         )
+        llm_usage = {
+            "source": "llm_client",
+            "provider": getattr(getattr(self.llm_client, "config", None), "provider", None),
+            "requested_model": getattr(getattr(self.llm_client, "config", None), "model", None),
+            "selected_model": getattr(getattr(self.llm_client, "config", None), "model", None),
+            "selected_model_found": getattr(getattr(self.llm_client, "config", None), "model", None) is not None,
+            "selected_model_reason": "requested_model" if getattr(getattr(self.llm_client, "config", None), "model", None) else None,
+            "available_models": [getattr(getattr(self.llm_client, "config", None), "model", None)] if getattr(getattr(self.llm_client, "config", None), "model", None) else [],
+            "models_usage": {},
+            "session_usage": None,
+            "selected_model_usage": None,
+            "top_level_usage": None,
+            "response_id": None,
+            "service_tier": None,
+            "total_cost_usd": 0.0,
+            "is_error": False,
+            "subtype": None,
+            "sessions_total": 0,
+            "turns_total": 0,
+            "calls_total": 0,
+            "calls_with_session_usage": 0,
+            "calls_with_selected_model_usage": 0,
+            "calls_with_selected_model_usage_session_fallback": 0,
+            "calls_with_top_level_usage_fallback": 0,
+            "calls_missing_selected_model_usage": 0,
+            "calls_missing_usage": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 0.0,
+            "request_cost_usd": 0.0,
+            "session_usage_summary": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cost_usd": 0.0,
+                "request_cost_usd": 0.0,
+            },
+            "selected_model_usage_summary": None,
+        }
+        usage_snapshot = capture_llm_usage_snapshot(self.llm_client)
         
         try:
             response = safe_chat_call(
@@ -72,6 +120,7 @@ class BasicInfoAnalyzer:
                 max_repair_attempts=2,
                 task_hint="software basic information extraction",
             )
+            llm_usage = aggregate_llm_usage_since(self.llm_client, usage_snapshot)
 
             if storage_manager:
                 conversation_data = {
@@ -80,6 +129,7 @@ class BasicInfoAnalyzer:
                     "prompt": prompt,
                     "response": content,
                     "parsed_result": llm_result,
+                    "llm_usage": llm_usage,
                 }
                 path_parts = (repo_name, version) if repo_name else (repo_path.name, version)
                 storage_manager.save_conversation("basic_info", conversation_data, *path_parts)
@@ -89,12 +139,18 @@ class BasicInfoAnalyzer:
                 return {
                     "description": llm_result.get("description", ""),
                     "target_application": llm_result.get("target_application", []),
-                    "target_user": llm_result.get("target_user", [])
+                    "target_user": llm_result.get("target_user", []),
+                    "llm_usage": llm_usage,
+                    "llm_calls": llm_usage.get("sessions_total", llm_usage.get("calls_total", 0)),
                 }
         except Exception as e:
             logger.warning(f"LLM-based basic info analysis failed: {e}, using rule-based results")
+            llm_usage = aggregate_llm_usage_since(self.llm_client, usage_snapshot)
         
-        return {}
+        return {
+            "llm_usage": llm_usage,
+            "llm_calls": llm_usage.get("sessions_total", llm_usage.get("calls_total", 0)),
+        }
     
     def _format_config_files(self, config_files: list) -> str:
         """Format configuration file contents."""

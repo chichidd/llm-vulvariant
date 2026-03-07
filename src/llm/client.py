@@ -1,4 +1,4 @@
-
+import copy
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import os
@@ -6,11 +6,204 @@ import time
 import yaml
 from dataclasses import dataclass
 from pathlib import Path
+from utils.claude_cli import aggregate_usage_summaries
+from utils.number_utils import to_int
 from utils.logger import get_logger
 
-from utils import DSTokenizerCompute
-
 logger = get_logger(__name__)
+
+def _usage_get(value: Any, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def build_empty_llm_usage_summary(
+    *,
+    requested_model: Optional[str] = None,
+    provider: Optional[str] = None,
+    is_error: bool = False,
+) -> Dict[str, Any]:
+    available_models = [requested_model] if requested_model else []
+    selection_reason = "requested_model" if requested_model else None
+    return {
+        "source": "llm_client",
+        "provider": provider,
+        "requested_model": requested_model,
+        "preferred_model_hint": None,
+        "selected_model": requested_model,
+        "selected_model_found": requested_model is not None,
+        "selected_model_reason": selection_reason,
+        "available_models": available_models,
+        "models_usage": {},
+        "session_usage": None,
+        "selected_model_usage": None,
+        "top_level_usage": None,
+        "response_id": None,
+        "service_tier": None,
+        "total_cost_usd": 0.0,
+        "is_error": is_error,
+        "subtype": None,
+        "sessions_total": 0,
+        "turns_total": 0,
+        "calls_total": 0,
+    }
+
+
+def summarize_chat_completion_usage(
+    response: Any,
+    *,
+    requested_model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> Dict[str, Any]:
+    summary = build_empty_llm_usage_summary(
+        requested_model=requested_model,
+        provider=provider,
+    )
+    if response is None:
+        return summary
+
+    usage = _usage_get(response, "usage")
+    prompt_details = _usage_get(usage, "prompt_tokens_details")
+    completion_details = _usage_get(usage, "completion_tokens_details")
+
+    input_tokens = to_int(
+        _usage_get(usage, "prompt_tokens") or _usage_get(usage, "input_tokens")
+    )
+    output_tokens = to_int(
+        _usage_get(usage, "completion_tokens") or _usage_get(usage, "output_tokens")
+    )
+    cache_read_input_tokens = to_int(
+        _usage_get(prompt_details, "cached_tokens")
+        or _usage_get(usage, "cache_read_input_tokens")
+    )
+    cache_creation_input_tokens = to_int(
+        _usage_get(prompt_details, "cache_creation_tokens")
+        or _usage_get(usage, "cache_creation_input_tokens")
+    )
+    reasoning_tokens = to_int(_usage_get(completion_details, "reasoning_tokens"))
+    accepted_prediction_tokens = to_int(
+        _usage_get(completion_details, "accepted_prediction_tokens")
+    )
+    rejected_prediction_tokens = to_int(
+        _usage_get(completion_details, "rejected_prediction_tokens")
+    )
+
+    response_model = _usage_get(response, "model")
+    selected_model = response_model or requested_model
+    selection_reason = None
+    if response_model:
+        selection_reason = "response_model"
+    elif requested_model:
+        selection_reason = "requested_model"
+
+    has_usage = bool(
+        usage is not None
+        or input_tokens
+        or output_tokens
+        or cache_read_input_tokens
+        or cache_creation_input_tokens
+        or reasoning_tokens
+        or accepted_prediction_tokens
+        or rejected_prediction_tokens
+    )
+    top_level_usage = None
+    session_usage = None
+    selected_model_usage = None
+    context_window = to_int(
+        _first_present(
+            _usage_get(response, "context_window"),
+            _usage_get(usage, "context_window"),
+        )
+    )
+    if has_usage:
+        top_level_usage = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "accepted_prediction_tokens": accepted_prediction_tokens,
+            "rejected_prediction_tokens": rejected_prediction_tokens,
+        }
+        session_usage = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cost_usd": 0.0,
+        }
+        if selected_model:
+            selected_model_usage = {
+                "model": selected_model,
+                "selection_reason": selection_reason,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read_input_tokens,
+                "cache_creation_input_tokens": cache_creation_input_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "accepted_prediction_tokens": accepted_prediction_tokens,
+                "rejected_prediction_tokens": rejected_prediction_tokens,
+                "web_search_requests": 0,
+                "cost_usd": 0.0,
+                "context_window": context_window,
+            }
+
+    summary.update(
+        {
+            "requested_model": requested_model,
+            "selected_model": selected_model,
+            "selected_model_found": selected_model is not None,
+            "selected_model_reason": selection_reason,
+            "available_models": [selected_model] if selected_model else [],
+            "models_usage": {selected_model: dict(selected_model_usage)} if selected_model_usage else {},
+            "session_usage": session_usage,
+            "selected_model_usage": selected_model_usage,
+            "top_level_usage": top_level_usage,
+            "response_id": _usage_get(response, "id"),
+            "service_tier": _usage_get(response, "service_tier") or _usage_get(usage, "service_tier"),
+            "is_error": False,
+            "sessions_total": 1 if has_usage else 0,
+            "turns_total": 1 if has_usage else 0,
+            "calls_total": 1 if has_usage else 0,
+        }
+    )
+    return summary
+
+
+def capture_llm_usage_snapshot(llm_client: Any) -> Optional[int]:
+    if llm_client is None:
+        return None
+    snapshot_fn = getattr(llm_client, "usage_history_snapshot", None)
+    if callable(snapshot_fn):
+        return snapshot_fn()
+    return None
+
+
+def aggregate_llm_usage_since(llm_client: Any, snapshot: Optional[int]) -> Dict[str, Any]:
+    if llm_client is None or snapshot is None:
+        summary = aggregate_usage_summaries([])
+        summary["source"] = "llm_client"
+        summary["provider"] = getattr(getattr(llm_client, "config", None), "provider", None)
+        return summary
+
+    aggregate_fn = getattr(llm_client, "aggregate_usage_since", None)
+    if callable(aggregate_fn):
+        return aggregate_fn(snapshot)
+
+    summary = aggregate_usage_summaries([])
+    summary["source"] = "llm_client"
+    summary["provider"] = getattr(getattr(llm_client, "config", None), "provider", None)
+    return summary
 
 
 def safe_chat_call(llm_client: Any, messages: List[Dict[str, str]], **kwargs) -> Any:
@@ -75,7 +268,7 @@ def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, A
 @dataclass
 class LLMConfig:
     """LLM configuration."""
-    provider: str = ""  # openai, anthropic, lab, deepseek, mock
+    provider: str = ""  # openai, deepseek
     model: str = ""
     api_key: Optional[str] = None
     base_url: Optional[str] = None
@@ -83,6 +276,7 @@ class LLMConfig:
     top_p: float = 0.9
     max_tokens: int = 0
     timeout: int = 120
+    context_limit: int = 0
 
     # Retry settings
     max_retries: int = 10  # Maximum retries
@@ -91,7 +285,7 @@ class LLMConfig:
     backoff_factor: float = 2.0  # Exponential backoff factor
     
 
-    enable_thinking: bool = True  # DeepSeek/LAB thinking parameter
+    enable_thinking: bool = True  # DeepSeek thinking parameter
     
     def __post_init__(self):
         """Auto-populate api_key/base_url based on provider, preferring YAML config."""
@@ -134,20 +328,18 @@ class LLMConfig:
                 self.model = provider_config['model']
             if self.max_tokens == 0 and 'max_tokens' in provider_config:
                 self.max_tokens = provider_config['max_tokens']
+            if self.context_limit == 0 and 'context_limit' in provider_config:
+                self.context_limit = provider_config['context_limit']
         
         # Backward compatibility: if YAML has no config, use hardcoded defaults
         if self.provider and not self.base_url:
-            if self.provider == "lab":
-                # LAB LLM API
-                self.api_key = os.getenv("LAB_LLM_API_KEY")
-                self.base_url = "https://hkucvm.dynv6.net/v1"
-                self.model = "DeepSeek-V3.2"
-            elif self.provider == "deepseek":
+            if self.provider == "deepseek":
                 # DeepSeek API
                 self.api_key = os.getenv("DEEPSEEK_API_KEY")
                 self.base_url = "https://api.deepseek.com/v1"
                 self.model = "deepseek-chat"
                 self.max_tokens = 65536
+                self.context_limit = 131072
             elif self.provider == "openai":
                 self.api_key = os.getenv("NY_API_KEY")
                 self.base_url = "https://ai.nengyongai.cn/v1"
@@ -165,6 +357,12 @@ class BaseLLMClient(ABC):
     
     def __init__(self, config: LLMConfig):
         self.config = config
+        self.context_limit = max(0, to_int(getattr(config, "context_limit", 0)))
+        self._last_usage_summary = build_empty_llm_usage_summary(
+            requested_model=config.model,
+            provider=config.provider,
+        )
+        self._usage_history: List[Dict[str, Any]] = []
         # Load retry settings from config
         self.max_retries = config.max_retries
         self.initial_delay = config.initial_delay
@@ -178,6 +376,72 @@ class BaseLLMClient(ABC):
             )
         except ImportError:
             raise ImportError("Please install openai: pip install openai")
+
+    def _normalize_usage_summary(self, usage_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        return usage_summary or build_empty_llm_usage_summary(
+            requested_model=self.config.model,
+            provider=self.config.provider,
+        )
+
+    def _record_usage_summary(self, usage_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        summary = self._normalize_usage_summary(usage_summary)
+        self._last_usage_summary = copy.deepcopy(summary)
+        self._usage_history.append(copy.deepcopy(summary))
+        return summary
+
+    def _set_last_usage_summary(self, usage_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        summary = self._normalize_usage_summary(usage_summary)
+        self._last_usage_summary = copy.deepcopy(summary)
+        return summary
+
+    def get_last_usage_summary(self) -> Dict[str, Any]:
+        return copy.deepcopy(self._last_usage_summary)
+
+    def get_last_request_input_tokens(self) -> int:
+        summary = self.get_last_usage_summary()
+        selected_usage = summary.get("selected_model_usage") if isinstance(summary, dict) else None
+        top_level_usage = summary.get("top_level_usage") if isinstance(summary, dict) else None
+        return to_int(
+            _first_present(
+                _usage_get(selected_usage, "input_tokens"),
+                _usage_get(top_level_usage, "input_tokens"),
+            )
+        )
+
+    def get_last_request_output_tokens(self) -> int:
+        summary = self.get_last_usage_summary()
+        selected_usage = summary.get("selected_model_usage") if isinstance(summary, dict) else None
+        top_level_usage = summary.get("top_level_usage") if isinstance(summary, dict) else None
+        return to_int(
+            _first_present(
+                _usage_get(selected_usage, "output_tokens"),
+                _usage_get(top_level_usage, "output_tokens"),
+            )
+        )
+
+    def get_last_request_context_limit(self) -> int:
+        summary = self.get_last_usage_summary()
+        selected_usage = summary.get("selected_model_usage") if isinstance(summary, dict) else None
+        reported_context_window = to_int(_usage_get(selected_usage, "context_window"))
+        if reported_context_window > 0:
+            return reported_context_window
+        return max(0, to_int(getattr(self, "context_limit", 0)))
+
+    def usage_history_snapshot(self) -> int:
+        return len(self._usage_history)
+
+    def get_usage_history_since(self, snapshot: int) -> List[Dict[str, Any]]:
+        start = max(0, int(snapshot))
+        return [copy.deepcopy(item) for item in self._usage_history[start:]]
+
+    def aggregate_usage_since(self, snapshot: int) -> Dict[str, Any]:
+        summary = aggregate_usage_summaries(
+            self.get_usage_history_since(snapshot),
+            selected_model=self.config.model,
+        )
+        summary["source"] = "llm_client"
+        summary["provider"] = self.config.provider
+        return summary
     
     
     def _should_retry(self, exception: Exception) -> bool:
@@ -271,10 +535,21 @@ class BaseLLMClient(ABC):
         last_exception = None
         
         for attempt in range(self.max_retries):
+            usage_history_start = len(self._usage_history)
             try:
                 return func(*args, **kwargs)
             except Exception as e:
                 last_exception = e
+                if len(self._usage_history) == usage_history_start:
+                    error_summary = build_empty_llm_usage_summary(
+                        requested_model=self.config.model,
+                        provider=self.config.provider,
+                        is_error=True,
+                    )
+                else:
+                    error_summary = self.get_last_usage_summary()
+                    error_summary["is_error"] = True
+                self._set_last_usage_summary(error_summary)
                 
                 # Decide whether to retry
                 if not self._should_retry(e):
@@ -345,6 +620,13 @@ class OpenAIClient(BaseLLMClient):
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
         
         response = self.client.chat.completions.create(**request_params)
+        self._record_usage_summary(
+            summarize_chat_completion_usage(
+                response,
+                requested_model=self.config.model,
+                provider=self.config.provider,
+            )
+        )
         return response.choices[0].message
     
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
@@ -362,20 +644,15 @@ class DeepSeekClient(BaseLLMClient):
     
     def __init__(self, config: LLMConfig):
         super().__init__(config)
-        self.token_compute = DSTokenizerCompute()
-        self.context_limit = 131072  # DeepSeek context limit
+        if self.context_limit <= 0:
+            self.context_limit = 131072
 
     def _process_extra_body(self, kwargs) -> Dict[str, Any]:
-        if not self.config.enable_thinking:
-            return {}
+        if self.config.enable_thinking:
 
-        if self.config.provider == "deepseek":
-            return {"thinking": {"type": "enabled"}}
-        elif self.config.provider == "lab":
-            return {
-                "seperate_reasoning": kwargs.get("separate_reasoning", True),
-                "chat_template_kwargs": {"thinking": self.config.enable_thinking}
-            }
+            if self.config.provider == "deepseek":
+                return {"thinking": {"type": "enabled"}}
+            
         return {}
 
     def _make_chat_request(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
@@ -417,6 +694,13 @@ class DeepSeekClient(BaseLLMClient):
         
         # Send request
         response = self.client.chat.completions.create(**request_params)
+        self._record_usage_summary(
+            summarize_chat_completion_usage(
+                response,
+                requested_model=self.config.model,
+                provider=self.config.provider,
+            )
+        )
 
         return response.choices[0].message
 
@@ -443,27 +727,13 @@ class DeepSeekClient(BaseLLMClient):
         return self.chat([{"role": "user", "content": prompt}], **kwargs)
     
 
-class MockLLMClient(BaseLLMClient):
-    """Mock LLM client for tests."""
-    
-    def chat(self, _messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **_kwargs) -> str:
-        if tools is not None:
-            return '{"content": "mock response", "tool_calls": [{"id": "mock_1", "type": "function", "function": {"name": "mock_tool", "arguments": "{}"}}]}'
-        return '{"status": "mock_response", "message": "This is a mock response for testing"}'
-    
-    def complete(self, prompt: str, **_kwargs) -> str:
-        """Send a completion request (mock implementation)."""
-        return '{"status": "mock_completion", "prompt": "' + prompt[:50] + '..."}'
-    
 
 
 def create_llm_client(config: LLMConfig) -> BaseLLMClient:
     """Create an LLM client."""
     providers = {
         "openai": OpenAIClient,
-        "lab": DeepSeekClient,
         "deepseek": DeepSeekClient,
-        "mock": MockLLMClient,
     }
     
     client_class = providers.get(config.provider)

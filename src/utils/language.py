@@ -7,6 +7,7 @@ here instead of hard-coding values.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -93,16 +94,6 @@ LANGUAGE_CONFIG: Dict[str, Dict] = {
         "indicator_files": {"Gemfile", "Rakefile"},
         "comment_prefix": "#",
     },
-    "csharp": {
-        "extensions": {".cs"},
-        "codeql_pack": "codeql/csharp-all",
-        "codeql_import": "import csharp",
-        "docker_base": "mcr.microsoft.com/dotnet/sdk:8.0",
-        "build_cmd": "dotnet build",
-        "run_cmd": "dotnet run --project /evidence/exploit.csproj",
-        "indicator_files": set(),
-        "comment_prefix": "//",
-    },
     "rust": {
         "extensions": {".rs"},
         "codeql_pack": None,  # CodeQL doesn't support Rust natively yet
@@ -119,6 +110,21 @@ LANGUAGE_CONFIG: Dict[str, Dict] = {
 ALL_SOURCE_EXTENSIONS: Set[str] = set()
 for _cfg in LANGUAGE_CONFIG.values():
     ALL_SOURCE_EXTENSIONS |= _cfg["extensions"]
+
+
+EXPLICITLY_UNSUPPORTED_SOURCE_EXTENSIONS: Set[str] = {".cs"}
+IGNORED_LANGUAGE_DIRS = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    "build",
+    "dist",
+    ".tox",
+    "venv",
+    ".venv",
+    "vendor",
+    "third_party",
+}
 
 
 # ──────────────────────────────────────────────
@@ -158,11 +164,8 @@ def _collect_language_scores(repo_path: Path) -> Dict[str, float]:
                 scores[lang] += INDICATOR_WEIGHT
 
     # Extension count (walk, skip ignored dirs)
-    IGNORED_DIRS = {".git", "node_modules", "__pycache__", "build", "dist",
-                    ".tox", "venv", ".venv", "vendor", "third_party"}
-
-    for root, dirs, files in __import__("os").walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in IGNORED_LANGUAGE_DIRS]
         for fname in files:
             ext = Path(fname).suffix.lower()
             for lang, cfg in LANGUAGE_CONFIG.items():
@@ -171,6 +174,16 @@ def _collect_language_scores(repo_path: Path) -> Dict[str, float]:
                     break  # one file counted once
 
     return scores
+
+
+def _has_explicitly_unsupported_sources(repo_path: Path) -> bool:
+    """Return True when the repo contains source files for removed languages."""
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in IGNORED_LANGUAGE_DIRS]
+        for fname in files:
+            if Path(fname).suffix.lower() in EXPLICITLY_UNSUPPORTED_SOURCE_EXTENSIONS:
+                return True
+    return False
 
 
 def detect_languages(repo_path: Path, limit: Optional[int] = None) -> List[str]:
@@ -185,6 +198,8 @@ def detect_languages(repo_path: Path, limit: Optional[int] = None) -> List[str]:
         if score > 0
     ]
     if not ranked:
+        if _has_explicitly_unsupported_sources(repo_path):
+            return []
         ranked = ["python"]  # truly empty / unrecognised → safe fallback
     if limit is not None:
         return ranked[:max(limit, 0)]
@@ -197,7 +212,9 @@ def detect_language(repo_path: Path) -> str:
     Strategy:
     1. Check for language-specific indicator files (weighted higher).
     2. Count source files by extension.
-    3. Return the language with the highest score; falls back to ``"python"``
-       only if *nothing* is detected (empty repository).
+    3. Return the language with the highest score.
+    4. Return ``"unknown"`` when the repo only contains explicitly unsupported
+       source files, and ``"python"`` only for a truly empty/unrecognised repo.
     """
-    return detect_languages(repo_path, limit=1)[0]
+    ranked = detect_languages(repo_path, limit=1)
+    return ranked[0] if ranked else "unknown"

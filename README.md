@@ -108,14 +108,12 @@ pip install transformers sentence-transformers torch
 当前可用 provider（代码真实支持）:
 
 - `deepseek`
-- `lab`
 - `openai`
-- `mock`
+
 
 常用环境变量:
 
 - `DEEPSEEK_API_KEY`
-- `LAB_LLM_API_KEY`
 - `NY_API_KEY`（openai provider 在当前配置下读取该变量）
 
 ### 5.3 软件画像规则 `config/software_profile_rule.yaml`
@@ -123,7 +121,7 @@ pip install transformers sentence-transformers torch
 关注以下项:
 
 - `module_analyzer_config.analyzer_type`:
-  - `skill`（默认，使用 `_path_config['skill_path']/ai-infra-module-modeler`；当前仓库内的 workflow skills 放在 `.agents/skills`，并可通过工作区根目录的 `.agents/` symlink 访问）
+  - `skill`（默认，使用 `_path_config['skill_path']/ai-infra-module-modeler`；这里的 `skill_path` 是代码内部调用 Claude skill 的路径，不是用户侧 workflow skill 路径）
   - `agent`
 - `repo_analyzer_config`:
   - `languages`（支持 `"auto"` 或多语言列表）
@@ -132,6 +130,8 @@ pip install transformers sentence-transformers torch
 - 文件扫描范围:
   - `excluded_folders`
   - `code_extensions`
+
+用户侧使用 `llm-vulvariant` workflow 时，可直接使用仓库内的 `.agents/skills`；如果你在工作区根目录下保留了 `.agents -> llm-vulvariant/.agents` 的 symlink，也可以直接通过工作区根目录的 `.agents/` 访问这些 skills。
 
 ## 6. 输入数据格式
 
@@ -357,8 +357,8 @@ pytest -q tests/test_cli_batch_scanner.py tests/test_cli_exploitability.py tests
 
 3. `Claude CLI not found`:
    - 安装 Claude CLI 并确保 `claude` 在 `PATH`
-   - 确认配置中的 `skill_path` 下存在 `check-exploitability` 与 `ai-infra-module-modeler`
-   - 仓库内的 workflow skills 当前放在 `.agents/skills`，也可通过工作区根目录的 `.agents/` symlink 访问
+   - 确认配置中的 `skill_path` 下存在 `check-exploitability` 与 `ai-infra-module-modeler`；这是代码内部使用的 Claude skills
+   - 用户侧 workflow skills 放在 `.agents/skills`，也可通过工作区根目录的 `.agents/` symlink 访问和使用
 
 4. CodeQL 工具不可用:
    - 安装 CodeQL CLI

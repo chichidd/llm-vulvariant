@@ -89,3 +89,26 @@ def test_cpp_without_build_system_falls_back_to_default_when_buildless_fails(tmp
     assert len(calls) == 2
     assert "--build-mode=none" in calls[0]
     assert "--build-mode=none" not in calls[1]
+
+
+def test_create_database_rejects_removed_csharp_language(tmp_path):
+    source = tmp_path / "repo"
+    source.mkdir()
+
+    calls = []
+
+    def fake_run(args, timeout=None):
+        calls.append(list(args))
+        return True, "", ""
+
+    analyzer = _build_analyzer(tmp_path, fake_run)
+    ok, message = analyzer.create_database(
+        source_path=str(source),
+        language="csharp",
+        database_name="demo-csharp",
+        overwrite=True,
+    )
+
+    assert ok is False
+    assert message == "Unsupported language: csharp"
+    assert calls == []

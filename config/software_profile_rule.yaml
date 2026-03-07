@@ -323,9 +323,6 @@ module_analyzer_config:
     - ".h"
     - ".hpp"
     
-    # C#
-    - ".cs"
-    
     # Ruby
     - ".rb"
     

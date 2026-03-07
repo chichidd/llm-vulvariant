@@ -11,9 +11,10 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llm import BaseLLMClient
+from llm import BaseLLMClient, aggregate_llm_usage_since, capture_llm_usage_snapshot
 from config import _path_config
 from profiler.profile_storage import ProfileStorageManager
+from utils.number_utils import to_int
 from utils.git_utils import (
     checkout_commit,
     get_git_commit,
@@ -22,6 +23,7 @@ from utils.git_utils import (
     restore_git_position,
 )
 from utils.logger import get_logger
+from utils.claude_cli import coerce_aggregated_usage_summary, merge_aggregated_usage_summaries
 
 from .models import SoftwareProfile, ModuleInfo, DataFlowPattern
 from .repo_collector import RepoInfoCollector
@@ -44,6 +46,160 @@ class SoftwareProfiler:
         "close": {"fclose"},
         "socket": {"recv", "send", "accept", "connect"},
     }
+
+    def _coerce_llm_usage_summary(
+        self,
+        usage: Optional[Dict[str, Any]],
+        *,
+        llm_calls: int = 0,
+        default_source: Optional[str] = None,
+        default_provider: Optional[str] = None,
+        default_requested_model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        summary = coerce_aggregated_usage_summary(usage)
+        expected_calls = max(0, to_int(llm_calls))
+        recorded_calls = to_int(summary.get("calls_total"))
+        if expected_calls <= recorded_calls:
+            if recorded_calls == 0:
+                summary = dict(summary)
+                if default_source:
+                    summary["source"] = default_source
+                if default_provider:
+                    summary["provider"] = default_provider
+                if default_requested_model and not summary.get("requested_model"):
+                    summary["requested_model"] = default_requested_model
+            return summary
+
+        summary = dict(summary)
+        missing_calls = expected_calls - recorded_calls
+        summary["calls_total"] = expected_calls
+        summary["calls_missing_selected_model_usage"] = to_int(
+            summary.get("calls_missing_selected_model_usage")
+        ) + missing_calls
+        summary["calls_missing_usage"] = to_int(summary.get("calls_missing_usage")) + missing_calls
+
+        requested_model = summary.get("requested_model") or default_requested_model
+        provider = summary.get("provider") or default_provider
+        if requested_model:
+            summary["requested_model"] = requested_model
+            if not summary.get("selected_model"):
+                summary["selected_model"] = requested_model
+            selected_models = sorted(
+                {str(model) for model in (summary.get("selected_models") or []) if model} | {requested_model}
+            )
+            summary["selected_models"] = selected_models
+        if provider:
+            summary["provider"] = provider
+        if default_source:
+            summary["source"] = default_source
+        elif not summary.get("source"):
+            summary["source"] = "llm_client" if provider else "llm_usage"
+        return summary
+
+    def _normalize_agent_module_usage_summary(
+        self,
+        usage: Optional[Dict[str, Any]],
+        *,
+        llm_calls: int = 0,
+    ) -> Dict[str, Any]:
+        llm_config = getattr(getattr(self, "llm_client", None), "config", None)
+        summary = self._coerce_llm_usage_summary(
+            usage,
+            llm_calls=llm_calls,
+            default_source="llm_client",
+            default_provider=getattr(llm_config, "provider", None) if llm_config is not None else None,
+            default_requested_model=getattr(llm_config, "model", None) if llm_config is not None else None,
+        )
+        summary = dict(summary)
+        summary["source"] = "llm_client"
+        if llm_config is not None and not summary.get("provider"):
+            summary["provider"] = getattr(llm_config, "provider", None)
+        return summary
+
+    def _load_prior_agent_module_usage_summary(
+        self,
+        *,
+        path_parts: tuple,
+        previous_modules_checkpoint: Optional[Dict[str, Any]],
+    ) -> tuple[Dict[str, Any], int]:
+        conversation_data = None
+        if self.storage_manager and hasattr(self.storage_manager, "load_conversation"):
+            conversation_data = self.storage_manager.load_conversation("module_analysis", *path_parts)
+
+        conversation_calls = 0
+        if isinstance(conversation_data, dict) and conversation_data.get("conversation_name") == "module_analysis":
+            conversation_calls = max(0, to_int(conversation_data.get("llm_calls", 0)))
+            if conversation_data.get("llm_usage"):
+                return (
+                    self._normalize_agent_module_usage_summary(
+                        conversation_data.get("llm_usage"),
+                        llm_calls=conversation_calls,
+                    ),
+                    conversation_calls,
+                )
+
+        checkpoint_calls = max(
+            0,
+            to_int((previous_modules_checkpoint or {}).get("llm_calls", 0)),
+        )
+        if isinstance(previous_modules_checkpoint, dict) and (
+            previous_modules_checkpoint.get("llm_usage") or checkpoint_calls > 0
+        ):
+            return (
+                self._normalize_agent_module_usage_summary(
+                    previous_modules_checkpoint.get("llm_usage"),
+                    llm_calls=checkpoint_calls,
+                ),
+                checkpoint_calls,
+            )
+
+        if conversation_calls > 0:
+            return (
+                self._normalize_agent_module_usage_summary(
+                    None,
+                    llm_calls=conversation_calls,
+                ),
+                conversation_calls,
+            )
+
+        return self._normalize_agent_module_usage_summary(None, llm_calls=0), 0
+
+    def _merge_agent_module_usage_summary(
+        self,
+        current_usage: Optional[Dict[str, Any]],
+        *,
+        total_llm_calls: int,
+        previous_usage_summary: Optional[Dict[str, Any]] = None,
+        previous_llm_calls: int = 0,
+    ) -> Dict[str, Any]:
+        total_calls = max(0, to_int(total_llm_calls))
+        prior_calls = max(0, to_int(previous_llm_calls))
+        current_calls = max(total_calls - prior_calls, 0)
+        current_summary = self._normalize_agent_module_usage_summary(
+            current_usage,
+            llm_calls=current_calls,
+        )
+
+        if prior_calls <= 0 or not isinstance(previous_usage_summary, dict):
+            return self._normalize_agent_module_usage_summary(current_summary, llm_calls=total_calls)
+
+        if to_int(current_summary.get("calls_total")) > current_calls:
+            return self._normalize_agent_module_usage_summary(current_summary, llm_calls=total_calls)
+
+        merged_summary = merge_aggregated_usage_summaries(
+            [previous_usage_summary, current_summary]
+        )
+        return self._normalize_agent_module_usage_summary(merged_summary, llm_calls=total_calls)
+
+    @staticmethod
+    def _is_basic_info_complete(basic_info: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(basic_info, dict):
+            return False
+        return (
+            isinstance(basic_info.get("description"), str)
+            and isinstance(basic_info.get("target_application"), list)
+            and isinstance(basic_info.get("target_user"), list)
+        )
     
     @classmethod
     def _load_detection_rules(cls, rules_path: Path = None, output_dir: Path = None) -> Dict[str, Any]:
@@ -282,18 +438,28 @@ class SoftwareProfiler:
         # Step 2: 分析基本信息
         logger.info("Step 2/4: Analyzing basic info...")
         basic_info = self.storage_manager.load_checkpoint("basic_info", *path_parts) if self.storage_manager and not force_regenerate else None
-        if basic_info:
+        if self._is_basic_info_complete(basic_info):
             logger.info("Loaded basic_info from checkpoint")
         else:
+            if basic_info is not None:
+                logger.warning("Loaded basic_info checkpoint is incomplete, re-analyzing...")
             basic_info = self.basic_info_analyzer.analyze(
                 repo_path, repo_info, repo_name, version, storage_manager=self.storage_manager
             )
-            if self.storage_manager:
+            if self.storage_manager and self._is_basic_info_complete(basic_info):
                 self.storage_manager.save_checkpoint("basic_info", basic_info, *path_parts)
+        basic_info = basic_info or {}
         
         # Step 3: 分析模块
         logger.info("Step 3/4: Analyzing modules...")
         modules_result = self.storage_manager.load_checkpoint("modules", *path_parts) if self.storage_manager and not force_regenerate else None
+        previous_modules_checkpoint = (
+            modules_result
+            if isinstance(self.module_analyzer, ModuleAnalyzer)
+            and isinstance(modules_result, dict)
+            and not modules_result.get('modules')
+            else None
+        )
         
         if modules_result and modules_result.get('modules'):
             logger.info("Loaded modules from checkpoint")
@@ -311,14 +477,70 @@ class SoftwareProfiler:
                 module_analyze_kwargs["resume_from_conversation"] = not force_regenerate
             elif isinstance(self.module_analyzer, SkillModuleAnalyzer):
                 module_analyze_kwargs["force_regenerate"] = force_regenerate
-
+            llm_client = getattr(self, "llm_client", None)
+            prior_module_usage_summary, prior_module_llm_calls = (
+                self._load_prior_agent_module_usage_summary(
+                    path_parts=path_parts,
+                    previous_modules_checkpoint=previous_modules_checkpoint,
+                )
+                if isinstance(self.module_analyzer, ModuleAnalyzer)
+                else (self._coerce_llm_usage_summary(None, llm_calls=0), 0)
+            )
+            module_usage_snapshot = (
+                capture_llm_usage_snapshot(llm_client)
+                if isinstance(self.module_analyzer, ModuleAnalyzer)
+                else None
+            )
             modules_result = self.module_analyzer.analyze(**module_analyze_kwargs)
+            if isinstance(self.module_analyzer, ModuleAnalyzer) and isinstance(modules_result, dict):
+                current_module_usage = modules_result.get("llm_usage")
+                if not current_module_usage:
+                    current_module_usage = aggregate_llm_usage_since(
+                        llm_client,
+                        module_usage_snapshot,
+                    )
+                modules_result["llm_usage"] = self._merge_agent_module_usage_summary(
+                    current_module_usage,
+                    total_llm_calls=modules_result.get("llm_calls", 0),
+                    previous_usage_summary=prior_module_usage_summary,
+                    previous_llm_calls=prior_module_llm_calls,
+                )
             
             if self.storage_manager:
                 self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
             
         # Step 4: 构建软件画像
         logger.info("Step 4/4: Building software profile...")
+        llm_config = getattr(getattr(self, "llm_client", None), "config", None)
+        basic_info_usage_summary = self._coerce_llm_usage_summary(
+            basic_info.get("llm_usage"),
+            llm_calls=basic_info.get("llm_calls", 0),
+            default_source="llm_client",
+            default_provider=getattr(llm_config, "provider", None) if llm_config is not None else None,
+            default_requested_model=getattr(llm_config, "model", None) if llm_config is not None else None,
+        )
+        module_usage_source = "llm_client" if isinstance(self.module_analyzer, ModuleAnalyzer) else "claude_cli"
+        module_usage_provider = (
+            getattr(llm_config, "provider", None)
+            if isinstance(self.module_analyzer, ModuleAnalyzer) and llm_config is not None
+            else None
+        )
+        module_usage_requested_model = (
+            getattr(llm_config, "model", None)
+            if isinstance(self.module_analyzer, ModuleAnalyzer) and llm_config is not None
+            else None
+        )
+        modules_usage_summary = self._coerce_llm_usage_summary(
+            modules_result.get("llm_usage") if modules_result else None,
+            llm_calls=(modules_result or {}).get("llm_calls", 0),
+            default_source=module_usage_source,
+            default_provider=module_usage_provider,
+            default_requested_model=module_usage_requested_model,
+        )
+        llm_usage_summary = merge_aggregated_usage_summaries(
+            [basic_info_usage_summary, modules_usage_summary]
+        )
+        llm_usage_summary["source"] = "llm_usage"
         profile = SoftwareProfile(
             name=repo_name,
             version=version,
@@ -327,6 +549,17 @@ class SoftwareProfiler:
             target_user=basic_info.get("target_user", []),
             repo_info=repo_info,
             modules=modules_result.get('modules', []) if modules_result else [],
+            metadata={
+                "llm_calls": int(basic_info.get("llm_calls", 0)) + int(
+                    (modules_result or {}).get("llm_calls", 0)
+                ),
+                "llm_usage_by_stage": {
+                    "basic_info": basic_info_usage_summary,
+                    "module_analysis": modules_usage_summary,
+                },
+                "llm_usage_summary": llm_usage_summary,
+                "module_analysis_record_path": (modules_result or {}).get("claude_cli_record_path"),
+            },
         )
         
         # 如果有 CodeQL 静态分析结果，增强profile
@@ -365,6 +598,16 @@ class SoftwareProfiler:
             if profile.modules and hasattr(profile.modules[0], 'external_dependencies'):
                 logger.debug(f"[DEBUG] First module before save - external_deps: {len(profile.modules[0].external_dependencies)}, called_by: {len(profile.modules[0].called_by_modules)}")
             self.storage_manager.save_final_result("software_profile.json", profile.to_json(), *path_parts)
+        if llm_usage_summary.get("sessions_total", llm_usage_summary.get("calls_total", 0)) > 0:
+            logger.info(
+                "LLM usage summary: sessions=%s turns=%s input_tokens=%s output_tokens=%s cache_read_input_tokens=%s cost_usd=%.6f",
+                llm_usage_summary.get("sessions_total", llm_usage_summary.get("calls_total", 0)),
+                llm_usage_summary.get("turns_total", 0),
+                llm_usage_summary.get("input_tokens", 0),
+                llm_usage_summary.get("output_tokens", 0),
+                llm_usage_summary.get("cache_read_input_tokens", 0),
+                llm_usage_summary.get("cost_usd", 0.0),
+            )
         
         return profile
     

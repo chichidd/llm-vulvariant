@@ -133,6 +133,7 @@ class SoftwareProfile:
     third_party_libraries: List[str] = field(default_factory=list)
     builtin_libraries: List[str] = field(default_factory=list)
     dependency_usage_count: Dict[str, int] = field(default_factory=dict)  # {lib: import_count}
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -171,6 +172,9 @@ class SoftwareProfile:
                 "builtin": self.builtin_libraries,
                 "usage_count": self.dependency_usage_count,
             }
+
+        if self.metadata:
+            result["metadata"] = self.metadata
         
         return result
     
@@ -231,4 +235,5 @@ class SoftwareProfile:
             third_party_libraries=deps_detailed.get("third_party", []),
             builtin_libraries=deps_detailed.get("builtin", []),
             dependency_usage_count=deps_detailed.get("usage_count", {}),
+            metadata=data.get("metadata", {}) if isinstance(data.get("metadata", {}), dict) else {},
         )

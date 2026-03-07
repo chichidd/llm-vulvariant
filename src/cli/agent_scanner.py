@@ -90,7 +90,7 @@ def _resolve_scan_languages(target_repo_path: Path, software_profile) -> List[st
             return normalized_profile_languages
 
     detected_languages = _dedupe_languages(detect_repo_languages(target_repo_path))
-    return detected_languages or ["python"]
+    return detected_languages
 
 
 def _resolve_codeql_database_names(
@@ -201,7 +201,7 @@ def parse_args() -> argparse.Namespace:
         "--llm-provider",
         type=str,
         default="deepseek",
-        help="LLM provider (deepseek, lab, openai, anthropic)",
+        help="LLM provider (deepseek, openai)",
     )
     parser.add_argument(
         "--llm-name",
@@ -480,7 +480,10 @@ def _run_single_target_scan(
         scan_languages = _resolve_scan_languages(target_repo_path, software_profile)
         codeql_database_names = _resolve_codeql_database_names(target, scan_languages, software_profile)
 
-        logger.info(f"Target languages: {', '.join(scan_languages)}")
+        logger.info(
+            "Target languages: %s",
+            ", ".join(scan_languages) if scan_languages else "none",
+        )
         if codeql_database_names:
             logger.info(
                 "CodeQL databases: %s",
