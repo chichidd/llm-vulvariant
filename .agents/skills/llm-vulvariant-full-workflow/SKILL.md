@@ -7,63 +7,45 @@ description: Execute the complete llm-vulvariant workflow from profile construct
 
 ## Overview
 
-Follow this when you need a single start-to-finish run from inputs to final exploitable reports.
+Use this when you need one reproducible command plan from profile construction through batch scan and exploitability report generation.
 
-## Input Assumptions
-
-- Vulnerability list: JSON compatible with `data/vuln.json` schema.
-- Source repos: available under `data/repos` and checked out to relevant commits when required.
-- Optional target list: plain text, one repo name per line.
+## Set Up Variables
 
 ```bash
 ROOT="/mnt/raid/home/dongtian/vuln"
 APP_DIR="$ROOT/llm-vulvariant"
-VULN_JSON="$ROOT/data/vuln.json"                 # Replace with your provided vuln list
-TARGET_REPO_LIST="$ROOT/data/target_repos.txt"   # Optional
-REPOS_ROOT="$ROOT/data/repos"
+VULN_JSON="$ROOT/data/vuln.json"
+PROFILE_BASE="$ROOT/profiles"
+
+SOURCE_REPOS_ROOT="$ROOT/data/repos"
+SOURCE_SOFT_PROFILES_DIR="$PROFILE_BASE/soft"
+VULN_PROFILES_DIR="$PROFILE_BASE/vuln"
+
+TARGET_REPOS_ROOT="$ROOT/data/repos"
+TARGET_SOFT_PROFILES_DIR="$PROFILE_BASE/soft"
+# TARGET_REPOS_ROOT="$ROOT/data/repos-nvidia"
+# TARGET_SOFT_PROFILES_DIR="$PROFILE_BASE/soft-nvidia"
+
+SCAN_OUTPUT_DIR="$ROOT/results/full-batch-scan"
+EXP_OUTPUT_DIR="$ROOT/results/full-batch-exploitability"
+RUNTIME_ROOT="$ROOT/results/claude-runtime"
+TARGET_REPO_LIST="$ROOT/data/target_repos.txt"
 LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
-LLM_NAME="${LLM_NAME:-}"                         # Optional
+LLM_NAME="${LLM_NAME:-}"
 ```
 
 ## Phase 0: Build Profiles
 
-### 0.1 Build software profiles for vulnerable source versions
-
-```bash
-cd "$APP_DIR"
-LLM_PROVIDER="$LLM_PROVIDER" LLM_NAME="$LLM_NAME" ./scripts/run_all_vuln_software_profile.sh
-```
-
-If you need a custom vuln file path, use the explicit loop:
-
-```bash
-cd "$APP_DIR"
-jq -r '.[] | "\(.repo_name)|\(.commit)"' "$VULN_JSON" | sort -u | \
-while IFS='|' read -r repo commit; do
-  cmd=(
-    software-profile
-    --repo-name "$repo"
-    --repo-base-path "$REPOS_ROOT"
-    --target-version "$commit"
-    --llm-provider "$LLM_PROVIDER"
-    --output-dir "$APP_DIR/repo-profiles"
-  )
-  if [[ -n "$LLM_NAME" ]]; then
-    cmd+=(--llm-name "$LLM_NAME")
-  fi
-  "${cmd[@]}"
-done
-```
-
-### 0.2 Build vulnerability profiles
+### 0.1 Source software profiles for vuln commits
 
 ```bash
 cd "$APP_DIR"
 cmd=(
-  python -m cli.vulnerability
+  ./scripts/run_all_vuln_software_profile.sh
   --vuln-json "$VULN_JSON"
-  --repo-profile-dir "$APP_DIR/repo-profiles"
-  --output-dir "$APP_DIR/vuln-profiles"
+  --repo-base-path "$SOURCE_REPOS_ROOT"
+  --profile-base-path "$PROFILE_BASE"
+  --soft-profile-dirname soft
   --llm-provider "$LLM_PROVIDER"
 )
 if [[ -n "$LLM_NAME" ]]; then
@@ -72,7 +54,43 @@ fi
 "${cmd[@]}"
 ```
 
-### 0.3 Build software profiles for explicit target repos (optional)
+### 0.2 Vulnerability profiles
+
+```bash
+cd "$APP_DIR"
+cmd=(
+  ./scripts/run_all_vulnerability_profiles.sh
+  --vuln-json "$VULN_JSON"
+  --repo-base-path "$SOURCE_REPOS_ROOT"
+  --soft-profile-dir "$SOURCE_SOFT_PROFILES_DIR"
+  --output-dir "$VULN_PROFILES_DIR"
+  --llm-provider "$LLM_PROVIDER"
+)
+if [[ -n "$LLM_NAME" ]]; then
+  cmd+=(--llm-name "$LLM_NAME")
+fi
+"${cmd[@]}"
+```
+
+### 0.3 Target software profiles
+
+For all repos under the chosen target root:
+
+```bash
+cd "$APP_DIR"
+cmd=(
+  ./scripts/run_all_software_profiles.sh
+  --root "$TARGET_REPOS_ROOT"
+  --output-dir "$TARGET_SOFT_PROFILES_DIR"
+  --llm-provider "$LLM_PROVIDER"
+)
+if [[ -n "$LLM_NAME" ]]; then
+  cmd+=(--llm-name "$LLM_NAME")
+fi
+"${cmd[@]}"
+```
+
+For an explicit allowlist instead:
 
 ```bash
 cd "$APP_DIR"
@@ -81,9 +99,9 @@ while IFS= read -r repo || [[ -n "$repo" ]]; do
   cmd=(
     software-profile
     --repo-name "$repo"
-    --repo-base-path "$REPOS_ROOT"
+    --repo-base-path "$TARGET_REPOS_ROOT"
+    --output-dir "$TARGET_SOFT_PROFILES_DIR"
     --llm-provider "$LLM_PROVIDER"
-    --output-dir "$APP_DIR/repo-profiles"
   )
   if [[ -n "$LLM_NAME" ]]; then
     cmd+=(--llm-name "$LLM_NAME")
@@ -92,31 +110,7 @@ while IFS= read -r repo || [[ -n "$repo" ]]; do
 done < "$TARGET_REPO_LIST"
 ```
 
-For all repos under `data/repos`, use:
-
-```bash
-cd "$APP_DIR"
-./scripts/run_all_software_profiles.sh \
-  --root "$REPOS_ROOT" \
-  --llm-provider "$LLM_PROVIDER" \
-  --output-dir "$APP_DIR/repo-profiles"
-```
-
-## Phase 1: Build Target Subset (Optional)
-
-Use only when you must scan a specific target list:
-
-```bash
-RUN_TAG="$(date +%Y%m%d-%H%M%S)"
-SELECTED_REPOS_ROOT="$ROOT/data/repos-selected-$RUN_TAG"
-mkdir -p "$SELECTED_REPOS_ROOT"
-while IFS= read -r repo || [[ -n "$repo" ]]; do
-  [[ -n "$repo" ]] || continue
-  ln -s "$ROOT/data/repos/$repo" "$SELECTED_REPOS_ROOT/$repo"
-done < "$TARGET_REPO_LIST"
-```
-
-## Phase 2: Batch Scan
+## Phase 1: Batch Scan
 
 ```bash
 SCAN_LOG="$ROOT/output-batch-scan-$(date +%Y%m%d-%H%M%S).log"
@@ -125,10 +119,11 @@ cd "$APP_DIR"
 cmd=(
   python -m cli.batch_scanner
   --vuln-json "$VULN_JSON"
-  --repos-root "$ROOT/data/repos"
-  --repo-profiles-dir "$APP_DIR/repo-profiles"
-  --vuln-profiles-dir "$APP_DIR/vuln-profiles"
-  --scan-output-dir "$ROOT/results/full-batch-scan"
+  --repos-root "$TARGET_REPOS_ROOT"
+  --profile-base-path "$PROFILE_BASE"
+  --soft-profiles-dir "$TARGET_SOFT_PROFILES_DIR"
+  --vuln-profiles-dir "$VULN_PROFILES_DIR"
+  --scan-output-dir "$SCAN_OUTPUT_DIR"
   --similarity-threshold 0.7
   --fallback-top-n 3
   --max-iterations-cap 10
@@ -140,20 +135,25 @@ fi
 "${cmd[@]}" > "$SCAN_LOG" 2>&1
 ```
 
-If scanning allowlisted targets only, set:
+Only the first vuln entry:
 
 ```bash
---repos-root "$SELECTED_REPOS_ROOT"
+cd "$APP_DIR"
+python -m cli.batch_scanner \
+  --vuln-json "$VULN_JSON" \
+  --repos-root "$TARGET_REPOS_ROOT" \
+  --profile-base-path "$PROFILE_BASE" \
+  --soft-profiles-dir "$TARGET_SOFT_PROFILES_DIR" \
+  --vuln-profiles-dir "$VULN_PROFILES_DIR" \
+  --scan-output-dir "$SCAN_OUTPUT_DIR" \
+  --similarity-threshold 0.7 \
+  --fallback-top-n 3 \
+  --max-iterations-cap 10 \
+  --llm-provider "$LLM_PROVIDER" \
+  --limit 1
 ```
 
-Useful resume/selection options:
-- `--skip-existing-scans`
-- `--max-targets`
-- `--include-same-repo`
-- `--limit`
-- `--language`
-
-## Phase 3: Exploitability + Reports
+## Phase 2: Exploitability + Reports
 
 ```bash
 RUN_ID="full-batch-$(date +%Y%m%d-%H%M%S)"
@@ -161,48 +161,28 @@ EXP_LOG="$ROOT/output-exploitability-$RUN_ID.log"
 
 cd "$APP_DIR"
 python -m cli.exploitability \
-  --scan-results-dir "$ROOT/results/full-batch-scan" \
-  --repo-profile-dir "$APP_DIR/repo-profiles" \
-  --repo-base-path "$ROOT/data/repos" \
+  --scan-results-dir "$SCAN_OUTPUT_DIR" \
+  --soft-profile-dir "$TARGET_SOFT_PROFILES_DIR" \
+  --repo-base-path "$TARGET_REPOS_ROOT" \
   --generate-report \
   --report-only-exploitable \
-  --submission-output-dir "$ROOT/results/full-batch-exploitability" \
+  --submission-output-dir "$EXP_OUTPUT_DIR" \
   --submission-prefix exploitable_findings \
-  --claude-runtime-root "$ROOT/results/claude-runtime" \
+  --claude-runtime-root "$RUNTIME_ROOT" \
   --claude-runtime-mode run \
   --run-id "$RUN_ID" \
   --timeout 1800 \
   > "$EXP_LOG" 2>&1
 ```
 
-`--submission-output-dir` implies report packaging; keep `--generate-report` explicit for readability.
-
-## Detached Mode
-
-Use `setsid` for long runs:
-
-```bash
-setsid bash -lc 'cd /mnt/raid/home/dongtian/vuln/llm-vulvariant && <COMMAND> > <LOG> 2>&1' >/dev/null 2>&1 < /dev/null & echo $!
-```
-
 ## Completion Checks
 
 ```bash
 rg -n "SUMMARY|Submission artifacts|ERROR|EACCES|Connection error" "$SCAN_LOG" "$EXP_LOG"
-ls -l "$ROOT/results/full-batch-exploitability"
-python - <<'PY'
-import json
-from pathlib import Path
-p = Path("/mnt/raid/home/dongtian/vuln/results/full-batch-exploitability/exploitable_findings.json")
-if p.exists():
-    d = json.loads(p.read_text())
-    print("total_findings:", d.get("total_findings"))
-else:
-    print("missing:", p)
-PY
+ls -l "$EXP_OUTPUT_DIR"
 ```
 
-Expected files:
+Expected artifacts:
 - `exploitable_findings.json`
 - `exploitable_findings.csv`
 - `submission_index.json`
@@ -210,6 +190,6 @@ Expected files:
 
 ## Notes
 
-- `software-profile` reuses an existing `software_profile.json` and saved checkpoints for the same repo/commit when available.
-- Pass `--force-regenerate` to `software-profile` when you need a clean rebuild for the same repo/commit.
-- Use `--force-regenerate-profiles` on `cli.batch_scanner` when the batch run should refresh software/vulnerability profiles before scanning.
+- Source vulnerability profiles should be built from `data/repos` unless `vuln.json` explicitly points elsewhere.
+- For NVIDIA targets, keep source profiles at `profiles/soft`, but scan with `--repos-root "$ROOT/data/repos-nvidia"` and `--soft-profiles-dir "$ROOT/profiles/soft-nvidia"`.
+- Deprecated aliases still work, but skills should use `--soft-profile-dir` and `--soft-profiles-dir`.
