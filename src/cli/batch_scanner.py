@@ -21,7 +21,7 @@ from scanner.similarity import (
 )
 from utils.git_utils import get_git_commit
 from utils.logger import get_logger
-from utils.vuln_utils import read_vuln_data
+from utils.vuln_utils import normalize_cve_id, read_vuln_data
 
 try:
     from cli import agent_scanner
@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
             "Software profile directory name under --profile-base-path, "
             "or an absolute path"
         ),
+    )
+    parser.add_argument(
+        "--repo-profiles-dir",
+        dest="soft_profiles_dir",
+        type=str,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--vuln-profiles-dir",
@@ -225,8 +231,7 @@ def _resolve_software_profile_locator(
 
 
 def _normalize_cve_id(entry: Dict[str, object], index: int) -> str:
-    cve_id = str(entry.get("cve_id") or "").strip()
-    return cve_id if cve_id else f"vuln-{index}"
+    return normalize_cve_id(entry.get("cve_id"), index)
 
 
 def _load_vuln_entries(vuln_json: Path, limit: Optional[int] = None) -> List[Tuple[int, Dict[str, object]]]:
@@ -332,7 +337,12 @@ def _ensure_vulnerability_profile(
     if not source_profile:
         return None
 
-    selected = read_vuln_data(vuln_index, verbose=verbose, vuln_json_path=vuln_json_path)
+    selected = read_vuln_data(
+        vuln_index,
+        verbose=verbose,
+        vuln_json_path=vuln_json_path,
+        repo_base_path=repos_root,
+    )
     if not selected:
         logger.error(f"Failed to read vulnerability entry index={vuln_index}")
         return None

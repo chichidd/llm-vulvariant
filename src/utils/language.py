@@ -31,7 +31,7 @@ LANGUAGE_CONFIG: Dict[str, Dict] = {
         "comment_prefix": "#",
     },
     "cpp": {
-        "extensions": {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh"},
+        "extensions": {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".cu", ".cuh"},
         "codeql_pack": "codeql/cpp-all",
         "codeql_import": "import cpp",
         "docker_base": "gcc:latest",
@@ -70,7 +70,7 @@ LANGUAGE_CONFIG: Dict[str, Dict] = {
         "comment_prefix": "//",
     },
     "javascript": {
-        "extensions": {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"},
+        "extensions": {".js", ".jsx", ".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs"},
         "codeql_pack": "codeql/javascript-all",
         "codeql_import": "import javascript",
         "docker_base": "node:20-slim",

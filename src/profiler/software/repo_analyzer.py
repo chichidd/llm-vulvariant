@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 from dataclasses import dataclass, field
 from utils.codeql_native import CodeQLAnalyzer, load_codeql_config, CallGraphEdge
 from utils.git_utils import get_git_commit
+from utils.language import get_extensions
 
 from utils.logger import get_logger
 
@@ -21,9 +22,10 @@ logger = get_logger(__name__)
 
 # ========== Dependency parser constants ==========
 
-C_FAMILY_EXTS = {'.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh'}
-C_FAMILY_SOURCE_EXTS = {'.c', '.cpp', '.cc', '.cxx'}
-JS_TS_EXTS = {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'}
+C_FAMILY_EXTS = set(get_extensions("cpp"))
+C_FAMILY_HEADER_EXTS = {'.h', '.hpp', '.hh', '.hxx', '.cuh'}
+C_FAMILY_SOURCE_EXTS = C_FAMILY_EXTS - C_FAMILY_HEADER_EXTS
+JS_TS_EXTS = set(get_extensions("javascript"))
 
 VENDOR_PREFIXES = {'3rdparty', 'third_party', 'thirdparty', 'external', 'extern', 'vendor', 'vendors', 'deps', 'dependencies'}
 INTERNAL_PREFIXES = {
@@ -314,7 +316,7 @@ class RepoAnalyzer:
         for lang in languages:
             if lang == "cpp" and not self._has_cpp_translation_units():
                 logger.info(
-                    "Skipping CodeQL language cpp for %s: no C/C++ source files (*.c/*.cc/*.cpp/*.cxx) detected.",
+                    "Skipping CodeQL language cpp for %s: no C/C++ translation units detected.",
                     self.repo_path,
                 )
                 continue
@@ -568,8 +570,6 @@ class RepoAnalyzer:
     
     def _analyze_dependencies(self):
         """Analyze third-party library dependencies."""
-        from utils.language import get_extensions
-
         # Dependency analysis is a full rebuild; clear any previous state first.
         self._dependencies = {}
         self._reset_dependency_analysis_caches()

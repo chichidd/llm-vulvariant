@@ -156,13 +156,27 @@ analyzer_config:
   file_extensions:
     - .py
     - .js
+    - .jsx
+    - .mjs
+    - .cjs
     - .ts
+    - .tsx
+    - .mts
+    - .cts
     - .java
     - .go
     - .rb
     - .php
     - .c
+    - .cc
     - .cpp
+    - .cxx
+    - .h
+    - .hh
+    - .hpp
+    - .hxx
+    - .cu
+    - .cuh
     - .rs
   
   # 排除目录

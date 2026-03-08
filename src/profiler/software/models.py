@@ -8,7 +8,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 import json
 
 
@@ -16,13 +16,51 @@ import json
 EXTENSION_MAPPING = {
     ".py": "Python",
     ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".mjs": "JavaScript",
+    ".cjs": "JavaScript",
     ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".mts": "TypeScript",
+    ".cts": "TypeScript",
     ".java": "Java",
     ".go": "Go",
     ".rb": "Ruby",
     ".php": "PHP",
     ".rs": "Rust",
+    ".c": "C/C++",
+    ".cc": "C/C++",
+    ".cpp": "C/C++",
+    ".cxx": "C/C++",
+    ".h": "C/C++",
+    ".hh": "C/C++",
+    ".hpp": "C/C++",
+    ".hxx": "C/C++",
+    ".cu": "C/C++",
+    ".cuh": "C/C++",
 }
+
+
+def normalize_file_extensions(extensions: Optional[Iterable[str]]) -> List[str]:
+    """Normalize configured file extensions while preserving order."""
+    normalized: List[str] = []
+    seen = set()
+    for ext in extensions or []:
+        if not isinstance(ext, str):
+            continue
+        value = ext.strip().lower()
+        if not value:
+            continue
+        if not value.startswith("."):
+            value = f".{value}"
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+DEFAULT_FILE_EXTENSIONS = normalize_file_extensions(EXTENSION_MAPPING.keys())
 
 
 @dataclass

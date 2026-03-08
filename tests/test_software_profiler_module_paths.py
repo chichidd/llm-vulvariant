@@ -40,6 +40,45 @@ def test_enhance_modules_ignores_empty_paths_and_matches_extensionless_files():
     assert modules_by_name["module.makefile"].files == ["Makefile"]
 
 
+def test_enhance_modules_preserves_unresolved_checkpoint_files_as_superset():
+    profiler = SoftwareProfiler.__new__(SoftwareProfiler)
+    profiler._detect_patterns = lambda _functions, _pattern_type: []
+
+    base_modules = [
+        {
+            "name": "module.web",
+            "description": "",
+            "files": ["frontend/src/app.tsx", "src"],
+            "key_functions": [],
+            "dependencies": [],
+        },
+        {
+            "name": "module.stale",
+            "description": "",
+            "files": ["legacy/old_layout.py"],
+            "key_functions": [],
+            "dependencies": [],
+        },
+    ]
+    repo_analysis = {
+        "functions": [
+            {"file": "src/main.py", "name": "main"},
+        ],
+        "call_graph_edges": [],
+        "dependencies": [],
+    }
+
+    modules = profiler._enhance_modules_with_repo_analysis(
+        base_modules,
+        repo_analysis,
+        repo_files=["src/main.py"],
+    )
+    modules_by_name = {module.name: module for module in modules}
+
+    assert set(modules_by_name["module.web"].files) == {"frontend/src/app.tsx", "src/main.py"}
+    assert modules_by_name["module.stale"].files == ["legacy/old_layout.py"]
+
+
 def test_detect_patterns_uses_token_matching_to_avoid_substring_false_positives():
     profiler = SoftwareProfiler.__new__(SoftwareProfiler)
     profiler.detection_rules = {

@@ -145,3 +145,67 @@ def test_run_target_scan_passes_profile_base_path_and_dirname(monkeypatch, tmp_p
     assert ok is True
     assert captured["profile_base_path"] == str(tmp_path / "profiles")
     assert captured["software_profile_dirname"] == "soft-nvidia"
+
+
+def test_ensure_vulnerability_profile_uses_repos_root_for_vuln_loading(monkeypatch, tmp_path):
+    repo_name = "demo"
+    commit_hash = "abc123"
+    cve_id = "CVE-2026-0001"
+    repos_root = tmp_path / "repos"
+    (repos_root / repo_name).mkdir(parents=True)
+
+    monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: object())
+    monkeypatch.setattr(batch_scanner, "load_vulnerability_profile", lambda *args, **kwargs: None)
+
+    captured = {}
+
+    def fake_read_vuln_data(index, verbose=False, vuln_json_path=None, repo_base_path=None):
+        captured["index"] = index
+        captured["repo_base_path"] = repo_base_path
+        captured["vuln_json_path"] = vuln_json_path
+        return [
+            {
+                "repo_name": repo_name,
+                "commit": commit_hash,
+                "call_chain": [{"vuln_sink": "eval"}],
+                "payload": "payload",
+                "cve_id": cve_id,
+            }
+        ]
+
+    class StubProfiler:
+        def __init__(self, llm_client, repo_profile, vuln_entry, output_dir):
+            captured["output_dir"] = output_dir
+            captured["vuln_entry_cve"] = vuln_entry.cve_id
+
+        def generate_vulnerability_profile(self, repo_path, save_results=True):
+            captured["repo_path"] = repo_path
+            captured["save_results"] = save_results
+
+    monkeypatch.setattr(batch_scanner, "read_vuln_data", fake_read_vuln_data)
+    monkeypatch.setattr(batch_scanner, "VulnerabilityProfiler", StubProfiler)
+
+    profile = batch_scanner._ensure_vulnerability_profile(
+        vuln_index=4,
+        repo_name=repo_name,
+        commit_hash=commit_hash,
+        cve_id=cve_id,
+        repos_root=repos_root,
+        repo_profiles_dir=tmp_path / "profiles" / "soft",
+        vuln_profiles_dir=tmp_path / "profiles" / "vuln",
+        llm_client=None,
+        force_regenerate=False,
+        software_cache={},
+        regenerated_software_keys=set(),
+        cache={},
+        verbose=False,
+        vuln_json_path=str(tmp_path / "vuln.json"),
+    )
+
+    assert profile is None
+    assert captured["index"] == 4
+    assert captured["repo_base_path"] == repos_root
+    assert captured["vuln_json_path"] == str(tmp_path / "vuln.json")
+    assert captured["repo_path"] == str(repos_root / repo_name)
+    assert captured["save_results"] is True
+    assert captured["vuln_entry_cve"] == cve_id

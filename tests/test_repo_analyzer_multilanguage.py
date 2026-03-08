@@ -141,3 +141,49 @@ def test_repo_analyzer_skips_cpp_codeql_when_only_headers_exist(tmp_path, monkey
     assert analyzer.languages == ["python", "cpp"]
     assert analyzer.codeql_languages == ["python"]
     assert analyzer.codeql_analyzer.create_calls == ["python"]
+
+
+def test_repo_analyzer_auto_detects_mts_files_and_scans_dependencies(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    (repo / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
+    (repo / "main.mts").write_text('import React from "react";\n', encoding="utf-8")
+
+    monkeypatch.setattr(repo_analyzer_mod, "CodeQLAnalyzer", _FakeCodeQLAnalyzer)
+    monkeypatch.setattr(repo_analyzer_mod, "load_codeql_config", lambda: {"queries_path": str(tmp_path)})
+    monkeypatch.setattr(repo_analyzer_mod, "get_git_commit", lambda _repo: "1111222233334444")
+
+    analyzer = RepoAnalyzer(
+        repo_path=str(repo),
+        languages="auto",
+        cache_dir=str(tmp_path / "cache"),
+        rebuild_cache=True,
+    )
+    info = analyzer.get_info()
+
+    assert analyzer.languages == ["javascript"]
+    assert analyzer.codeql_languages == ["javascript"]
+    dep_names = {dep["name"] for dep in info["dependencies"]}
+    assert "react" in dep_names
+
+
+def test_repo_analyzer_auto_detects_cuda_translation_units_for_cpp_codeql(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "cuda").mkdir(parents=True)
+    (repo / "cuda" / "op.cu").write_text('#include "op.cuh"\n', encoding="utf-8")
+    (repo / "cuda" / "op.cuh").write_text("#pragma once\n", encoding="utf-8")
+
+    monkeypatch.setattr(repo_analyzer_mod, "CodeQLAnalyzer", _FakeCodeQLAnalyzerWithCpp)
+    monkeypatch.setattr(repo_analyzer_mod, "load_codeql_config", lambda: {"queries_path": str(tmp_path)})
+    monkeypatch.setattr(repo_analyzer_mod, "get_git_commit", lambda _repo: "9999aaaabbbbcccc")
+
+    analyzer = RepoAnalyzer(
+        repo_path=str(repo),
+        languages="auto",
+        cache_dir=str(tmp_path / "cache"),
+        rebuild_cache=True,
+    )
+
+    assert analyzer.languages == ["cpp"]
+    assert analyzer.codeql_languages == ["cpp"]
+    assert analyzer.codeql_analyzer.create_calls == ["cpp"]

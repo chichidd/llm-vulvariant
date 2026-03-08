@@ -14,21 +14,37 @@ from utils.llm_utils import extract_function_snippet_based_on_name_with_ast
 
 logger = get_logger(__name__)
 
-def read_vuln_data(index=None, verbose: bool = False, vuln_json_path: str | Path | None = None) -> List[Dict[str, Any]]:
+def normalize_cve_id(cve_id: Any, index: int | None = None) -> str:
+    """Return a stable profile identifier for a vulnerability entry."""
+    normalized = str(cve_id or "").strip()
+    if normalized:
+        return normalized
+    if index is not None:
+        return f"vuln-{index}"
+    return "no_cve"
+
+def read_vuln_data(
+    index=None,
+    verbose: bool = False,
+    vuln_json_path: str | Path | None = None,
+    repo_base_path: str | Path | None = None,
+) -> List[Dict[str, Any]]:
     if verbose:
         logger.info("Reading vulnerability data...")
     source_path = Path(vuln_json_path).expanduser() if vuln_json_path else _path_config['vuln_data_path']
+    resolved_repo_base_path = Path(repo_base_path).expanduser() if repo_base_path else _path_config['repo_base_path']
     with open(source_path, 'r', encoding='utf-8') as f:
         rawdata = json.load(f)
     repos = []
+    entries = list(enumerate(rawdata))
     if index is not None:
-        rawdata = [rawdata[index]]
-    for entry in rawdata:
+        entries = [entries[index]]
+    for entry_index, entry in entries:
         data = {}
         data['repo_name'] = entry['repo_name']
         data['commit'] = entry['commit']
-        data['cve_id'] = entry.get('cve_id', None)
-        repo_path = _path_config['repo_base_path'] / data['repo_name']
+        data['cve_id'] = normalize_cve_id(entry.get('cve_id'), entry_index)
+        repo_path = resolved_repo_base_path / data['repo_name']
         restore_target = get_git_restore_target(str(repo_path))
         switched_commit = False
         if verbose:

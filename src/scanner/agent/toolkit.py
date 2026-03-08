@@ -24,6 +24,8 @@ from scanner.agent.utils import _to_dict
 
 logger = get_logger(__name__)
 
+JS_IMPORT_EXTENSIONS = set(get_extensions("javascript"))
+
 @dataclass
 class ToolResult:
     success: bool
@@ -888,8 +890,11 @@ dependencies:
                     stripped = line.strip()
                     if stripped.startswith("import "):
                         imports.append(stripped.rstrip(";"))
-            elif suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
-                imports.extend(re.findall(r'^(?:import|const|let|var)\s+.*(?:from|require)\s*[\(\'"].*', content, re.MULTILINE))
+            elif suffix in JS_IMPORT_EXTENSIONS:
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    if self._is_js_import_statement(stripped):
+                        imports.append(stripped.rstrip(";"))
             elif suffix == ".rs":
                 for line in content.splitlines():
                     stripped = line.strip()
@@ -912,6 +917,16 @@ dependencies:
             return ToolResult(success=True, content="\n".join(imports))
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
+
+    @staticmethod
+    def _is_js_import_statement(line: str) -> bool:
+        if not line:
+            return False
+        return bool(
+            re.match(r"^import\b", line)
+            or re.match(r"^export\b.*\bfrom\b", line)
+            or re.match(r"^(?:const|let|var)\b.*\b(?:require|import)\s*\(", line)
+        )
 
     def _analyze_data_flow(self, file_path: str, function_name: str) -> ToolResult:
         full_path = self.repo_path / file_path

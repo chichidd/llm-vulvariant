@@ -25,7 +25,13 @@ from utils.git_utils import (
 from utils.logger import get_logger
 from utils.claude_cli import coerce_aggregated_usage_summary, merge_aggregated_usage_summaries
 
-from .models import SoftwareProfile, ModuleInfo, DataFlowPattern
+from .models import (
+    DEFAULT_FILE_EXTENSIONS,
+    DataFlowPattern,
+    ModuleInfo,
+    SoftwareProfile,
+    normalize_file_extensions,
+)
 from .repo_collector import RepoInfoCollector
 from .basic_info_analyzer import BasicInfoAnalyzer
 from .module_analyzer import ModuleAnalyzer, SkillModuleAnalyzer
@@ -273,9 +279,13 @@ class SoftwareProfiler:
         
         # 分析器配置
         analyzer_config = all_config.get('analyzer_config', {})
-        self.file_extensions = file_extensions or analyzer_config.get('file_extensions', [
-            ".py", ".js", ".ts", ".java", ".go", ".rb", ".php", ".c", ".cpp", ".rs"
-        ])
+        configured_file_extensions = normalize_file_extensions(analyzer_config.get('file_extensions'))
+        if file_extensions is not None:
+            self.file_extensions = normalize_file_extensions(file_extensions)
+        elif 'file_extensions' in analyzer_config:
+            self.file_extensions = configured_file_extensions
+        else:
+            self.file_extensions = list(DEFAULT_FILE_EXTENSIONS)
         self.exclude_dirs = exclude_dirs or analyzer_config.get('exclude_dirs', [
             "__pycache__", "node_modules", ".git", ".venv", "venv", "env",
             "build", "dist", ".eggs", "*.egg-info"
@@ -657,11 +667,14 @@ class SoftwareProfiler:
                     # LLM output may contain empty path entries; ignore them.
                     continue
 
+                matched_path = False
+
                 # Prefer exact file matching so extensionless files (e.g. Makefile) are handled correctly.
                 if path in all_files_set:
                     if path not in module_file_set:
                         module_files.append(path)
                         module_file_set.add(path)
+                    matched_path = True
                     continue
 
                 folder_prefix = path + '/'
@@ -669,6 +682,15 @@ class SoftwareProfiler:
                     if file_path.startswith(folder_prefix) and file_path not in module_file_set:
                         module_files.append(file_path)
                         module_file_set.add(file_path)
+                        matched_path = True
+
+                if not matched_path and path not in module_file_set:
+                    # Keep the original checkpoint/module-modeler paths when the
+                    # current repo inventory cannot resolve them. This preserves
+                    # the checkpoint module file superset instead of shrinking it
+                    # during enhancement.
+                    module_files.append(path)
+                    module_file_set.add(path)
             module_name_to_files[module.get('name', '')] = module_files
         
         # 构建文件到模块的映射

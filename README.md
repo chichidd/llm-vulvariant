@@ -201,6 +201,18 @@ vuln-profile \
 
 - `~/vuln/profiles/vuln/<repo_name>/<cve_id>/vulnerability_profile.json`
 
+批量生成全部漏洞画像:
+
+```bash
+./scripts/run_all_vulnerability_profiles.sh \
+  --vuln-json ~/vuln/data/vuln.json \
+  --profile-base-path ~/vuln/profiles \
+  --repo-base-path ~/vuln/data/repos \
+  --soft-profile-dirname soft \
+  --vuln-profile-dirname vuln \
+  --llm-provider deepseek
+```
+
 ### 7.3 单目标扫描（手动指定目标仓库）
 
 ```bash

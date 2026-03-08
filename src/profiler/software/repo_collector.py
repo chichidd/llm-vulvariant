@@ -8,7 +8,7 @@ from collections import defaultdict
 
 from utils.logger import get_logger
 from utils.text_utils import clean_readme_for_llm
-from .models import EXTENSION_MAPPING
+from .models import DEFAULT_FILE_EXTENSIONS, EXTENSION_MAPPING, normalize_file_extensions
 
 logger = get_logger(__name__)
 
@@ -23,7 +23,7 @@ class RepoInfoCollector:
         readme_files: List[str] = None,
         dependency_files: List[str] = None,
     ):
-        self.file_extensions = file_extensions or list(EXTENSION_MAPPING.keys())
+        self.file_extensions = normalize_file_extensions(file_extensions or DEFAULT_FILE_EXTENSIONS)
         self.exclude_dirs = set(exclude_dirs or [
             '.git', '__pycache__', 'node_modules', '.pytest_cache', 
             '.mypy_cache', '.tox', 'venv', '.venv', 'dist', 'build',
