@@ -133,50 +133,13 @@ class AgenticVulnFinder:
         self.conversation_history += messages[len(self.conversation_history):]
 
     def _get_last_request_input_tokens(self) -> int:
-        getter = getattr(self.llm_client, "get_last_request_input_tokens", None)
-        if callable(getter):
-            return max(0, to_int(getter()))
-
-        summary_getter = getattr(self.llm_client, "get_last_usage_summary", None)
-        if not callable(summary_getter):
-            return 0
-
-        summary = summary_getter()
-        selected_usage = summary.get("selected_model_usage") if isinstance(summary, dict) else None
-        top_level_usage = summary.get("top_level_usage") if isinstance(summary, dict) else None
-        return max(
-            0,
-            to_int(
-                (selected_usage or {}).get("input_tokens")
-                or (top_level_usage or {}).get("input_tokens")
-            ),
-        )
+        return max(0, to_int(self.llm_client.get_last_request_input_tokens()))
 
     def _get_last_request_output_tokens(self) -> int:
-        getter = getattr(self.llm_client, "get_last_request_output_tokens", None)
-        if callable(getter):
-            return max(0, to_int(getter()))
-
-        summary_getter = getattr(self.llm_client, "get_last_usage_summary", None)
-        if not callable(summary_getter):
-            return 0
-
-        summary = summary_getter()
-        selected_usage = summary.get("selected_model_usage") if isinstance(summary, dict) else None
-        top_level_usage = summary.get("top_level_usage") if isinstance(summary, dict) else None
-        return max(
-            0,
-            to_int(
-                (selected_usage or {}).get("output_tokens")
-                or (top_level_usage or {}).get("output_tokens")
-            ),
-        )
+        return max(0, to_int(self.llm_client.get_last_request_output_tokens()))
 
     def _get_last_request_context_limit(self) -> int:
-        getter = getattr(self.llm_client, "get_last_request_context_limit", None)
-        if callable(getter):
-            return max(0, to_int(getter()))
-        return max(0, to_int(getattr(self.llm_client, "context_limit", 0)))
+        return max(0, to_int(self.llm_client.get_last_request_context_limit()))
 
     def _is_near_context_limit(
         self,

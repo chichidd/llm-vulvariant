@@ -1,6 +1,7 @@
 
 from .client import (
     BaseLLMClient,
+    build_empty_llm_usage_summary,
     create_llm_client,
     OpenAIClient,
     LLMConfig,
@@ -13,6 +14,7 @@ from .client import (
 
 __all__ = [
     "BaseLLMClient",
+    "build_empty_llm_usage_summary",
     "create_llm_client",
     "OpenAIClient",
     "LLMConfig",

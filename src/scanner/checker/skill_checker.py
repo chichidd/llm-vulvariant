@@ -26,7 +26,6 @@ from utils.claude_cli import (
     apply_claude_cli_usage_counters,
     aggregate_usage_summaries,
     coerce_aggregated_usage_summary,
-    count_claude_cli_attempts,
     merge_aggregated_usage_summaries,
     run_claude_cli,
 )

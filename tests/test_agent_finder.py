@@ -218,6 +218,18 @@ class _UsageDrivenLLM:
     def get_last_usage_summary(self):
         return dict(self._last_usage_summary)
 
+    def get_last_request_input_tokens(self) -> int:
+        usage = self._last_usage_summary.get("selected_model_usage", {})
+        return usage.get("input_tokens", 0)
+
+    def get_last_request_output_tokens(self) -> int:
+        usage = self._last_usage_summary.get("selected_model_usage", {})
+        return usage.get("output_tokens", 0)
+
+    def get_last_request_context_limit(self) -> int:
+        usage = self._last_usage_summary.get("selected_model_usage", {})
+        return usage.get("context_window", 0)
+
 
 def _tool_call(name="mock_tool", arguments="{}"):
     return SimpleNamespace(

@@ -106,12 +106,6 @@ LANGUAGE_CONFIG: Dict[str, Dict] = {
     },
 }
 
-# All recognised source-code extensions (union of all languages)
-ALL_SOURCE_EXTENSIONS: Set[str] = set()
-for _cfg in LANGUAGE_CONFIG.values():
-    ALL_SOURCE_EXTENSIONS |= _cfg["extensions"]
-
-
 EXPLICITLY_UNSUPPORTED_SOURCE_EXTENSIONS: Set[str] = {".cs"}
 IGNORED_LANGUAGE_DIRS = {
     ".git",
@@ -130,6 +124,19 @@ IGNORED_LANGUAGE_DIRS = {
 # ──────────────────────────────────────────────
 #  Helper functions
 # ──────────────────────────────────────────────
+
+def dedupe_languages(languages: List[str]) -> List[str]:
+    """Deduplicate and normalise a list of language names (lower-cased, order-preserved)."""
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for lang in languages:
+        normalized = str(lang).strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
 
 def get_extensions(language: str) -> Set[str]:
     """Return the set of file extensions for *language*."""

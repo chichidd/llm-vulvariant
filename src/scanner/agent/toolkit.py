@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set
 from config import _path_config
 from utils.codeql_native import CodeQLAnalyzer
 from utils.language import (
+    dedupe_languages,
     detect_languages as detect_repo_languages,
     get_codeql_pack,
     get_extensions,
@@ -74,21 +75,9 @@ class AgenticToolkit:
         languages: Optional[List[str]],
     ) -> List[str]:
         if languages is not None:
-            return self._dedupe_languages(languages)
-        detected = self._dedupe_languages(detect_repo_languages(self.repo_path))
+            return dedupe_languages(languages)
+        detected = dedupe_languages(detect_repo_languages(self.repo_path))
         return detected
-
-    @staticmethod
-    def _dedupe_languages(languages: List[str]) -> List[str]:
-        seen = set()
-        ordered: List[str] = []
-        for lang in languages:
-            normalized = str(lang).strip().lower()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            ordered.append(normalized)
-        return ordered
 
     def _resolve_source_extensions(self) -> Set[str]:
         extensions: Set[str] = set()

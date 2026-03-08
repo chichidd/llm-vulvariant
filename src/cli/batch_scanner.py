@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config
+from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config, resolve_software_profiles_path, resolve_vuln_profiles_path
 from llm import LLMConfig, create_llm_client
 from profiler import SoftwareProfiler, VulnerabilityProfiler, VulnEntry
 from scanner.agent import load_software_profile, load_vulnerability_profile
@@ -204,15 +204,16 @@ def _validate_args(args: argparse.Namespace) -> bool:
     return True
 
 
-def _resolve_profile_dir(profile_base_path: Path, directory_arg: str) -> Path:
-    candidate = Path(directory_arg).expanduser()
-    return candidate if candidate.is_absolute() else profile_base_path / candidate
-
-
 def _resolve_profile_dirs_from_args(args: argparse.Namespace) -> tuple[Path, Path]:
-    profile_base_path = Path(args.profile_base_path).expanduser()
-    soft_profiles_dir = _resolve_profile_dir(profile_base_path, args.soft_profiles_dir)
-    vuln_profiles_dir = _resolve_profile_dir(profile_base_path, args.vuln_profiles_dir)
+    profile_base_path = str(args.profile_base_path)
+    soft_profiles_dir = resolve_software_profiles_path(
+        profile_base_path=profile_base_path,
+        software_profile_dirname=args.soft_profiles_dir,
+    )
+    vuln_profiles_dir = resolve_vuln_profiles_path(
+        profile_base_path=profile_base_path,
+        vuln_profile_dirname=args.vuln_profiles_dir,
+    )
     return soft_profiles_dir, vuln_profiles_dir
 
 

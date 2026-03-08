@@ -43,7 +43,7 @@ from utils.git_utils import (
     has_uncommitted_changes,
     restore_git_position,
 )
-from utils.language import detect_languages as detect_repo_languages
+from utils.language import dedupe_languages as _dedupe_languages, detect_languages as detect_repo_languages
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -54,18 +54,6 @@ class ScanTarget:
     repo_name: str
     commit_hash: str
     similarity: Optional[SimilarProfileCandidate] = None
-
-
-def _dedupe_languages(languages: List[str]) -> List[str]:
-    seen = set()
-    ordered: List[str] = []
-    for lang in languages:
-        normalized = str(lang).strip().lower()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        ordered.append(normalized)
-    return ordered
 
 
 def _extract_repo_analysis(software_profile) -> Dict[str, object]:

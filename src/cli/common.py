@@ -16,3 +16,8 @@ def setup_logging(verbose: bool = False) -> None:
         stream=sys.stderr,
     )
     set_global_log_level(level)
+
+
+def import_setup_logging():
+    """Return setup_logging, works whether running as package or script."""
+    return setup_logging
