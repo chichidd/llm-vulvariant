@@ -1,149 +1,155 @@
 # llm-vulvariant
 
-LLM 驱动的漏洞变种发现与可利用性验证框架。  
-项目把“已知漏洞”的语义特征转成结构化画像，然后在相似仓库或指定仓库上做 agentic 扫描，并对候选发现执行可利用性判定与报告生成。
+LLM 驱动的漏洞变种发现与可利用性验证框架。
 
-## 1. 项目定位
+给定一个已知漏洞（call chain + payload + commit），在相似仓库或新版本中发现同类漏洞变种，并自动完成可利用性判定与提交材料生成。
 
-`llm-vulvariant` 解决的是安全研究中的一个常见问题:
+---
 
-- 已经知道一个漏洞（通常有 `call_chain + payload + commit`）
-- 需要在新版本或其他相似项目里找到“同类漏洞变种”
-- 需要把“疑似漏洞”进一步筛成“可利用漏洞”，并输出可提交材料
+## 1. 架构与流程
 
-核心流程是四段:
+整个流水线分为四个阶段，后一阶段依赖前一阶段的输出：
 
-1. 软件画像（Software Profile）
-2. 漏洞画像（Vulnerability Profile）
-3. Agentic 漏洞扫描（单仓或批量）
-4. 可利用性验证与报告聚合（Claude Skill + Docker PoC）
+```
+                       ┌──────────────────────────────────────────────────────────┐
+                       │                  llm-vulvariant 流水线                    │
+                       └──────────────────────────────────────────────────────────┘
 
-## 2. 核心能力
+  ┌───────────────┐   ┌───────────────┐   ┌──────────────────┐   ┌────────────────────┐
+  │  Stage 1      │   │  Stage 2      │   │  Stage 3         │   │  Stage 4           │
+  │  软件画像     │   │  漏洞画像     │   │  Agentic 扫描    │   │  可利用性验证      │
+  │               │   │               │   │                  │   │  + 报告生成        │
+  │  仓库 ──►     │   │ vuln.json +   │   │  漏洞画像 +      │   │  扫描发现 ──►      │
+  │  software_    │   │ 软件画像 ──►  │   │  目标仓库 ──►    │   │  exploitability    │
+  │  profile.json │   │ vuln_         │   │  agentic_vuln_   │   │  .json + report    │
+  │               │   │ profile.json  │   │  findings.json   │   │  + submission      │
+  └───────────────┘   └───────────────┘   └──────────────────┘   └────────────────────┘
+        │                    │                     │                        │
+        │              ┌─────┘                     │                        │
+        ▼              ▼                           ▼                        ▼
+  ┌──────────────────────────┐   ┌──────────────────────────────────────────────────┐
+  │  profiles/               │   │  results/                                        │
+  │  ├── soft/<repo>/<hash>/ │   │  ├── scan/<cve>/<repo>-<hash>/                  │
+  │  │   └── software_       │   │  │   ├── agentic_vuln_findings.json             │
+  │  │       profile.json    │   │  │   ├── conversation_history.json              │
+  │  └── vuln/<repo>/<cve>/  │   │  │   ├── exploitability.json                    │
+  │      └── vulnerability_  │   │  │   ├── reports/security_report.md             │
+  │          profile.json    │   │  │   └── evidence/<finding>/                    │
+  │                          │   │  └── exploitable_findings.{json,csv}            │
+  └──────────────────────────┘   └──────────────────────────────────────────────────┘
+```
 
-- 多阶段画像生成:
-  - 软件画像: 仓库描述、模块结构、依赖关系、数据流相关特征
-  - 漏洞画像: Source / Sink / Flow 特征、利用条件、攻击场景
-- 相似仓库检索:
-  - 画像相似度由 5 个维度综合计算（描述、目标应用、目标用户、模块 Jaccard、模块依赖/导入相似度）
-- Agentic 扫描:
-  - LLM 原生工具调用（读文件、检索、函数提取、CodeQL 查询、漏洞上报）
-  - 支持 Priority-1 完成感知的提前停止策略
-- 可利用性检查:
-  - 按 finding 单条分析并可恢复
-  - 对 `EXPLOITABLE` 执行 Docker PoC 验证并保存证据
-- 报告与提交产物:
-  - `security_report.md`
-  - `ghsa_*.md`
-  - `exploitable_findings.json/.csv`
-  - `submission_index.json`
+### 各阶段说明
 
-## 3. 项目结构
+| 阶段 | 输入 | 处理 | 输出 |
+|------|------|------|------|
+| **Stage 1: 软件画像** | 仓库源码 | LLM 分析仓库描述、模块结构、依赖、数据流 | `software_profile.json` |
+| **Stage 2: 漏洞画像** | `vuln.json` + 软件画像 | LLM 提取 Source / Sink / Flow 特征、利用条件 | `vulnerability_profile.json` |
+| **Stage 3: Agentic 扫描** | 漏洞画像 + 目标仓库 | Agent 使用工具集（读文件、CodeQL、函数提取等）搜索变种 | `agentic_vuln_findings.json` |
+| **Stage 4: 可利用性验证** | 扫描发现 | Claude Skill 判定 + Docker PoC 验证 | 判定结果、安全报告、提交材料 |
 
-```text
+---
+
+## 2. 项目结构
+
+```
 llm-vulvariant/
-├── config/
-│   ├── paths.yaml
-│   ├── llm_config.yaml
-│   ├── codeql_config.yaml
-│   └── software_profile_rule.yaml
 ├── src/
-│   ├── cli/                    # software / vulnerability / scanner / batch_scanner / exploitability
-│   ├── profiler/               # 软件画像 + 漏洞画像
-│   ├── scanner/
-│   │   ├── agent/              # AgenticVulnFinder 与工具集
-│   │   ├── similarity/         # profile similarity
-│   │   └── checker/            # exploitability + report generator
-│   ├── llm/                    # LLM client 与重试封装
-│   └── utils/
-├── scripts/
-└── tests/
+│   ├── cli/                            # CLI 入口
+│   │   ├── software.py                 #   software-profile 命令
+│   │   ├── vulnerability.py            #   vuln-profile 命令
+│   │   ├── agent_scanner.py            #   scanner 命令（单目标/自动目标）
+│   │   ├── batch_scanner.py            #   batch-scanner 命令（批量）
+│   │   ├── exploitability.py           #   可利用性验证 + 报告
+│   │   └── common.py                   #   共享 CLI 工具
+│   ├── profiler/                       # 画像生成
+│   │   ├── software/                   #   软件画像（模块分析、仓库分析、数据流提取）
+│   │   ├── vulnerability/              #   漏洞画像（Source/Sink/Flow 特征提取）
+│   │   └── profile_storage.py          #   通用存储管理（checkpoint、恢复）
+│   ├── scanner/                        # 扫描与验证
+│   │   ├── agent/                      #   AgenticVulnFinder + 工具集（文件读取、CodeQL、函数提取）
+│   │   ├── similarity/                 #   5 维画像相似度匹配与目标选择
+│   │   └── checker/                    #   可利用性检查 + 安全报告生成
+│   ├── llm/                            # LLM 客户端（Deepseek / OpenAI / Anthropic）
+│   └── utils/                          # 工具库（日志、Git、CodeQL、语言检测等）
+├── config/
+│   ├── paths.yaml                      # 路径配置
+│   ├── llm_config.yaml                 # LLM provider 配置
+│   ├── codeql_config.yaml              # CodeQL 配置
+│   └── software_profile_rule.yaml      # 软件画像规则（模块分析器类型、语言、排除项）
+├── scripts/                            # 端到端运行脚本
+├── tests/                              # 30+ 测试文件
+└── pyproject.toml
 ```
 
-## 4. 环境要求
+---
 
-最小要求:
+## 3. 环境与安装
 
-- Python `>= 3.10`
-- Git
+### 依赖
 
-建议安装:
+| 类别 | 依赖项 | 说明 |
+|------|--------|------|
+| **必须** | Python ≥ 3.10, Git | 基础运行环境 |
+| **核心 Python 包** | `openai`, `anthropic`, `requests`, `pyyaml` | `pip install -e .` 自动安装 |
+| **嵌入模型（可选）** | `transformers`, `sentence-transformers`, `torch` | 相似度匹配所需；不安装则无法使用自动目标选择 |
+| **外部工具（可选）** | CodeQL CLI | 启用 CodeQL 查询能力 |
+| **外部工具（可选）** | Claude CLI | SkillModuleAnalyzer 与可利用性检查依赖 |
+| **外部工具（可选）** | Docker | EXPLOITABLE finding 的 PoC 验证 |
 
-- CodeQL CLI（启用 CodeQL 相关扫描能力）
-- Claude CLI（SkillModuleAnalyzer 与 exploitability 检查依赖）
-- Docker（EXPLOITABLE finding 的 PoC 验证依赖）
-
-Python 依赖安装:
+### 安装
 
 ```bash
+# 基础安装
 pip install -e .
-```
 
-当前代码运行时还常用到:
-
-```bash
+# 若需要相似度匹配功能
 pip install transformers sentence-transformers torch
 ```
 
-## 5. 配置说明
+### 环境变量
 
-### 5.1 路径配置 `config/paths.yaml`
+| 变量 | 用途 |
+|------|------|
+| `DEEPSEEK_API_KEY` | Deepseek provider API 密钥 |
+| `NY_API_KEY` | OpenAI provider API 密钥（当前配置） |
 
-关键字段:
+---
 
-- `project_root`
-- `profile_base_path`
-- `vuln_data_path`
-- `repo_base_path`
-- `codeql_db_path`
-- `embedding_model_path`
+## 4. 配置
 
-说明:
+所有配置文件位于 `config/` 目录。
 
-- software/vulnerability profile 的子目录名通过 CLI 参数传入（例如 `--software-profile-dirname`、`--vuln-profile-dirname`），并拼接到 `profile_base_path` 下。
+### 路径配置 — `paths.yaml`
 
-默认约定是 `~/vuln/...` 目录布局。
+| 字段 | 说明 | 默认 |
+|------|------|------|
+| `project_root` | 项目根目录 | `~/vuln` |
+| `profile_base_path` | 画像存储根目录 | `~/vuln/profiles` |
+| `vuln_data_path` | 漏洞数据文件 | `~/vuln/data/vuln.json` |
+| `repo_base_path` | 仓库源码目录 | `~/vuln/data/repos` |
+| `codeql_db_path` | CodeQL 数据库目录 | `~/vuln/codeql_dbs` |
+| `embedding_model_path` | 嵌入模型目录 | `~/vuln/models` |
 
-### 5.2 LLM 配置 `config/llm_config.yaml`
+画像子目录名通过 CLI 参数 `--software-profile-dirname` / `--vuln-profile-dirname` 指定，拼接到 `profile_base_path` 下。
 
-当前可用 provider（代码真实支持）:
+### LLM 配置 — `llm_config.yaml`
 
-- `deepseek`
-- `openai`
+支持的 provider：`deepseek`、`openai`。配置包含温度、重试策略、最大 token 数等。
 
+### 软件画像规则 — `software_profile_rule.yaml`
 
-常用环境变量:
+| 配置项 | 说明 |
+|--------|------|
+| `module_analyzer_config.analyzer_type` | `skill`（使用 Claude Skill）或 `agent` |
+| `repo_analyzer_config.languages` | `"auto"` 或语言列表 |
+| `excluded_folders` / `code_extensions` | 文件扫描范围控制 |
 
-- `DEEPSEEK_API_KEY`
-- `NY_API_KEY`（openai provider 在当前配置下读取该变量）
+---
 
-### 5.3 软件画像规则 `config/software_profile_rule.yaml`
+## 5. 输入数据格式
 
-关注以下项:
-
-- `module_analyzer_config.analyzer_type`:
-  - `skill`（默认，使用 `_path_config['skill_path']/ai-infra-module-modeler`；这里的 `skill_path` 是代码内部调用 Claude skill 的路径，不是用户侧 workflow skill 路径）
-  - `agent`
-- `repo_analyzer_config`:
-  - `languages`（支持 `"auto"` 或多语言列表）
-  - `max_slice_depth`
-  - `max_slice_files`
-- 文件扫描范围:
-  - `excluded_folders`
-  - `code_extensions`
-
-用户侧使用 `llm-vulvariant` workflow 时，可直接使用仓库内的 `.agents/skills`；如果你在工作区根目录下保留了 `.agents -> llm-vulvariant/.agents` 的 symlink，也可以直接通过工作区根目录的 `.agents/` 访问这些 skills。
-
-## 6. 输入数据格式
-
-`vuln.json` 是列表，每条至少包含:
-
-- `repo_name`
-- `commit`
-- `call_chain`
-- `payload`
-- `cve_id`（可选，缺失时批量模式会回退到 `vuln-{index}`）
-
-示例:
+### `vuln.json`
 
 ```json
 [
@@ -161,16 +167,20 @@ pip install transformers sentence-transformers torch
 ]
 ```
 
-说明:
+每条必须包含 `repo_name`、`commit`、`call_chain`、`payload`。`cve_id` 可选，缺失时回退到 `vuln-{index}`。
 
-- `call_chain` 中带 `#` 的项会被解析为 `file#function`
-- 不带 `#` 的项被视为 sink 标识
+`call_chain` 中带 `#` 的项解析为 `file#function`，不带 `#` 的项视为 sink 标识。
 
-## 7. 快速开始
+---
 
-### 7.1 生成软件画像
+## 6. 快速开始
+
+### 6.1 端到端最小示例（单条 CVE → 单目标）
+
+以下四条命令串联执行完整流水线：
 
 ```bash
+# 1) 为源仓库生成软件画像
 software-profile \
   --repo-name NeMo \
   --repo-base-path ~/vuln/data/repos \
@@ -178,16 +188,8 @@ software-profile \
   --profile-base-path ~/vuln/profiles \
   --software-profile-dirname soft \
   --llm-provider deepseek
-```
 
-输出:
-
-- `~/vuln/profiles/soft/NeMo/<commit>/software_profile.json`
-- 若要忽略已有 `software_profile.json` 和 checkpoints，追加 `--force-regenerate`
-
-### 7.2 生成漏洞画像
-
-```bash
+# 2) 生成漏洞画像
 vuln-profile \
   --vuln-index 0 \
   --vuln-json ~/vuln/data/vuln.json \
@@ -195,27 +197,8 @@ vuln-profile \
   --software-profile-dirname soft \
   --vuln-profile-dirname vuln \
   --llm-provider deepseek
-```
 
-输出:
-
-- `~/vuln/profiles/vuln/<repo_name>/<cve_id>/vulnerability_profile.json`
-
-批量生成全部漏洞画像:
-
-```bash
-./scripts/run_all_vulnerability_profiles.sh \
-  --vuln-json ~/vuln/data/vuln.json \
-  --profile-base-path ~/vuln/profiles \
-  --repo-base-path ~/vuln/data/repos \
-  --soft-profile-dirname soft \
-  --vuln-profile-dirname vuln \
-  --llm-provider deepseek
-```
-
-### 7.3 单目标扫描（手动指定目标仓库）
-
-```bash
+# 3) 对指定目标仓库执行 agentic 扫描
 scanner \
   --vuln-repo NeMo \
   --cve CVE-2025-23361 \
@@ -225,9 +208,22 @@ scanner \
   --llm-provider deepseek \
   --max-iterations 3 \
   --output results/scan-results
+
+# 4) 可利用性验证 + 报告
+python -m cli.exploitability \
+  --scan-results-dir results/scan-results \
+  --soft-profile-dir ~/vuln/profiles/soft \
+  --repo-base-path ~/vuln/data/repos \
+  --generate-report \
+  --report-only-exploitable \
+  --submission-output-dir results/exploitability \
+  --submission-prefix exploitable_findings \
+  --run-id demo-001
 ```
 
-### 7.4 自动目标扫描（按相似度选 Top-K）
+### 6.2 自动目标选择扫描
+
+不指定目标仓库，让系统通过画像相似度自动选择 Top-K 目标：
 
 ```bash
 scanner \
@@ -240,15 +236,16 @@ scanner \
   --llm-provider deepseek
 ```
 
-### 7.5 批量扫描（全量 vuln.json）
+### 6.3 批量扫描流水线
+
+对 `vuln.json` 中所有漏洞批量执行扫描：
 
 ```bash
 batch-scanner \
   --vuln-json ~/vuln/data/vuln.json \
   --repos-root ~/vuln/data/repos \
-  --profile-base-path ~/vuln/profiles \
-  --soft-profiles-dir soft \
-  --vuln-profiles-dir vuln \
+  --soft-profiles-dir ~/vuln/profiles/soft \
+  --vuln-profiles-dir ~/vuln/profiles/vuln \
   --scan-output-dir results/full-batch-scan \
   --similarity-threshold 0.70 \
   --fallback-top-n 3 \
@@ -256,18 +253,12 @@ batch-scanner \
   --llm-provider deepseek
 ```
 
-输出:
-
-- `results/full-batch-scan/batch-summary-YYYYMMDD-HHMMSS.json`
-- 每个目标扫描目录下的 finding 与会话产物
-
-### 7.6 可利用性验证 + 报告生成
+然后执行可利用性验证与报告生成：
 
 ```bash
 python -m cli.exploitability \
   --scan-results-dir results/full-batch-scan \
-  --profile-base-path ~/vuln/profiles \
-  --software-profile-dirname soft \
+  --soft-profile-dir ~/vuln/profiles/soft \
   --repo-base-path ~/vuln/data/repos \
   --generate-report \
   --report-only-exploitable \
@@ -279,108 +270,158 @@ python -m cli.exploitability \
   --timeout 1800
 ```
 
-## 8. 关键输出产物
-
-| 路径 | 说明 |
-|---|---|
-| `scan-results/<cve>/<repo>-<commit12>/agentic_vuln_findings.json` | Agentic 扫描原始发现 |
-| `scan-results/.../conversation_history.json` | 扫描对话历史 |
-| `scan-results/.../target_similarity.json` | 目标仓库相似度详情 |
-| `scan-results/.../exploitability.json` | 可利用性判定结果 |
-| `scan-results/.../evidence/<finding_id>/` | Docker PoC 证据（脚本、构建日志、执行输出） |
-| `scan-results/.../reports/security_report.md` | 汇总研究报告 |
-| `scan-results/.../reports/ghsa_*.md` | GHSA 格式报告 |
-| `results/full-batch-exploitability/exploitable_findings.json` | 聚合提交 JSON |
-| `results/full-batch-exploitability/exploitable_findings.csv` | 聚合提交 CSV |
-| `results/full-batch-exploitability/submission_index.json` | 按 CVE 分组索引 |
-
-## 9. 相似度策略
-
-目标选择默认使用以下 5 维特征:
-
-- `description_sim`
-- `target_application_sim`
-- `target_user_sim`
-- `module_jaccard_sim`
-- `module_dependency_import_sim`
-
-最终 `overall_sim` 为加权平均。批量模式先按阈值筛选；如果没有目标达标，会回退到 `fallback_top_n`。
-
-## 10. 批量模式与恢复能力
-
-批量扫描:
-
-- `--skip-existing-scans`: 已存在 `agentic_vuln_findings.json` 时跳过
-- `--force-regenerate-profiles`: 强制重建 software/vulnerability profiles
-
-可利用性检查:
-
-- `--skip-existing`: 已存在 `exploitability.json` 时跳过
-- 同一目录重复执行时，会复用已有结果并继续剩余 finding
-
-## 11. Claude Runtime 布局
-
-`cli.exploitability` 支持三种运行时目录策略:
-
-- `shared`: 所有任务共用同一 runtime 根目录
-- `run`: 每次运行一个子目录（`<root>/<run-id>`）
-- `folder`: 每个扫描目录一个子目录（`<root>/<run-id>/<cve>/<target>`）
-
-用于并行批处理时，推荐 `folder` 或 `run`，减少状态互相影响。
-
-## 12. 运行脚本
-
-仓库内提供了端到端脚本示例:
+### 6.4 一键全流水线脚本
 
 ```bash
 bash scripts/run_nvidia_full_pipeline.sh
 ```
 
-该脚本串联:
+该脚本按顺序执行 5 个阶段：验证漏洞画像 → 链接源画像 → 构建目标软件画像 → 批量扫描 → 可利用性验证与报告。可通过环境变量控制所有参数。
 
-1. 画像检查
-2. 软件画像补齐
-3. 批量扫描
-4. exploitability 验证与提交产物生成
+---
 
-## 13. 测试
+## 7. 核心设计
 
-运行全部测试:
+### 7.1 5 维画像相似度
+
+目标仓库选择基于源仓库与候选仓库画像之间的 5 维相似度：
+
+| 维度 | 说明 |
+|------|------|
+| `description_sim` | 仓库描述的语义相似度（embedding） |
+| `target_application_sim` | 目标应用领域的匹配度 |
+| `target_user_sim` | 目标用户群的匹配度 |
+| `module_jaccard_sim` | 模块名称的 Jaccard 相似度 |
+| `module_dependency_import_sim` | 模块依赖/导入关系的相似度 |
+
+`overall_sim` 为加权平均。批量模式先按 `--similarity-threshold` 筛选；达标数不足时回退到 `--fallback-top-n`。
+
+### 7.2 Agentic 扫描工具集
+
+`AgenticVulnFinder` 通过 LLM 的 tool_choice 能力自主调用以下工具：
+
+| 工具 | 功能 |
+|------|------|
+| `read_file` | 读取目标仓库源代码文件 |
+| `search_keyword` | 关键字检索 |
+| `get_call_paths` | 获取函数调用路径 |
+| `run_codeql_query` | 执行 CodeQL 查询 |
+| `report_finding` | 上报发现的漏洞 |
+
+Agent 特性：
+- 最大 300 轮迭代，自动检测 context limit 并优雅退出
+- **Priority-1 提前停止**：当高优先级发现完成时可提前结束（支持 `min` / `max` 策略）
+- **模块优先级排序**：根据漏洞画像自动计算目标模块的扫描优先级
+- **可恢复**：`AgentMemoryManager` 跟踪已处理文件/模块，支持断点续扫
+
+### 7.3 可恢复性设计
+
+所有阶段均支持断点恢复，避免在长时间任务中丢失进度：
+
+| 组件 | 恢复机制 |
+|------|----------|
+| 画像生成 | `ProfileStorageManager` 使用 checkpoint 文件，中断后从上次断点继续 |
+| Agentic 扫描 | `AgentMemoryManager` 记录 pending files / processed modules / findings cache |
+| 批量扫描 | `--skip-existing-scans` 跳过已存在 `agentic_vuln_findings.json` 的目标 |
+| 可利用性检查 | `--skip-existing` 跳过已完成的判定；同目录重复执行自动续做 |
+
+### 7.4 Claude Runtime 布局
+
+`cli.exploitability` 支持三种运行时目录策略，用于控制 Claude Skill 的隔离粒度：
+
+| 模式 | 目录结构 | 适用场景 |
+|------|----------|----------|
+| `shared` | 所有任务共用根目录 | 单次少量任务 |
+| `run` | `<root>/<run-id>/` | 单次批量运行 |
+| `folder` | `<root>/<run-id>/<cve>/<target>/` | 并行批处理（推荐） |
+
+---
+
+## 8. 输出产物
+
+### 扫描阶段
+
+| 路径 | 说明 |
+|------|------|
+| `<scan-dir>/<cve>/<repo>-<commit12>/agentic_vuln_findings.json` | 扫描原始发现 |
+| `.../conversation_history.json` | Agent 对话历史 |
+| `.../target_similarity.json` | 目标选择时的相似度详情 |
+
+### 可利用性验证阶段
+
+| 路径 | 说明 |
+|------|------|
+| `.../exploitability.json` | 每条 finding 的可利用性判定 |
+| `.../evidence/<finding_id>/` | Docker PoC 证据（脚本、构建日志、执行输出） |
+| `.../reports/security_report.md` | 汇总安全研究报告 |
+| `.../reports/ghsa_*.md` | GHSA 格式漏洞报告 |
+
+### 聚合提交产物
+
+| 路径 | 说明 |
+|------|------|
+| `exploitable_findings.json` | 所有可利用发现的聚合 JSON |
+| `exploitable_findings.csv` | 聚合 CSV（表格化） |
+| `submission_index.json` | 按 CVE 分组的提交索引 |
+
+---
+
+## 9. 辅助脚本
+
+| 脚本 | 功能 |
+|------|------|
+| `scripts/run_nvidia_full_pipeline.sh` | 端到端全流水线（5 阶段） |
+| `scripts/run_all_software_profiles.sh` | 批量生成指定目录下所有仓库的软件画像 |
+| `scripts/run_all_vulnerability_profiles.sh` | 批量生成 `vuln.json` 中所有条目的漏洞画像 |
+| `scripts/run_all_vuln_software_profile.sh` | 为漏洞条目对应的源仓库生成软件画像 |
+| `scripts/update_repos.sh` | 更新仓库到最新版本 |
+| `scripts/checkout_main.sh` | 将仓库切换到主分支 |
+| `scripts/small-scale-exp.sh` | 小规模实验脚本 |
+
+---
+
+## 10. 测试
 
 ```bash
+# 全量测试
 pytest -q
-```
 
-常用回归集:
-
-```bash
+# CLI 回归测试
 pytest -q tests/test_cli_batch_scanner.py tests/test_cli_exploitability.py tests/test_cli_agent_scanner.py
+
+# 相似度模块
+pytest -q tests/test_similarity_retriever.py tests/test_similarity_embedding.py
+
+# 画像模型
+pytest -q tests/test_profile_models_and_storage.py
 ```
 
-## 14. 常见问题
+---
 
-1. `Software profile not found`:
-   - 先确认 `~/vuln/profiles/soft/<repo>/<commit>/software_profile.json` 已存在
-   - 检查 `--soft-profiles-dir` 与 `config/paths.yaml` 是否一致
+## 11. 常见问题
 
-2. `Vulnerability profile not found`:
-   - 先执行 `vuln-profile`
-   - 注意路径是 `~/vuln/profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
+**Software profile not found**
+- 确认 `profiles/soft/<repo>/<commit>/software_profile.json` 已存在
+- 检查 `--soft-profiles-dir` 是否指向正确目录
 
-3. `Claude CLI not found`:
-   - 安装 Claude CLI 并确保 `claude` 在 `PATH`
-   - 确认配置中的 `skill_path` 下存在 `check-exploitability` 与 `ai-infra-module-modeler`；这是代码内部使用的 Claude skills
-   - 用户侧 workflow skills 放在 `.agents/skills`，也可通过工作区根目录的 `.agents/` symlink 访问和使用
+**Vulnerability profile not found**
+- 先执行 `vuln-profile` 生成
+- 路径应为 `profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
 
-4. CodeQL 工具不可用:
-   - 安装 CodeQL CLI
-   - 确认 `codeql` 命令可执行并检查 `config/codeql_config.yaml`
+**Claude CLI not found**
+- 安装 Claude CLI 并确保 `claude` 在 `PATH`
+- 确认 `skill_path` 配置下存在 `check-exploitability` 与 `ai-infra-module-modeler`
 
-5. Docker PoC 阶段失败:
-   - 查看 `evidence/<finding_id>/docker_build.log`
-   - 查看 `evidence/<finding_id>/execution_output.txt`
+**CodeQL 不可用**
+- 安装 CodeQL CLI 并确认 `codeql` 命令可执行
+- 检查 `config/codeql_config.yaml`
 
-## 15. 安全与使用声明
+**Docker PoC 失败**
+- 检查 `evidence/<finding_id>/docker_build.log`
+- 检查 `evidence/<finding_id>/execution_output.txt`
 
-本项目用于漏洞研究、变种挖掘与防御修复验证。  
-请仅在授权环境中运行扫描、验证和 PoC 相关流程。
+---
+
+## 12. 安全声明
+
+本项目用于漏洞研究、变种挖掘与防御修复验证。请仅在授权环境中运行扫描、验证和 PoC 相关流程。

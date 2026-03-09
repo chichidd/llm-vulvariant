@@ -1,125 +1,116 @@
 """Directory tree building and rendering utilities."""
 
-from typing import Dict, List, Tuple, Any, Optional, Callable
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
-def build_path_tree(paths_with_values: List[Tuple[str, Any]]) -> Dict:
-    """
-    Build a tree structure from a list of paths (deduplicated).
+def build_path_tree(paths_with_values: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """Build a nested tree structure from path/value pairs.
 
     Args:
-        paths_with_values: [(path, value), ...] where value can be size, None, etc.
+        paths_with_values: ``[(path, value), ...]`` entries.
 
     Returns:
-        A nested dict; leaf nodes store the provided value.
-        
-    Example:
-        >>> paths = [("src/main.py", 100), ("src/utils/helper.py", 50)]
-        >>> tree = build_path_tree(paths)
-        >>> # {'src': {'main.py': 100, 'utils': {'helper.py': 50}}}
+        Nested dictionary where leaf nodes store the provided value.
     """
-    tree = {}
+    tree: Dict[str, Any] = {}
     for path, value in paths_with_values:
         parts = path.split('/')
         current = tree
-        for i, part in enumerate(parts[:-1]):
+        for part in parts[:-1]:
             if part not in current:
                 current[part] = {}
             current = current[part]
-        # The last component (file name or final directory name).
         filename = parts[-1]
         current[filename] = value
     return tree
 
 
 def render_tree(
-    node: Dict, 
-    prefix: str = "", 
+    node: Dict[str, Any],
+    prefix: str = "",
     value_formatter: Optional[Callable[[Any], str]] = None,
     max_depth: Optional[int] = None,
-    current_depth: int = 0
+    current_depth: int = 0,
 ) -> List[str]:
-    """
-    Recursively render a tree structure.
+    """Render a tree structure as ``tree``-style text output.
 
     Args:
-        node: Tree dict.
-        prefix: Prefix for the current line.
-        value_formatter: Formats values; returns a string. None means do not display.
-        max_depth: Maximum depth limit; None means unlimited.
-        current_depth: Current depth (internal).
+        node: Tree node produced by :func:`build_path_tree`.
+        prefix: Prefix used for nested indentation.
+        value_formatter: Optional formatter for leaf values.
+        max_depth: Optional depth limit where root depth is ``0``.
+        current_depth: Internal recursion depth.
 
     Returns:
-        A list of formatted lines.
+        Formatted output lines.
     """
-    lines = []
-    
-    # Check depth limit.
+    lines: List[str] = []
     if max_depth is not None and current_depth >= max_depth:
         return lines
-    
+
     items = sorted(node.items())
     for i, (name, value) in enumerate(items):
         is_last_item = (i == len(items) - 1)
         connector = "└── " if is_last_item else "├── "
-        
+
         if isinstance(value, dict):
-            # Directory
             lines.append(prefix + connector + name + "/")
             extension = "    " if is_last_item else "│   "
             lines.extend(
                 render_tree(
-                    value, 
+                    value,
                     prefix + extension,
                     value_formatter,
                     max_depth,
-                    current_depth + 1
+                    current_depth + 1,
                 )
             )
         else:
-            # File or leaf node
             display_name = name
             if value_formatter and value is not None:
                 display_name += f" ({value_formatter(value)})"
             lines.append(f"{prefix}{connector}{display_name}")
-    
+
     return lines
 
 
 def build_directory_structure_tree(file_list: List[str], max_depth: Optional[int] = None) -> str:
-    """
-    Build a compact directory tree from a file list (deduplicated).
+    """Build a compact directory tree from a file list.
 
     Args:
-        file_list: List of file paths.
-        max_depth: Maximum display depth; None means unlimited.
+        file_list: Repository-relative file paths.
+        max_depth: Optional rendering depth limit.
 
     Returns:
-        A formatted tree string.
+        Readable tree string with a short header.
     """
     if not file_list:
         return "Empty directory"
-    
-    # Build a path tree (values set to None).
+
     paths_with_none = [(path, None) for path in file_list]
     tree = build_path_tree(paths_with_none)
-    
-    # Render the tree.
     lines = render_tree(tree, max_depth=max_depth)
-    
-    # Add stats.
+
     header = f"Total files: {len(file_list)}\n"
     if max_depth:
         header += f"(Showing depth: {max_depth})\n"
-    
+
     return header + "\n".join(lines)
 
 
 def format_file_size(size_bytes: int) -> str:
-    """Format a file size."""
+    """Format a byte count using compact binary-friendly units.
+
+    Args:
+        size_bytes: File size in bytes.
+
+    Returns:
+        Human-readable file size string.
+    """
     if size_bytes < 1024:
         return f"{size_bytes}B"
-    elif size_bytes < 1024 * 1024:
+    if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f}KB"
-    else:
-        return f"{size_bytes / (1024 * 1024):.1f}MB"
+    return f"{size_bytes / (1024 * 1024):.1f}MB"

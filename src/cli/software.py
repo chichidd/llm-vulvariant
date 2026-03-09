@@ -1,9 +1,10 @@
 """CLI entrypoint for generating a software profile."""
 
-import sys
+from __future__ import annotations
+
+import argparse
 import logging
 from pathlib import Path
-import argparse
 
 from config import (
     DEFAULT_SOFTWARE_PROFILE_DIRNAME,
@@ -19,7 +20,12 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 logger = logging.getLogger(__name__)
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for software profile generation.
+
+    Returns:
+        Parsed CLI arguments.
+    """
     parser = argparse.ArgumentParser(description='Generate software profile using LLM')
     parser.add_argument('--repo-name', required=True, help='Repository name under repo base path (config/paths.yaml)')
     parser.add_argument('--llm-provider', default='deepseek', help='LLM provider name (e.g., openai, deepseek)')
@@ -46,16 +52,17 @@ def parse_args():
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
     return parser.parse_args()
 
-def main():
-    """Main entrypoint."""
+
+def main() -> int:
+    """Generate a software profile for the requested repository."""
 
     from profiler import SoftwareProfiler
     from llm import LLMConfig, create_llm_client
-    
+
     args = parse_args()
     setup_logging(args.verbose)
-    
-    # Build the repository path
+
+    # Resolve repository and output directories before initializing the LLM.
     repo_base_path = (
         Path(args.repo_base_path).expanduser()
         if args.repo_base_path
@@ -63,6 +70,7 @@ def main():
     )
     repo_path = str(repo_base_path / args.repo_name)
     logger.info(f"Repository path: {repo_path}")
+
     output_dir = (
         Path(args.output_dir).expanduser()
         if args.output_dir
@@ -72,30 +80,30 @@ def main():
         )
     )
     logger.info(f"Software profile output dir: {output_dir}")
-    
-    # Configure the LLM
+
+    # Provider/model provenance is important because profile quality and retry
+    # behaviour differ between models during long-running jobs.
     llm_config = LLMConfig(provider=args.llm_provider, model=args.llm_name)
     llm_config.enable_thinking = True
     logger.debug(f"LLM config: {llm_config}")
-    
-    # Create the client and profiler
+
     logger.info(f"Initializing LLM client ({args.llm_provider})...")
     llm_client = create_llm_client(llm_config)
     profiler = SoftwareProfiler(
-        llm_client=llm_client, 
+        llm_client=llm_client,
         output_dir=str(output_dir),
     )
-    
-    # Generate the profile
+
     logger.info("Generating software profile...")
     profiler.generate_profile(
-        repo_path=repo_path, 
+        repo_path=repo_path,
         force_regenerate=args.force_regenerate,
-        target_version=args.target_version
+        target_version=args.target_version,
     )
-    
+
     print(f"✅ Software profile generated: {args.repo_name}@{args.target_version}")
     return 0
 
+
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

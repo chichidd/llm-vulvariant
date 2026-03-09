@@ -8,7 +8,9 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+
 def _to_dict(obj: Any) -> Dict[str, Any]:
+    """Best-effort conversion of dataclass-like objects into dictionaries."""
     if hasattr(obj, "to_dict"):
         return obj.to_dict()
     if isinstance(obj, dict):
@@ -31,8 +33,15 @@ def clear_reasoning_content(messages: List[Dict[str, Any]]) -> List[Dict[str, An
     return cleaned
 
 
-def make_serializable(obj: Any):
-    """Recursively convert complex objects into JSON-serializable structures."""
+def make_serializable(obj: Any) -> Any:
+    """Recursively convert complex objects into JSON-serializable structures.
+
+    Args:
+        obj: Arbitrary Python object.
+
+    Returns:
+        Primitive, mapping, or list structures that ``json.dumps`` can handle.
+    """
     if obj is None:
         return None
     if isinstance(obj, (str, int, float, bool)):
@@ -122,11 +131,22 @@ def compress_iteration_conversation(
 ) -> Dict[str, Any]:
     """Summarize a single iteration to keep history bounded for long runs.
 
-    A custom compression prompt can be provided to adapt to different agents.
+    Args:
+        llm_client: Chat-capable LLM client.
+        iteration: Current iteration number.
+        iteration_history: Raw message history for the iteration.
+        verbose: Whether to print compression failures.
+        compression_prompt: Optional prompt override.
+        system_prompt: System message used for the compression request.
+
+    Returns:
+        Compression result payload or a structured failure stub.
     """
 
     prompt = compression_prompt or DEFAULT_COMPRESSION_PROMPT
 
+    # Normalize messages before serializing so provider-specific response
+    # objects do not break JSON encoding or leak non-essential internals.
     conversation_text = json.dumps(make_serializable(iteration_history), indent=2, ensure_ascii=False)
     full_prompt = prompt + "\n\n" + conversation_text
     compressed_data: Dict[str, Any] = {}
@@ -140,6 +160,8 @@ def compress_iteration_conversation(
         content = response.content if hasattr(response, "content") else str(response)
         json_match = re.search(r"```(?:json)?\s*({.*?})\s*```", content, re.DOTALL)
         if json_match:
+            # Prefer fenced JSON because providers sometimes prepend explanatory
+            # prose around the payload even when the prompt forbids it.
             compressed_data["content"] = json.loads(json_match.group(1))
         else:
             compressed_data["content"] = json.loads(content)

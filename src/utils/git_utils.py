@@ -1,23 +1,23 @@
-"""
-Git diff utilities for analyzing code changes between commits
-"""
+"""Git helpers for resolving commits and guarding temporary checkouts."""
+
+from __future__ import annotations
+
+from pathlib import Path
 import subprocess
 from typing import Optional
+
 from .logger import get_logger
 
 logger = get_logger(__name__)
 
 
 def _is_ignorable_cleanliness_path(path: str) -> bool:
-    """
-    Return True when the git-status path is a known transient artifact that
-    should not fail repository cleanliness checks.
-    """
+    """Return ``True`` for transient artifacts ignored during cleanliness checks."""
     normalized = (path or "").strip()
     if not normalized:
         return False
 
-    # Rename output format: "old/path -> new/path"
+    # ``git status --porcelain`` reports renames as ``old -> new``.
     if " -> " in normalized:
         normalized = normalized.split(" -> ", 1)[1].strip()
 
@@ -33,19 +33,18 @@ def _is_ignorable_cleanliness_path(path: str) -> bool:
 
 
 def get_git_commit(repo_path: str) -> Optional[str]:
-    """
-    Get the current commit hash of a git repository.
-    
+    """Get the current commit hash of a git repository.
+
     Args:
-        repo_path: Path to the git repository
-        
+        repo_path: Path to the git repository.
+
     Returns:
-        The commit hash as a string, or None if the operation fails
+        Current commit hash or ``None`` if the command fails.
     """
     try:
         result = subprocess.run(
             ['git', 'rev-parse', 'HEAD'],
-            cwd=repo_path,
+            cwd=str(Path(repo_path)),
             capture_output=True,
             text=True,
             check=True
@@ -63,15 +62,15 @@ def get_git_commit(repo_path: str) -> Optional[str]:
 
 
 def checkout_commit(repo_path: str, target_commit: str) -> bool:
-    """
-    Check if repository is at target commit, and checkout if different.
-    
+    """Check out ``target_commit`` when the repository is at a different revision.
+
     Args:
-    repo_path: Path to the git repository
-    target_commit: The commit hash to checkout
-    
+        repo_path: Path to the git repository.
+        target_commit: Commit hash to check out.
+
     Returns:
-    True if successful, False otherwise
+        ``True`` when the repository is already at, or successfully switches to,
+        the requested commit.
     """
     try:
         current_commit = get_git_commit(repo_path)
@@ -86,7 +85,7 @@ def checkout_commit(repo_path: str, target_commit: str) -> bool:
         logger.info(f"Checking out commit {target_commit}...")
         subprocess.run(
             ['git', 'checkout', target_commit],
-            cwd=repo_path,
+            cwd=str(Path(repo_path)),
             capture_output=True,
             text=True,
             check=True
@@ -103,15 +102,18 @@ def checkout_commit(repo_path: str, target_commit: str) -> bool:
 
 
 def get_git_branch(repo_path: str) -> Optional[str]:
-    """
-    Get current branch name if HEAD points to a local branch.
+    """Get current branch name when ``HEAD`` points to a local branch.
 
-    Returns None when repository is in detached HEAD state.
+    Args:
+        repo_path: Path to the git repository.
+
+    Returns:
+        Branch name, or ``None`` for detached HEAD.
     """
     try:
         result = subprocess.run(
             ['git', 'symbolic-ref', '--quiet', '--short', 'HEAD'],
-            cwd=repo_path,
+            cwd=str(Path(repo_path)),
             capture_output=True,
             text=True,
             check=True,
@@ -126,12 +128,13 @@ def get_git_branch(repo_path: str) -> Optional[str]:
 
 
 def get_git_restore_target(repo_path: str) -> Optional[str]:
-    """
-    Get a stable restore target for current git position.
+    """Get a stable restore target for the repository's current position.
 
-    Priority:
-    1. Current branch name (if not detached)
-    2. Current commit hash
+    Args:
+        repo_path: Path to the git repository.
+
+    Returns:
+        Branch name when available, otherwise the current commit hash.
     """
     branch = get_git_branch(repo_path)
     if branch:
@@ -140,16 +143,14 @@ def get_git_restore_target(repo_path: str) -> Optional[str]:
 
 
 def restore_git_position(repo_path: str, restore_target: str) -> bool:
-    """
-    Restore repository to a previously recorded target (branch or commit hash).
-    """
+    """Restore repository to a previously recorded branch or commit."""
     if not restore_target:
         logger.info("Restore target is empty")
         return False
     try:
         subprocess.run(
             ['git', 'checkout', restore_target],
-            cwd=repo_path,
+            cwd=str(Path(repo_path)),
             capture_output=True,
             text=True,
             check=True,
@@ -165,8 +166,14 @@ def restore_git_position(repo_path: str, restore_target: str) -> bool:
 
 
 def has_uncommitted_changes(repo_path: str, include_untracked: bool = True) -> bool:
-    """
-    Return True when repository has local modifications.
+    """Return ``True`` when a repository has local modifications.
+
+    Args:
+        repo_path: Path to the git repository.
+        include_untracked: Whether untracked files should count as dirty.
+
+    Returns:
+        ``True`` if meaningful local changes are present.
     """
     args = ['git', 'status', '--porcelain']
     if not include_untracked:
@@ -174,7 +181,7 @@ def has_uncommitted_changes(repo_path: str, include_untracked: bool = True) -> b
     try:
         result = subprocess.run(
             args,
-            cwd=repo_path,
+            cwd=str(Path(repo_path)),
             capture_output=True,
             text=True,
             check=True,
@@ -184,7 +191,7 @@ def has_uncommitted_changes(repo_path: str, include_untracked: bool = True) -> b
             if not line:
                 continue
 
-            # Porcelain v1 format: XY<space><path>
+            # Porcelain v1 format is ``XY<space><path>``.
             path = line[3:] if len(line) >= 4 else line
             if _is_ignorable_cleanliness_path(path):
                 continue
