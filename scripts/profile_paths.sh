@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
-_PROFILE_PATHS_LAUNCH_DIR="${_PROFILE_PATHS_LAUNCH_DIR:-$(pwd -P)}"
+_PROFILE_PATHS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+_PROFILE_PATHS_REPO_ROOT="${_PROFILE_PATHS_REPO_ROOT:-$(cd "$_PROFILE_PATHS_SCRIPT_DIR/.." && pwd -P)}"
 
 # Resolve profile directories from base path + dirname and optional explicit override.
 resolve_profile_dir() {
@@ -24,7 +25,7 @@ resolve_profile_dir() {
 _profile_realpath() {
   local raw_path="$1"
   if [[ "$raw_path" != /* ]]; then
-    raw_path="$_PROFILE_PATHS_LAUNCH_DIR/$raw_path"
+    raw_path="$_PROFILE_PATHS_REPO_ROOT/$raw_path"
   fi
   if command -v realpath >/dev/null 2>&1; then
     realpath -m "$raw_path"

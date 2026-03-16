@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -5,8 +6,10 @@ import pytest
 from llm.client import (
     BaseLLMClient,
     LLMConfig,
+    OpenAIClient,
     build_empty_llm_usage_summary,
     create_llm_client,
+    load_llm_config_from_yaml,
     summarize_chat_completion_usage,
 )
 
@@ -193,6 +196,67 @@ def test_openai_provider_fallback_sets_context_limit(monkeypatch):
     config = LLMConfig(provider="openai", model="")
 
     assert config.context_limit == 65536
+
+
+def test_load_llm_config_from_yaml_falls_back_for_empty_file(tmp_path):
+    config_path = tmp_path / "llm_config.yaml"
+    config_path.write_text("", encoding="utf-8")
+
+    config = load_llm_config_from_yaml(config_path)
+
+    assert config["llm"]["default"]["timeout"] == 120
+    assert config["llm"]["providers"] == {}
+
+
+def test_llm_config_keeps_explicit_api_key_when_provider_yaml_has_env(monkeypatch):
+    monkeypatch.setattr(
+        "llm.client.load_llm_config_from_yaml",
+        lambda config_path=None: {
+            "llm": {
+                "default": {},
+                "providers": {
+                    "openai": {
+                        "api_key_env": "NY_API_KEY",
+                        "base_url": "https://yaml.example/v1",
+                        "model": "yaml-model",
+                    }
+                },
+            }
+        },
+    )
+    monkeypatch.setenv("NY_API_KEY", "env-key")
+
+    config = LLMConfig(provider="openai", model="explicit-model", api_key="explicit-key")
+
+    assert config.api_key == "explicit-key"
+    assert config.model == "explicit-model"
+
+
+def test_llm_config_fallback_keeps_explicit_model_and_api_key(monkeypatch):
+    monkeypatch.setattr("llm.client.load_llm_config_from_yaml", lambda config_path=None: {"llm": {"default": {}, "providers": {}}})
+
+    config = LLMConfig(provider="openai", model="explicit-model", api_key="explicit-key")
+
+    assert config.api_key == "explicit-key"
+    assert config.model == "explicit-model"
+    assert config.base_url == "https://ai.nengyongai.cn/v1"
+
+
+def test_openai_client_clamps_zero_max_retries_to_single_attempt(monkeypatch):
+    class _FakeOpenAI:
+        def __init__(self, api_key=None, base_url=None):
+            self.api_key = api_key
+            self.base_url = base_url
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.load_llm_config_from_yaml", lambda config_path=None: {"llm": {"default": {}, "providers": {}}})
+
+    client = OpenAIClient(LLMConfig(provider="openai", model="glm-4.6", max_retries=0))
+    calls = []
+
+    assert client._execute_with_retry(lambda: calls.append("called") or "ok") == "ok"
+    assert calls == ["called"]
+    assert client.max_retries == 1
 
 
 def test_create_llm_client_rejects_removed_lab_provider():

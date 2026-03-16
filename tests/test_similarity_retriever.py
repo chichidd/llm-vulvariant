@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from profiler.software.models import ModuleInfo, SoftwareProfile
@@ -224,31 +225,51 @@ def test_load_all_profiles_and_commit_resolution(tmp_path):
     bad_dir.mkdir(parents=True)
     (bad_dir / "software_profile.json").write_text("{not-json", encoding="utf-8")
 
-    repo2 = repo_profiles_dir / "repo2"
-    (repo2 / "000000000001").mkdir(parents=True)
-    (repo2 / "000000000002").mkdir(parents=True)
+    repo2_commit_old = repo_profiles_dir / "repo2" / "fff000000002"
+    repo2_commit_old.mkdir(parents=True)
+    (repo2_commit_old / "software_profile.json").write_text(
+        "{\"basic_info\": {\"name\": \"repo2\", \"version\": \"fff000000002\"}}",
+        encoding="utf-8",
+    )
+    repo2_commit_new = repo_profiles_dir / "repo2" / "000000000001"
+    repo2_commit_new.mkdir(parents=True)
+    (repo2_commit_new / "software_profile.json").write_text(
+        "{\"basic_info\": {\"name\": \"repo2\", \"version\": \"000000000001\"}}",
+        encoding="utf-8",
+    )
+    repo2_missing = repo_profiles_dir / "repo2" / "zzz000000003"
+    repo2_missing.mkdir(parents=True)
+    os.utime(repo2_commit_old / "software_profile.json", (10, 10))
+    os.utime(repo2_commit_new / "software_profile.json", (20, 20))
 
     refs = load_all_software_profiles(repo_profiles_dir)
-    assert len(refs) == 1
+    assert len(refs) == 3
     assert refs[0].repo_name == "repo1"
     assert refs[0].label.startswith("repo1-")
 
-    assert resolve_profile_commit(repo_profiles_dir, "repo2") == "000000000002"
+    assert resolve_profile_commit(repo_profiles_dir, "repo2") == "000000000001"
     assert resolve_profile_commit(repo_profiles_dir, "repo2", "00000000000") == "000000000001"
     assert resolve_profile_commit(repo_profiles_dir, "repo2", "does-not-exist") is None
 
 
-def test_select_profile_ref_with_commit_hint():
+def test_select_profile_ref_with_commit_hint(tmp_path):
+    older_path = tmp_path / "2222bbbb.json"
+    older_path.write_text("{}", encoding="utf-8")
+    newer_path = tmp_path / "1111aaaa.json"
+    newer_path.write_text("{}", encoding="utf-8")
+    os.utime(older_path, (10, 10))
+    os.utime(newer_path, (20, 20))
+
     refs = [
-        ProfileRef("repo", "1111aaaa", _mk_profile("a", "", [])),
-        ProfileRef("repo", "2222bbbb", _mk_profile("b", "", [])),
+        ProfileRef("repo", "2222bbbb", _mk_profile("b", "", []), profile_path=older_path),
+        ProfileRef("repo", "1111aaaa", _mk_profile("a", "", []), profile_path=newer_path),
     ]
 
     selected_latest = select_profile_ref(refs, "repo", None)
     selected_prefix = select_profile_ref(refs, "repo", "1111")
     missing = select_profile_ref(refs, "repo", "ffff")
 
-    assert selected_latest is not None and selected_latest.commit_hash == "2222bbbb"
+    assert selected_latest is not None and selected_latest.commit_hash == "1111aaaa"
     assert selected_prefix is not None and selected_prefix.commit_hash == "1111aaaa"
     assert missing is None
 

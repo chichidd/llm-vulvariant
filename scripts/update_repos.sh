@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="${ROOT:-$SCRIPT_DIR/../../data/repos}"
+ROOT="${ROOT:-$SCRIPT_DIR/../data/repos}"
 
 if command -v realpath >/dev/null 2>&1; then
   ROOT="$(realpath -m "$ROOT")"

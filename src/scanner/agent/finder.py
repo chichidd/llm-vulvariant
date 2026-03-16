@@ -202,10 +202,10 @@ class AgenticVulnFinder:
                     f"- {reasoning_content=}\n"
                     f"- {content=}\n"
                 )
-                if tool_calls is not None:
+                if tool_calls:
                     logger.info(f"- {tool_calls[0].function.name=}\n- {tool_calls[0].function.arguments=}\n")
 
-            if tool_calls is None:
+            if not tool_calls:
                 self._commit_messages(messages)
                 return sub_turn
             

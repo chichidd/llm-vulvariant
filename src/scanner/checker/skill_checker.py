@@ -592,6 +592,7 @@ class SkillExploitabilityChecker:
         api_key = (
             os.environ.get("DEEPSEEK_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("NY_API_KEY")
             or ""
         )
         

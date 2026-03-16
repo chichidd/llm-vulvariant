@@ -79,8 +79,9 @@ def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, A
         if config_path.exists():
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
-            
-            return config
+
+            if isinstance(config, dict):
+                return config
     except Exception as e:
         import logging
         logging.debug(f"Failed to load LLM config: {e}")
@@ -156,8 +157,8 @@ class LLMConfig:
         if self.provider and self.provider in providers_config:
             provider_config = providers_config[self.provider]
             
-            # Set API key
-            if 'api_key_env' in provider_config:
+            # Keep explicit credentials/model overrides from the caller.
+            if not self.api_key and 'api_key_env' in provider_config:
                 self.api_key = os.getenv(provider_config['api_key_env'])
             
             # Set other fields
@@ -174,17 +175,25 @@ class LLMConfig:
         if self.provider and not self.base_url:
             if self.provider == "deepseek":
                 # DeepSeek API
-                self.api_key = os.getenv("DEEPSEEK_API_KEY")
+                if not self.api_key:
+                    self.api_key = os.getenv("DEEPSEEK_API_KEY")
                 self.base_url = "https://api.deepseek.com/v1"
-                self.model = "deepseek-chat"
-                self.max_tokens = 65536
-                self.context_limit = 131072
+                if not self.model:
+                    self.model = "deepseek-chat"
+                if self.max_tokens == 0:
+                    self.max_tokens = 65536
+                if self.context_limit == 0:
+                    self.context_limit = 131072
             elif self.provider == "openai":
-                self.api_key = os.getenv("NY_API_KEY")
+                if not self.api_key:
+                    self.api_key = os.getenv("NY_API_KEY")
                 self.base_url = "https://ai.nengyongai.cn/v1"
-                self.model = "gpt-5.1"
-                self.max_tokens = 65536
-                self.context_limit = 65536
+                if not self.model:
+                    self.model = "gpt-5.1"
+                if self.max_tokens == 0:
+                    self.max_tokens = 65536
+                if self.context_limit == 0:
+                    self.context_limit = 65536
 class LLMRetryExhaustedError(Exception):
     """Raised when LLM retries are exhausted."""
     def __init__(self, message: str, last_error: Exception = None):
@@ -204,7 +213,9 @@ class BaseLLMClient(ABC):
         )
         self._usage_history: List[Dict[str, Any]] = []
         # Load retry settings from config
-        self.max_retries = config.max_retries
+        # Always allow at least one real request, even when config sets 0 retries.
+        self.max_retries = max(1, to_int(config.max_retries))
+        self.config.max_retries = self.max_retries
         self.initial_delay = config.initial_delay
         self.max_delay = config.max_delay
         self.backoff_factor = config.backoff_factor

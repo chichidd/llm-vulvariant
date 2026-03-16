@@ -8,6 +8,7 @@ import yaml
 import json
 import re
 import threading
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,7 +44,7 @@ logger = get_logger(__name__)
 class SoftwareProfiler:
     """软件画像生成器 - 协调各个分析组件"""
     
-    _detection_rules_cache: Dict[Path, Dict[str, Any]] = {}
+    _detection_rules_cache: Dict[tuple[Path, str], Dict[str, Any]] = {}
     _rules_lock = threading.Lock()
     _C_API_ALIASES = {
         "open": {"fopen"},
@@ -130,7 +131,11 @@ class SoftwareProfiler:
     ) -> tuple[Dict[str, Any], int]:
         conversation_data = None
         if self.storage_manager and hasattr(self.storage_manager, "load_conversation"):
-            conversation_data = self.storage_manager.load_conversation("module_analysis", *path_parts)
+            conversation_data = self.storage_manager.load_conversation(
+                "module_analysis",
+                *path_parts,
+                file_identifier="module_analysis",
+            )
 
         conversation_calls = 0
         if isinstance(conversation_data, dict) and conversation_data.get("conversation_name") == "module_analysis":
@@ -220,16 +225,28 @@ class SoftwareProfiler:
                     logger.info(f"Loading saved config from: {save_config_path}")
                     resolved_rules_path = save_config_path
         resolved_rules_path = Path(resolved_rules_path).expanduser()
-        cache_key = resolved_rules_path.resolve()
+        resolved_cache_path = resolved_rules_path.resolve()
+
+        try:
+            raw_rules_text = (
+                resolved_rules_path.read_text(encoding='utf-8')
+                if resolved_rules_path.exists()
+                else ""
+            )
+        except Exception as e:
+            logger.error(f"Failed to read detection rules: {e}")
+            raw_rules_text = ""
+        cache_key = (
+            resolved_cache_path,
+            hashlib.sha1(raw_rules_text.encode('utf-8')).hexdigest(),
+        )
 
         with cls._rules_lock:
             if cache_key in cls._detection_rules_cache:
                 return cls._detection_rules_cache[cache_key]
             try:
-                if resolved_rules_path.exists():
-                    loaded_rules = yaml.safe_load(
-                        resolved_rules_path.read_text(encoding='utf-8')
-                    )
+                if raw_rules_text:
+                    loaded_rules = yaml.safe_load(raw_rules_text)
                     if not isinstance(loaded_rules, dict):
                         loaded_rules = _empty_rule
                     logger.info(f"Loaded detection rules from {resolved_rules_path}")

@@ -37,6 +37,7 @@ def _run_script(launch_dir: Path, path_root: Path, *args: str) -> subprocess.Com
     env = os.environ.copy()
     env["PATH"] = f"{path_root / 'bin'}:{env['PATH']}"
     env["CALLS_LOG"] = str(path_root / "calls.log")
+    env["_PROFILE_PATHS_REPO_ROOT"] = str(path_root / "repo-root")
     return subprocess.run(
         ["bash", str(SCRIPT), *args],
         cwd=launch_dir,
@@ -47,15 +48,17 @@ def _run_script(launch_dir: Path, path_root: Path, *args: str) -> subprocess.Com
     )
 
 
-def test_run_all_software_profiles_anchors_relative_profile_base_to_launch_dir(tmp_path: Path) -> None:
+def test_run_all_software_profiles_anchors_relative_profile_base_to_repo_root(tmp_path: Path) -> None:
     launch_dir = tmp_path / "launch"
     launch_dir.mkdir()
+    repo_root = tmp_path / "repo-root"
+    repo_root.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls_log = tmp_path / "calls.log"
     _write_fake_software_profile(bin_dir, calls_log)
 
-    repo_dir = launch_dir / "repos" / "demo"
+    repo_dir = repo_root / "repos" / "demo"
     (repo_dir / ".git").mkdir(parents=True)
 
     result = _run_script(
@@ -78,11 +81,11 @@ def test_run_all_software_profiles_anchors_relative_profile_base_to_launch_dir(t
     assert calls == [
         [
             "--profile-base-path",
-            str(launch_dir / "profiles"),
+            str(repo_root / "profiles"),
             "--software-profile-dirname",
             "soft-custom",
             "--repo-base-path",
-            str(launch_dir / "repos"),
+            str(repo_root / "repos"),
             "--repo-name",
             "demo",
         ]

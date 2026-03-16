@@ -6,9 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/profile_paths.sh"
 
-VULN_JSON="${VULN_JSON:-$HOME/vuln/data/vuln.json}"
-REPO_BASE_PATH="${REPO_BASE_PATH:-$HOME/vuln/data/repos}"
-PROFILE_BASE_PATH="${PROFILE_BASE_PATH:-$HOME/vuln/profiles}"
+VULN_JSON="${VULN_JSON:-../data/vuln.json}"
+REPO_BASE_PATH="${REPO_BASE_PATH:-../data/repos}"
+PROFILE_BASE_PATH="${PROFILE_BASE_PATH:-../profiles}"
 SOFT_PROFILE_DIRNAME="${SOFT_PROFILE_DIRNAME:-soft}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
@@ -117,9 +117,23 @@ if [[ ! -d "$REPO_BASE_PATH" ]]; then
   exit 1
 fi
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "Error: command not found: jq" >&2
+  exit 1
+fi
+
 mkdir -p "$OUTPUT_DIR"
 
-mapfile -t entries < <(jq -r '.[] | "\(.repo_name)|\(.commit)"' "$VULN_JSON" | sort -u)
+if ! loader_output="$(jq -r '.[] | "\(.repo_name)|\(.commit)"' "$VULN_JSON" | sort -u)"; then
+  echo "Error: failed to parse vuln.json: $VULN_JSON" >&2
+  exit 1
+fi
+
+if [[ -n "$loader_output" ]]; then
+  mapfile -t entries <<< "$loader_output"
+else
+  entries=()
+fi
 if [[ ${#entries[@]} -eq 0 ]]; then
   echo "No entries found in vuln.json"
   exit 0

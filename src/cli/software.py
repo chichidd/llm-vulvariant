@@ -62,7 +62,7 @@ def main() -> int:
 
     # Resolve repository and output directories before initializing the LLM.
     repo_base_path = (
-        resolve_cli_path(args.repo_base_path)
+        resolve_cli_path(args.repo_base_path, base_dir=_path_config["repo_root"])
         if args.repo_base_path
         else _path_config["repo_base_path"]
     )
@@ -74,7 +74,11 @@ def main() -> int:
         software_profile_dirname=args.software_profile_dirname,
         vuln_profile_dirname=None,
     )
-    output_dir = resolve_path_override(args.output_dir, default_software_profile_dir)
+    output_dir = resolve_path_override(
+        args.output_dir,
+        default_software_profile_dir,
+        base_dir=_path_config["repo_root"],
+    )
     logger.info(f"Software profile output dir: {output_dir}")
 
     logger.info(f"Initializing LLM client ({args.llm_provider})...")

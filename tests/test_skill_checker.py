@@ -252,6 +252,25 @@ def test_parse_claude_result_keeps_structured_unknown_json():
     assert parsed["attack_scenario"]["impact"] == "unclear"
 
 
+def test_build_prompt_uses_ny_api_key_when_openai_proxy_env_is_set(monkeypatch, tmp_path):
+    checker = _checker()
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("NY_API_KEY", "ny-proxy-key")
+
+    prompt = checker._build_prompt(
+        vuln={
+            "file_path": "src/app.py",
+            "vulnerability_type": "command_injection",
+            "evidence": "dangerous",
+            "description": "unsafe input",
+        },
+        repo_path=tmp_path,
+    )
+
+    assert "API_KEY: ny-proxy-key" in prompt
+
+
 def test_strip_inline_json_objects_removes_nested_payload_once():
     checker = _checker()
     text = (

@@ -238,6 +238,9 @@ def _validate_args(args: argparse.Namespace) -> bool:
     if args.max_iterations_cap <= 0:
         logger.error("--max-iterations-cap must be >= 1")
         return False
+    if args.limit is not None and args.limit < 0:
+        logger.error("--limit must be >= 0 when provided")
+        return False
     if not str(args.source_soft_profiles_dir).strip():
         logger.error("--source-soft-profiles-dir must not be empty")
         return False
@@ -269,20 +272,24 @@ def _resolve_target_and_vuln_profile_dirs_from_args(args: argparse.Namespace) ->
 def _resolve_batch_scan_paths(args: argparse.Namespace) -> Optional[BatchScanPaths]:
     """Resolve and validate batch-scan paths from CLI args."""
     target_repo_profiles_dir, vuln_profiles_dir = _resolve_target_and_vuln_profile_dirs_from_args(args)
+    repo_root = _path_config["repo_root"]
     paths = BatchScanPaths(
-        vuln_json=resolve_cli_path(args.vuln_json),
-        source_repos_root=resolve_cli_path(args.source_repos_root),
-        target_repos_root=resolve_cli_path(args.target_repos_root),
+        vuln_json=resolve_cli_path(args.vuln_json, base_dir=repo_root),
+        source_repos_root=resolve_cli_path(args.source_repos_root, base_dir=repo_root),
+        target_repos_root=resolve_cli_path(args.target_repos_root, base_dir=repo_root),
         source_repo_profiles_dir=_resolve_source_software_profile_dir_from_args(args),
         target_repo_profiles_dir=target_repo_profiles_dir,
         vuln_profiles_dir=vuln_profiles_dir,
-        scan_output_dir=resolve_cli_path(args.scan_output_dir),
+        scan_output_dir=resolve_cli_path(args.scan_output_dir, base_dir=repo_root),
     )
-    if not paths.vuln_json.exists():
-        logger.error(f"vuln.json not found: {paths.vuln_json}")
+    if not paths.vuln_json.is_file():
+        logger.error(f"vuln.json not found or is not a file: {paths.vuln_json}")
         return None
-    if not paths.target_repos_root.exists():
-        logger.error(f"target repos root not found: {paths.target_repos_root}")
+    if not paths.target_repos_root.is_dir():
+        logger.error(f"target repos root not found or is not a directory: {paths.target_repos_root}")
+        return None
+    if paths.scan_output_dir.exists() and not paths.scan_output_dir.is_dir():
+        logger.error(f"scan output dir exists but is not a directory: {paths.scan_output_dir}")
         return None
     return paths
 
@@ -294,6 +301,12 @@ def _ensure_source_inputs_available(
     entries: Sequence[Tuple[int, Dict[str, object]]],
 ) -> bool:
     """Validate source-root access or cached profile availability."""
+    if paths.source_repos_root.exists() and not paths.source_repos_root.is_dir():
+        logger.error(
+            "source repos root exists but is not a directory: %s",
+            paths.source_repos_root,
+        )
+        return False
     if paths.source_repos_root.exists():
         return True
     if args.force_regenerate_profiles:
@@ -361,9 +374,17 @@ def _build_batch_summary(args: argparse.Namespace, paths: BatchScanPaths) -> Dic
         "target_soft_profiles_dir": str(paths.target_repo_profiles_dir),
         "vuln_profiles_dir": str(paths.vuln_profiles_dir),
         "similarity_threshold": args.similarity_threshold,
+        "max_targets": args.max_targets,
+        "fallback_top_n": args.fallback_top_n,
+        "include_same_repo": args.include_same_repo,
+        "limit": args.limit,
         "max_iterations_cap": args.max_iterations_cap,
         "critical_stop_enabled": not args.disable_critical_stop,
         "critical_stop_mode": args.critical_stop_mode,
+        "force_regenerate_profiles": args.force_regenerate_profiles,
+        "skip_existing_scans": args.skip_existing_scans,
+        "llm_provider": args.llm_provider,
+        "llm_name": args.llm_name,
         "entries": [],
     }
 
@@ -656,7 +677,11 @@ def _run_target_scan(
         output_base=str(batch_args.scan_output_dir),
     )
     findings_path = output_dir / "agentic_vuln_findings.json"
-    if batch_args.skip_existing_scans and findings_path.exists():
+    if (
+        batch_args.skip_existing_scans
+        and not getattr(batch_args, "force_regenerate_profiles", False)
+        and findings_path.exists()
+    ):
         logger.info(f"[Skip] Existing scan result: {findings_path}")
         return "skipped"
 

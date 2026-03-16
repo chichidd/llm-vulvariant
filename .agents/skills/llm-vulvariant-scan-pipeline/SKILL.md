@@ -98,12 +98,14 @@ For an explicit repo allowlist, first materialize a dedicated target root contai
 
 ```bash
 cd "$APP_DIR"
-TARGET_REPOS_ROOT="$ROOT/data/repos-allowlist"
-TARGET_SOFT_PROFILES_DIR="$PROFILE_BASE/soft-allowlist"
+TARGET_REPO_SOURCE_ROOT="$TARGET_REPOS_ROOT"
+ALLOWLIST_TAG="$(date +%Y%m%d-%H%M%S)"
+TARGET_REPOS_ROOT="$ROOT/data/repos-allowlist-$ALLOWLIST_TAG"
+TARGET_SOFT_PROFILES_DIR="$PROFILE_BASE/soft-allowlist-$ALLOWLIST_TAG"
 mkdir -p "$TARGET_REPOS_ROOT" "$TARGET_SOFT_PROFILES_DIR"
 while IFS= read -r repo || [[ -n "$repo" ]]; do
   [[ -n "$repo" ]] || continue
-  ln -sfn "$ROOT/data/repos/$repo" "$TARGET_REPOS_ROOT/$repo"
+  ln -sfn "$TARGET_REPO_SOURCE_ROOT/$repo" "$TARGET_REPOS_ROOT/$repo"
   cmd=(
     software-profile
     --repo-name "$repo"
@@ -136,6 +138,7 @@ cmd=(
   --scan-output-dir "$SCAN_OUTPUT_DIR"
   --similarity-threshold 0.7
   --fallback-top-n 3
+  --max-targets 3
   --max-iterations-cap 10
   --llm-provider "$LLM_PROVIDER"
 )
@@ -160,6 +163,7 @@ python -m cli.batch_scanner \
   --scan-output-dir "$SCAN_OUTPUT_DIR" \
   --similarity-threshold 0.7 \
   --fallback-top-n 3 \
+  --max-targets 3 \
   --max-iterations-cap 10 \
   --llm-provider "$LLM_PROVIDER" \
   --limit 1
@@ -168,7 +172,9 @@ python -m cli.batch_scanner \
 Useful options:
 - `--skip-existing-scans`
 - `--force-regenerate-profiles`
+  When this flag is combined with `--skip-existing-scans`, fresh profile inputs still trigger new scans instead of reusing old findings.
 - `--max-targets`
+  This cap still applies when `--similarity-threshold` is set; threshold filtering no longer bypasses the final target limit.
 - `--include-same-repo`
 
 ## Validate Output

@@ -44,9 +44,9 @@ from utils.git_utils import (
 from utils.language import dedupe_languages as _dedupe_languages, detect_languages as detect_repo_languages
 from utils.logger import get_logger
 try:
-    from cli.common import resolve_profile_dirs
+    from cli.common import resolve_cli_path, resolve_profile_dirs, setup_logging
 except ImportError:  # pragma: no cover - direct script execution fallback
-    from common import resolve_profile_dirs
+    from common import resolve_cli_path, resolve_profile_dirs, setup_logging
 
 logger = get_logger(__name__)
 
@@ -224,11 +224,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_output_dir(cve_id: str, target_repo: str, target_commit: str, output_base: Optional[str]) -> Path:
+def resolve_output_dir(
+    cve_id: str,
+    target_repo: str,
+    target_commit: str,
+    output_base: Optional[str | Path],
+) -> Path:
+    """Resolve one target output folder under an absolute or repo-root-relative base."""
     folder_name = f"{cve_id}/{target_repo}-{target_commit[:12]}"
-    if output_base:
-        return Path(output_base) / folder_name
-    return Path("scan-results") / folder_name
+    output_root = resolve_cli_path(
+        output_base or "scan-results",
+        base_dir=_path_config["repo_root"],
+    )
+    return output_root / folder_name
 
 
 def _validate_args(args: argparse.Namespace) -> bool:
@@ -326,11 +334,10 @@ def _resolve_auto_targets(
         device=args.similarity_device,
     )
     similarity_threshold = getattr(args, "similarity_threshold", None)
-    resolved_top_k = args.top_k if similarity_threshold is None else len(refs)
     ranked = rank_similar_profiles(
         source_ref=source_ref,
         candidate_refs=refs,
-        top_k=resolved_top_k,
+        top_k=args.top_k,
         min_overall_similarity=float(similarity_threshold or 0.0),
         text_retriever=text_retriever,
         exclude_same_repo=not args.include_same_repo,
@@ -535,6 +542,7 @@ def run_single_target_scan(
 
 def main() -> int:
     args = parse_args()
+    setup_logging(args.verbose)
     if not _validate_args(args):
         return 1
     repo_profiles_dir, vuln_profiles_dir = _resolve_profile_dirs(args)

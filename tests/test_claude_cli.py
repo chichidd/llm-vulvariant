@@ -45,6 +45,28 @@ def test_summarize_claude_usage_prefers_deepseek_model_usage():
     assert "claude-haiku-4-5-20251001" in summary["available_models"]
 
 
+def test_summarize_claude_usage_reuses_selected_model_cost_for_session_totals():
+    summary = summarize_claude_usage(
+        {
+            "usage": {
+                "input_tokens": 195,
+                "output_tokens": 213,
+            },
+            "modelUsage": {
+                "deepseek-chat": {
+                    "inputTokens": 198,
+                    "outputTokens": 245,
+                    "costUSD": 0.014061,
+                },
+            },
+        }
+    )
+
+    assert summary["total_cost_usd"] == 0.014061
+    assert summary["session_usage"]["cost_usd"] == 0.014061
+    assert summary["selected_model_usage"]["cost_usd"] == 0.014061
+
+
 def test_summarize_claude_usage_uses_single_available_model():
     summary = summarize_claude_usage(
         {
@@ -413,6 +435,32 @@ def test_aggregate_usage_summaries_falls_back_to_top_level_usage():
     assert aggregate["session_usage_summary"]["cost_usd"] == 1.25
 
 
+def test_aggregate_usage_summaries_uses_selected_model_cost_when_top_level_cost_is_missing():
+    aggregate = aggregate_usage_summaries(
+        [
+            {
+                "selected_model_usage": {
+                    "model": "deepseek-chat",
+                    "input_tokens": 10,
+                    "output_tokens": 20,
+                    "cost_usd": 0.5,
+                },
+                "top_level_usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 8,
+                },
+            }
+        ]
+    )
+
+    assert aggregate["calls_total"] == 1
+    assert aggregate["calls_with_top_level_usage_fallback"] == 1
+    assert aggregate["cost_usd"] == 0.5
+    assert aggregate["request_cost_usd"] == 0.5
+    assert aggregate["session_usage_summary"]["cost_usd"] == 0.5
+    assert aggregate["selected_model_usage_summary"]["cost_usd"] == 0.5
+
+
 def test_aggregate_usage_summaries_preserves_common_source_provider_and_requested_model():
     aggregate = aggregate_usage_summaries(
         [
@@ -772,7 +820,39 @@ def test_coerce_aggregated_usage_summary_does_not_imply_llm_client_session_usage
     assert summary["calls_with_selected_model_usage_session_fallback"] == 0
 
 
-def test_count_claude_cli_attempts_counts_real_llm_requests():
+def test_coerce_aggregated_usage_summary_preserves_explicit_top_level_fallback_provenance():
+    summary = coerce_aggregated_usage_summary(
+        {
+            "source": "claude_cli",
+            "sessions_total": 2,
+            "calls_total": 2,
+            "calls_with_session_usage": 0,
+            "calls_with_top_level_usage_fallback": 2,
+            "calls_missing_usage": 0,
+            "calls_missing_selected_model_usage": 2,
+            "input_tokens": 12,
+            "output_tokens": 34,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 0.5,
+            "request_cost_usd": 0.5,
+            "session_usage_summary": {
+                "input_tokens": 12,
+                "output_tokens": 34,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cost_usd": 0.5,
+            },
+        }
+    )
+
+    assert summary["calls_total"] == 2
+    assert summary["calls_with_session_usage"] == 0
+    assert summary["calls_with_top_level_usage_fallback"] == 2
+    assert summary["calls_with_selected_model_usage_session_fallback"] == 0
+
+
+def test_count_claude_cli_attempts_counts_current_and_prior_subprocess_runs():
     class _Response:
         def __init__(self, returncode, timed_out=False, prior_attempts=None, usage_summary=None):
             self.returncode = returncode
@@ -782,7 +862,7 @@ def test_count_claude_cli_attempts_counts_real_llm_requests():
 
     assert count_claude_cli_attempts(_Response(returncode=None, timed_out=False)) == 0
     assert count_claude_cli_attempts(_Response(returncode=None, timed_out=True)) == 1
-    assert count_claude_cli_attempts(_Response(returncode=0, timed_out=False, prior_attempts=[{}])) == 1
+    assert count_claude_cli_attempts(_Response(returncode=0, timed_out=False, prior_attempts=[{}])) == 2
     assert count_claude_cli_attempts(
         _Response(
             returncode=1,
@@ -1014,6 +1094,8 @@ def test_run_claude_cli_falls_back_to_plain_text_when_json_output_is_unsupported
     assert response.fallback_reason == "json_output_flag_unsupported"
     assert len(response.prior_attempts or []) == 1
     assert len(commands) == 2
+    assert response.usage_summary["sessions_total"] == 2
+    assert response.usage_summary["calls_total"] == 2
     assert "--output-format" in commands[0]
     assert "--output-format" not in commands[1]
 

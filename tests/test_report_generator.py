@@ -185,6 +185,145 @@ def test_generate_full_report_only_exploitable_hides_conditional_sections():
     assert "Conditionally Exploitable Vulnerabilities" not in report
 
 
+def test_generate_full_report_prefers_analysis_confidence_over_original_finding():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "confidence": "medium",
+                "original_finding": {
+                    "file_path": "src/app.py",
+                    "vulnerability_type": "deserialization",
+                    "description": "Unsafe load",
+                    "confidence": "low",
+                },
+            }
+        ],
+    }
+
+    report = gen.generate_full_report(data)
+
+    assert "**Verdict**: EXPLOITABLE | **Confidence**: medium" in report
+
+
+def test_generate_reports_render_analysis_attack_scenario_payload():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "confidence": "high",
+                "attack_scenario": {
+                    "description": "Generated exploit path",
+                    "steps": ["deliver payload", "reach sink"],
+                    "impact": "remote code execution",
+                },
+                "original_finding": {
+                    "file_path": "src/app.py",
+                    "vulnerability_type": "deserialization",
+                    "description": "Unsafe load",
+                    "evidence": "pickle.loads(user_input)",
+                },
+            }
+        ],
+    }
+
+    ghsa_report = gen.generate_ghsa_reports(data)[0]["content"]
+    full_report = gen.generate_full_report(data)
+
+    assert "Generated exploit path" in ghsa_report
+    assert "Steps: deliver payload -> reach sink" in ghsa_report
+    assert "Impact: remote code execution" in full_report
+
+
+def test_generate_ghsa_reports_tolerates_type_drifted_analysis_payloads():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "source_analysis": "bad",
+                "remediation": "manual fix",
+                "sink_analysis": "sink here",
+                "docker_verification": {
+                    "verification_verdict": "VERIFIED_EXPLOITABLE",
+                    "execution_rounds": ["boom"],
+                    "execution_output": "VULNERABILITY_CONFIRMED",
+                    "poc_generation": "bad",
+                    "evidence_summary": "bad",
+                },
+                "original_finding": {
+                    "file_path": "src/app.py",
+                    "vulnerability_type": "command_injection",
+                    "description": "Unsafe exec",
+                    "evidence": "os.system(user_input)",
+                },
+            }
+        ],
+    }
+
+    report = gen.generate_ghsa_reports(data)[0]["content"]
+
+    assert "Docker Verification Evidence" in report
+    assert "VULNERABILITY_CONFIRMED" in report
+    assert "No specific remediation provided." in report
+
+
+def test_generate_full_report_tolerates_non_mapping_result_fields():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "source_analysis": "bad",
+                "docker_verification": {
+                    "verification_verdict": "VERIFIED_EXPLOITABLE",
+                    "execution_rounds": ["boom"],
+                    "execution_output": "VULNERABILITY_CONFIRMED",
+                },
+                "original_finding": "bad",
+            }
+        ],
+    }
+
+    report = gen.generate_full_report(data)
+
+    assert "#### Finding 1: Unknown in `unknown`" in report
+    assert "**Docker Verification**: VERIFIED_EXPLOITABLE" in report
+    assert "VULNERABILITY_CONFIRMED" in report
+
+
+def test_report_generator_handles_missing_vulnerability_type_fields():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "source_analysis": {"sources_found": ["cli"], "attack_path": ["entry", "sink"]},
+                "original_finding": {
+                    "file_path": None,
+                    "vulnerability_type": None,
+                    "description": None,
+                    "evidence": None,
+                },
+            }
+        ],
+    }
+
+    ghsa_report = gen.generate_ghsa_reports(data)[0]["content"]
+    full_report = gen.generate_full_report(data)
+
+    assert "Unknown in unknown" in ghsa_report
+    assert "#### Finding 1: Unknown in `unknown`" in full_report
+    assert "Security impact dependent on context" in ghsa_report
+
+
 def test_report_generator_falls_back_to_python_for_unknown_language():
     gen = ReportGenerator(
         repo_name="demo",

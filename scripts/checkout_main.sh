@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="${ROOT:-$SCRIPT_DIR/../../data/repos}"
+ROOT="${ROOT:-$SCRIPT_DIR/../data/repos}"
 
 if command -v realpath >/dev/null 2>&1; then
   ROOT="$(realpath -m "$ROOT")"
@@ -20,8 +20,14 @@ for d in "$ROOT"/*; do
   if [[ -d "$d/.git" ]] || git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "=== Updating: $d ==="
     
-    # Get the default branch (main or master)
-    default_branch=$(git -C "$d" remote show origin | grep "HEAD branch" | cut -d: -f2 | xargs)
+    # Resolve the tracked default branch from local refs so the helper does
+    # not require network access just to decide what to check out.
+    default_branch="$(git -C "$d" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    default_branch="${default_branch#origin/}"
+    if [[ -z "$default_branch" ]]; then
+      echo "=== Skipping (default branch not found): $d ===" >&2
+      continue
+    fi
     
     # Checkout the default branch
     git -C "$d" checkout "$default_branch"

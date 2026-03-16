@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-ROOT="${ROOT:-/mnt/raid/home/dongtian/vuln}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="${ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 APP_DIR="$ROOT/llm-vulvariant"
 PROFILES_ROOT="${PROFILES_ROOT:-$ROOT/profiles}"
 VULN_JSON="${VULN_JSON:-$ROOT/data/vuln.json}"
@@ -17,6 +18,7 @@ RUNTIME_ROOT="${RUNTIME_ROOT:-$ROOT/results/claude-runtime}"
 MAX_ITERATIONS_CAP="${MAX_ITERATIONS_CAP:-20}"
 SIMILARITY_THRESHOLD="${SIMILARITY_THRESHOLD:-0.7}"
 FALLBACK_TOP_N="${FALLBACK_TOP_N:-3}"
+MAX_TARGETS="${MAX_TARGETS:-$FALLBACK_TOP_N}"
 CRITICAL_STOP_MODE="${CRITICAL_STOP_MODE:-min}"
 SOFTWARE_PROFILE_TIMEOUT="${SOFTWARE_PROFILE_TIMEOUT:-1800}"
 EXPLOITABILITY_TIMEOUT="${EXPLOITABILITY_TIMEOUT:-1800}"
@@ -180,6 +182,7 @@ scan_cmd=(
   --scan-output-dir "$SCAN_OUTPUT_DIR"
   --similarity-threshold "$SIMILARITY_THRESHOLD"
   --fallback-top-n "$FALLBACK_TOP_N"
+  --max-targets "$MAX_TARGETS"
   --max-iterations-cap "$MAX_ITERATIONS_CAP"
   --critical-stop-mode "$CRITICAL_STOP_MODE"
   --llm-provider "$LLM_PROVIDER"

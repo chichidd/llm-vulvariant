@@ -294,10 +294,18 @@ def summarize_claude_usage(
     model_usage = _get_model_usage_map(claude_output)
     requested_model = selected_model or _extract_requested_model_from_output(claude_output)
     top_level_usage = _normalize_top_level_usage(claude_output)
+    selected_model_usage = normalize_claude_model_usage(
+        claude_output=claude_output,
+        selected_model=requested_model,
+    )
     total_cost_usd = (
         to_float(claude_output.get("total_cost_usd"))
         if isinstance(claude_output, dict) else 0.0
     )
+    # Claude CLI often omits the flat total but still reports backend-model
+    # costUSD. Reuse that cost so session totals stay aligned with model usage.
+    if total_cost_usd == 0.0 and isinstance(selected_model_usage, dict):
+        total_cost_usd = to_float(selected_model_usage.get("cost_usd"))
     session_usage = _build_session_usage(
         top_level_usage,
         total_cost_usd=total_cost_usd,
@@ -305,11 +313,6 @@ def summarize_claude_usage(
     turns_total = (
         to_int(claude_output.get("num_turns", claude_output.get("numTurns")))
         if isinstance(claude_output, dict) else 0
-    )
-
-    selected_model_usage = normalize_claude_model_usage(
-        claude_output=claude_output,
-        selected_model=requested_model,
     )
     models_usage = _normalize_models_usage(claude_output)
     effective_model = selected_model_usage.get("model") if isinstance(selected_model_usage, dict) else None
@@ -366,22 +369,24 @@ def summarize_claude_usage(
 
 
 def count_claude_cli_attempts(response: Any) -> int:
-    """Count Claude CLI sessions represented by a response."""
+    """Count Claude CLI subprocess attempts represented by a response."""
     if response is None:
         return 0
 
+    prior_attempts = getattr(response, "prior_attempts", None) or []
+    attempts_total = len(prior_attempts)
     usage_summary = getattr(response, "usage_summary", None)
     if isinstance(usage_summary, dict) and (
         usage_summary.get("session_usage")
         or usage_summary.get("top_level_usage")
         or usage_summary.get("selected_model_usage")
     ):
-        return 1
+        return attempts_total + 1
     if getattr(response, "timed_out", False):
-        return 1
+        return attempts_total + 1
     if getattr(response, "returncode", None) == 0:
-        return 1
-    return 0
+        return attempts_total + 1
+    return attempts_total
 
 
 def count_claude_cli_turns(response: Any) -> int:
@@ -542,6 +547,8 @@ def aggregate_usage_summaries(
             session_cost = to_float(item.get("total_cost_usd"))
             if session_cost == 0.0:
                 session_cost = to_float(usage_for_totals.get("cost_usd"))
+            if session_cost == 0.0 and isinstance(selected_usage, dict):
+                session_cost = to_float(selected_usage.get("cost_usd"))
             if session_cost == 0.0:
                 session_cost = to_float(item.get("cost_usd"))
             usage_for_totals["cost_usd"] = session_cost
@@ -750,6 +757,15 @@ def coerce_aggregated_usage_summary(usage: Optional[Dict[str, Any]]) -> Dict[str
         summary["cost_usd"] = round(to_float(usage.get("cost_usd")), 6)
         request_cost_usd = to_float(usage.get("request_cost_usd", usage.get("cost_usd")))
         summary["request_cost_usd"] = round(request_cost_usd, 6)
+        has_explicit_usage_provenance = any(
+            key in usage
+            for key in (
+                "calls_with_session_usage",
+                "calls_with_selected_model_usage_session_fallback",
+                "calls_with_top_level_usage_fallback",
+                "calls_missing_usage",
+            )
+        )
 
         session_usage_summary = _normalize_usage_totals(usage.get("session_usage_summary"))
         if session_usage_summary is None:
@@ -777,7 +793,10 @@ def coerce_aggregated_usage_summary(usage: Optional[Dict[str, Any]]) -> Dict[str
         )
 
         if summary["calls_with_session_usage"] <= 0 and sessions_total > 0:
-            if isinstance(usage.get("session_usage_summary"), dict):
+            if (
+                isinstance(usage.get("session_usage_summary"), dict)
+                and not has_explicit_usage_provenance
+            ):
                 summary["calls_with_session_usage"] = sessions_total
             elif to_int(usage.get("calls_with_top_level_usage_fallback")) > 0:
                 summary["calls_with_session_usage"] = 0
@@ -785,7 +804,7 @@ def coerce_aggregated_usage_summary(usage: Optional[Dict[str, Any]]) -> Dict[str
                 summary["calls_with_selected_model_usage_session_fallback"] = max(
                     summary["calls_with_selected_model_usage_session_fallback"],
                     min(sessions_total, max(1, to_int(usage.get("calls_with_selected_model_usage")))),
-        )
+                )
 
         return summary
 

@@ -8,10 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/profile_paths.sh"
 
 # Examples:
-#   ./run_profiles.sh
-#   ./run_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir ~/vuln/profiles/soft --verbose
-#   ./run_profiles.sh --force-regenerate
-#   ./run_profiles.sh -- --verbose
+#   ./scripts/run_all_software_profiles.sh
+#   ./scripts/run_all_software_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir ~/vuln/profiles/soft --verbose
+#   ./scripts/run_all_software_profiles.sh --force-regenerate
+#   ./scripts/run_all_software_profiles.sh -- --verbose
 #.  under llm-vulvariant: ./scripts/run_all_software_profiles.sh --llm-provider deepseek --output-dir ~/vuln/profiles/soft
 # Notes:
 # - Repo name A is the folder name under data/repos (first level only).
@@ -104,18 +104,9 @@ if has_force_regenerate_arg; then
   FORCE_REGENERATE=1
 fi
 
-
-# --- Normalize OUTPUT_DIR to an absolute path (relative to where the script was launched) ---
-START_DIR="$(pwd -P)"
-
-# Normalize ROOT_DIR to an absolute path so forwarded flags remain valid
-# even when the command runs inside each repository directory.
-if [[ "$ROOT_DIR" != /* ]]; then
-  ROOT_DIR="$START_DIR/$ROOT_DIR"
-fi
-if command -v realpath >/dev/null 2>&1; then
-  ROOT_DIR="$(realpath -m "$ROOT_DIR")"
-fi
+# Normalize ROOT_DIR to an absolute path relative to the repository root so
+# forwarded flags stay stable even when the script is launched elsewhere.
+ROOT_DIR="$(_profile_realpath "$ROOT_DIR")"
 
 if [[ -n "$OUTPUT_DIR" ]]; then
   OUTPUT_DIR="$(_profile_realpath "$OUTPUT_DIR")"

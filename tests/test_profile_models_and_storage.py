@@ -80,6 +80,22 @@ def test_software_profile_roundtrip_keeps_module_and_dependency_fields():
     assert decoded.metadata == {"llm_usage_summary": {"calls_total": 2}}
 
 
+def test_software_profile_to_dict_keeps_builtin_only_dependency_details():
+    profile = SoftwareProfile(
+        name="demo",
+        builtin_libraries=["json"],
+        dependency_usage_count={"json": 3},
+    )
+
+    encoded = profile.to_dict()
+    decoded = SoftwareProfile.from_dict(encoded)
+
+    assert encoded["dependencies_detailed"]["builtin"] == ["json"]
+    assert encoded["dependencies_detailed"]["usage_count"] == {"json": 3}
+    assert decoded.builtin_libraries == ["json"]
+    assert decoded.dependency_usage_count == {"json": 3}
+
+
 def test_software_profile_from_dict_normalizes_modules_and_data_flow_patterns():
     data = {
         "basic_info": {"name": "repo", "version": "v1"},
@@ -193,6 +209,17 @@ def test_profile_storage_manager_checkpoint_conversation_and_result(tmp_path):
     manager.save_conversation("source", {"step": 2}, "repo", "ver", file_identifier="new")
     latest = manager.load_conversation("source", "repo", "ver")
     assert latest == {"step": 2}
+
+
+def test_profile_storage_manager_loads_named_conversation_without_falling_back_to_latest(tmp_path):
+    manager = ProfileStorageManager(base_dir=tmp_path, profile_type="test")
+
+    manager.save_conversation("source", {"step": "wanted"}, "repo", "ver", file_identifier="wanted")
+    manager.save_conversation("source", {"step": "other"}, "repo", "ver", file_identifier="other")
+
+    loaded = manager.load_conversation("source", "repo", "ver", file_identifier="wanted")
+
+    assert loaded == {"step": "wanted"}
 
 
 def test_profile_storage_manager_info_save_and_load(tmp_path):

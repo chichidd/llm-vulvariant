@@ -15,14 +15,17 @@ def resolve_profile_base_path(profile_base_path: str | Path | None = None) -> Pa
     """Return the configured profile root or a caller-provided override.
 
     Args:
-        profile_base_path: Optional absolute or user-relative override.
+        profile_base_path: Optional absolute or repo-root-relative override.
 
     Returns:
         Resolved profile base directory.
     """
     if profile_base_path is None:
         return _path_config["profile_base_path"]
-    return Path(profile_base_path).expanduser()
+    path = Path(profile_base_path).expanduser()
+    if path.is_absolute():
+        return path
+    return _path_config["repo_root"] / path
 
 
 def resolve_software_profiles_path(
@@ -72,9 +75,12 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
     Returns:
         Mapping of configured path names to resolved ``Path`` objects.
     """
-    def _expand_path(value: Optional[Any], default: Any) -> Path:
+    def _expand_path(value: Optional[Any], default: Any, base_dir: Optional[Path] = None) -> Path:
         raw = value if value is not None else default
-        return Path(raw).expanduser()
+        path = Path(raw).expanduser()
+        if path.is_absolute() or base_dir is None:
+            return path
+        return (base_dir / path).expanduser()
 
     try:
         if config_path is None:
@@ -83,27 +89,43 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
         if config_path.exists():
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             paths = config.get("paths", {})
-            project_root = _expand_path(paths.get("project_root"), "~/vuln")
+            config_dir = config_path.parent
+            project_root = _expand_path(paths.get("project_root"), "~/vuln", base_dir=config_dir)
             repo_root = project_root / "llm-vulvariant"
             profile_base_path = _expand_path(
                 paths.get("profile_base_path"),
                 project_root / "profiles",
+                base_dir=project_root,
             )
             return {
                 "project_root": project_root,
                 "skill_path": (repo_root / ".claude" / "skills").expanduser(),
                 "repo_root": repo_root.expanduser(),
                 "profile_base_path": profile_base_path,
-                "data_base_path": _expand_path(paths.get("data_base_path"), "~/vuln/data"),
+                "data_base_path": _expand_path(
+                    paths.get("data_base_path"),
+                    "~/vuln/data",
+                    base_dir=project_root,
+                ),
                 "vuln_data_path": _expand_path(
                     paths.get("vuln_data_path"),
                     "~/vuln/data/vuln.json",
+                    base_dir=project_root,
                 ),
-                "repo_base_path": _expand_path(paths.get("repo_base_path"), "~/vuln/data/repos"),
-                "codeql_db_path": _expand_path(paths.get("codeql_db_path"), "~/vuln/codeql_dbs"),
+                "repo_base_path": _expand_path(
+                    paths.get("repo_base_path"),
+                    "~/vuln/data/repos",
+                    base_dir=project_root,
+                ),
+                "codeql_db_path": _expand_path(
+                    paths.get("codeql_db_path"),
+                    "~/vuln/codeql_dbs",
+                    base_dir=project_root,
+                ),
                 "embedding_model_path": _expand_path(
                     paths.get("embedding_model_path"),
                     "~/vuln/models",
+                    base_dir=project_root,
                 ),
             }
     except Exception as e:

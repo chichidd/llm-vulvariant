@@ -224,7 +224,11 @@ class SoftwareProfile:
                 "total_functions": self.total_functions,
             }
         
-        if self.third_party_libraries:
+        if (
+            self.third_party_libraries
+            or self.builtin_libraries
+            or self.dependency_usage_count
+        ):
             result["dependencies_detailed"] = {
                 "third_party": self.third_party_libraries,
                 "builtin": self.builtin_libraries,

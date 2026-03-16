@@ -1072,6 +1072,10 @@ dependencies:
             logger.info(f"File marked completed: {file_path} - {reason}")
         else:
             logger.info(f"File marked completed: {file_path}")
+
+        save_fn = getattr(self._memory_manager, "save", None)
+        if callable(save_fn):
+            save_fn()
         
         return ToolResult(
             success=True,

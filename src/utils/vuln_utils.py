@@ -20,6 +20,17 @@ from utils.llm_utils import extract_function_snippet_based_on_name_with_ast
 logger = get_logger(__name__)
 
 
+def _resolve_repo_relative_path(
+    path_arg: str | Path | None,
+    default_path: Path,
+) -> Path:
+    """Resolve optional input paths relative to the configured repo root."""
+    resolved_path = Path(path_arg).expanduser() if path_arg else default_path
+    if not resolved_path.is_absolute():
+        resolved_path = _path_config["repo_root"] / resolved_path
+    return resolved_path
+
+
 def normalize_cve_id(cve_id: Any, index: int | None = None) -> str:
     """Return a stable profile identifier for a vulnerability entry.
 
@@ -61,15 +72,10 @@ def read_vuln_data(
     """
     if verbose:
         logger.info("Reading vulnerability data...")
-    source_path = (
-        Path(vuln_json_path).expanduser()
-        if vuln_json_path
-        else _path_config["vuln_data_path"]
-    )
-    resolved_repo_base_path = (
-        Path(repo_base_path).expanduser()
-        if repo_base_path
-        else _path_config["repo_base_path"]
+    source_path = _resolve_repo_relative_path(vuln_json_path, _path_config["vuln_data_path"])
+    resolved_repo_base_path = _resolve_repo_relative_path(
+        repo_base_path,
+        _path_config["repo_base_path"],
     )
     raw_data = json.loads(source_path.read_text(encoding="utf-8"))
     resolved_entries: List[Dict[str, Any]] = []
@@ -135,7 +141,7 @@ def read_vuln_data(
                 else:
                     call_chain_records.append({'vuln_sink': callsite})
             data['call_chain'] = call_chain_records
-            data['payload'] = entry['payload']
+            data['payload'] = entry.get('payload')
             resolved_entries.append(data)
         finally:
             # Restore the repository even when snippet extraction fails so later

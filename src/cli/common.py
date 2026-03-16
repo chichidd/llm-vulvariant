@@ -49,19 +49,24 @@ def resolve_cli_path(path_arg: str | Path, base_dir: str | Path | None = None) -
     return path
 
 
-def resolve_path_override(path_arg: str | Path | None, default_path: Path) -> Path:
+def resolve_path_override(
+    path_arg: str | Path | None,
+    default_path: Path,
+    base_dir: str | Path | None = None,
+) -> Path:
     """Resolve an optional CLI override path or fall back to a default path.
 
     Args:
         path_arg: Optional override path from CLI args.
         default_path: Default path used when no override is provided.
+        base_dir: Optional base directory for relative override paths.
 
     Returns:
         Resolved override path or the provided default path.
     """
     if path_arg is None:
         return default_path
-    return resolve_cli_path(path_arg)
+    return resolve_cli_path(path_arg, base_dir=base_dir)
 
 
 def resolve_profile_dirs(

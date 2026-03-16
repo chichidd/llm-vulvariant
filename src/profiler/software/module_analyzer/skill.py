@@ -16,7 +16,6 @@ from config import _path_config
 from utils.claude_cli import (
     DEFAULT_SELECTED_MODEL_HINT,
     apply_claude_cli_usage_counters,
-    count_claude_cli_attempts,
     run_claude_cli,
 )
 from utils.logger import get_logger
@@ -47,7 +46,22 @@ class SkillModuleAnalyzer:
 
     @staticmethod
     def _count_claude_attempts(response: Any) -> int:
-        return count_claude_cli_attempts(response)
+        """Count only attempts that could have reached a real Claude session."""
+        if response is None:
+            return 0
+
+        usage_summary = getattr(response, "usage_summary", None)
+        if isinstance(usage_summary, dict) and (
+            usage_summary.get("session_usage")
+            or usage_summary.get("top_level_usage")
+            or usage_summary.get("selected_model_usage")
+        ):
+            return 1
+        if getattr(response, "timed_out", False):
+            return 1
+        if getattr(response, "returncode", None) == 0:
+            return 1
+        return 0
 
     def analyze(
         self,
@@ -160,7 +174,12 @@ class SkillModuleAnalyzer:
             logger.warning(
                 "Claude CLI appears to lack --output-format json support; module analysis retried in text mode"
             )
-        self._last_llm_usage = apply_claude_cli_usage_counters(response.usage_summary, response)
+        llm_usage = apply_claude_cli_usage_counters(response.usage_summary, response)
+        # Module-analysis llm_usage tracks real model calls, not local CLI
+        # retries such as the unsupported --output-format probe.
+        llm_usage["sessions_total"] = self._count_claude_attempts(response)
+        llm_usage["calls_total"] = llm_usage["sessions_total"]
+        self._last_llm_usage = llm_usage
         self._last_claude_cli_record_path = str(record_path)
 
         if response.returncode == 0:
@@ -174,7 +193,7 @@ class SkillModuleAnalyzer:
                     "Claude analysis stdout was not JSON; continuing because module artifacts are file-based"
                 )
             logger.info(f"Claude analysis completed: {result_text[:500]}")
-            return True, response.usage_summary, record_path
+            return True, llm_usage, record_path
 
         if response.error_type == "FileNotFoundError":
             logger.error("Claude CLI not found. Please install it first.")
@@ -186,7 +205,7 @@ class SkillModuleAnalyzer:
             logger.warning(f"Claude analysis returned invalid JSON: {response.parse_error}")
         else:
             logger.warning("Claude analysis failed without stderr output")
-        return False, response.usage_summary, record_path
+        return False, llm_usage, record_path
 
     @staticmethod
     def _infer_llm_call_count(llm_usage: Optional[Dict[str, Any]]) -> int:

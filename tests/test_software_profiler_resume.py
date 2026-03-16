@@ -33,10 +33,14 @@ class StubStorageManager:
     def save_final_result(self, filename, content, *path_parts):
         self.saved_results[filename] = json.loads(content)
 
-    def load_conversation(self, conversation_type, *path_parts):
+    def load_conversation(self, conversation_type, *path_parts, file_identifier=None):
+        if file_identifier is not None:
+            return self.conversations.get((conversation_type, file_identifier))
         return self.conversations.get(conversation_type)
 
     def save_conversation(self, conversation_type, data, *path_parts, file_identifier=None):
+        if file_identifier is not None:
+            self.saved_conversations[(conversation_type, file_identifier)] = data
         self.saved_conversations[conversation_type] = data
 
 
@@ -614,7 +618,7 @@ def test_generate_profile_full_normalizes_resumed_agent_module_usage_source():
             }
         },
         conversations={
-            "module_analysis": {
+            ("module_analysis", "module_analysis"): {
                 "conversation_name": "module_analysis",
                 "llm_calls": 2,
                 "llm_usage": {
@@ -729,7 +733,7 @@ def test_generate_profile_full_normalizes_resumed_agent_module_usage_source():
 def test_run_agent_analysis_normalizes_resumed_conversation_usage_source(monkeypatch):
     storage_manager = StubStorageManager(
         conversations={
-            "module_analysis": {
+            ("module_analysis", "module_analysis"): {
                 "conversation_name": "module_analysis",
                 "messages": [{"role": "system", "content": "existing"}],
                 "llm_calls": 2,
@@ -818,3 +822,94 @@ def test_run_agent_analysis_normalizes_resumed_conversation_usage_source(monkeyp
     assert saved_usage["calls_total"] == 3
     assert saved_usage["input_tokens"] == 29
     assert saved_usage["output_tokens"] == 47
+
+
+def test_run_agent_analysis_treats_empty_tool_calls_as_final_content(monkeypatch):
+    storage_manager = StubStorageManager()
+    monkeypatch.setattr(
+        "scanner.agent.utils.make_serializable",
+        lambda messages: messages,
+    )
+
+    class _LLMClient:
+        def __init__(self):
+            self.config = SimpleNamespace(model="deepseek-chat", provider="deepseek")
+
+        def usage_history_snapshot(self):
+            return 0
+
+        def aggregate_usage_since(self, snapshot):
+            assert snapshot == 0
+            return {"source": "llm_client", "calls_total": 1}
+
+        def chat(self, messages, tools=None, tool_choice=None):
+            assert messages
+            assert tools == []
+            assert tool_choice == "auto"
+            return SimpleNamespace(
+                content='{"modules": []}',
+                tool_calls=[],
+            )
+
+    is_complete, result, llm_calls, _messages = run_agent_analysis(
+        llm_client=_LLMClient(),
+        system_prompt="system",
+        initial_message="initial",
+        tools=[],
+        toolkit=SimpleNamespace(execute_tool=lambda *_args, **_kwargs: None),
+        max_iterations=3,
+        storage_manager=storage_manager,
+        conversation_name="module_analysis",
+        path_parts=("demo", "abc123"),
+        resume_from_saved=False,
+    )
+
+    assert is_complete is True
+    assert result == {"modules": []}
+    assert llm_calls == 1
+
+
+def test_load_prior_agent_module_usage_summary_loads_named_module_analysis_conversation():
+    class _StorageManager:
+        def __init__(self):
+            self.calls = []
+
+        def load_conversation(self, conversation_type, *path_parts, file_identifier=None):
+            self.calls.append((conversation_type, path_parts, file_identifier))
+            if file_identifier == "module_analysis":
+                return {
+                    "conversation_name": "module_analysis",
+                    "llm_calls": 2,
+                    "llm_usage": {
+                        "source": "llm_client",
+                        "provider": "deepseek",
+                        "requested_model": "deepseek-chat",
+                        "selected_model": "deepseek-chat",
+                        "selected_models": ["deepseek-chat"],
+                        "calls_total": 2,
+                        "input_tokens": 11,
+                        "output_tokens": 13,
+                    },
+                }
+            return {
+                "conversation_name": "other",
+                "llm_calls": 9,
+                "llm_usage": {"calls_total": 9},
+            }
+
+    profiler = SoftwareProfiler.__new__(SoftwareProfiler)
+    profiler.storage_manager = _StorageManager()
+    profiler.llm_client = SimpleNamespace(
+        config=SimpleNamespace(model="deepseek-chat", provider="deepseek")
+    )
+
+    usage_summary, llm_calls = profiler._load_prior_agent_module_usage_summary(
+        path_parts=("demo", "abc123"),
+        previous_modules_checkpoint=None,
+    )
+
+    assert llm_calls == 2
+    assert usage_summary["calls_total"] == 2
+    assert profiler.storage_manager.calls == [
+        ("module_analysis", ("demo", "abc123"), "module_analysis")
+    ]

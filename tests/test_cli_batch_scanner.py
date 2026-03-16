@@ -61,6 +61,21 @@ def test_parse_args_rejects_legacy_shared_target_flags(monkeypatch):
         batch_scanner.parse_args()
 
 
+def test_validate_args_rejects_negative_limit():
+    args = Namespace(
+        similarity_threshold=0.7,
+        max_targets=5,
+        fallback_top_n=3,
+        max_iterations_cap=10,
+        limit=-1,
+        source_soft_profiles_dir="soft",
+        target_soft_profiles_dir="soft-target",
+        vuln_profiles_dir="vuln",
+    )
+
+    assert batch_scanner._validate_args(args) is False
+
+
 def test_select_similar_targets_applies_threshold_and_sort(monkeypatch):
     source = ProfileRef("src", "a" * 40, _mk_profile("src"))
     cand_a = ProfileRef("repo-a", "b" * 40, _mk_profile("a"))
@@ -164,6 +179,83 @@ def test_resolve_target_and_vuln_profile_dirs_from_args_with_absolute_paths(tmp_
     assert vuln_dir == vuln_abs
 
 
+def test_resolve_batch_scan_paths_anchors_relative_cli_paths_to_repo_root(monkeypatch, tmp_path):
+    repo_root = tmp_path / "llm-vulvariant"
+    repo_root.mkdir()
+    (repo_root / "data").mkdir()
+    (repo_root / "data" / "vuln.json").write_text("[]", encoding="utf-8")
+    (repo_root / "source-repos").mkdir()
+    (repo_root / "target-repos").mkdir()
+    monkeypatch.setitem(batch_scanner._path_config, "repo_root", repo_root)
+
+    args = Namespace(
+        vuln_json="data/vuln.json",
+        source_repos_root="source-repos",
+        target_repos_root="target-repos",
+        profile_base_path="profiles",
+        source_soft_profiles_dir="soft-source",
+        target_soft_profiles_dir="soft-target",
+        vuln_profiles_dir="vuln",
+        scan_output_dir="results/scan-out",
+    )
+
+    paths = batch_scanner._resolve_batch_scan_paths(args)
+
+    assert paths is not None
+    assert paths.vuln_json == repo_root / "data" / "vuln.json"
+    assert paths.source_repos_root == repo_root / "source-repos"
+    assert paths.target_repos_root == repo_root / "target-repos"
+    assert paths.source_repo_profiles_dir == repo_root / "profiles" / "soft-source"
+    assert paths.target_repo_profiles_dir == repo_root / "profiles" / "soft-target"
+    assert paths.vuln_profiles_dir == repo_root / "profiles" / "vuln"
+    assert paths.scan_output_dir == repo_root / "results" / "scan-out"
+
+
+def test_resolve_batch_scan_paths_rejects_non_directory_target_root(monkeypatch, tmp_path):
+    repo_root = tmp_path / "llm-vulvariant"
+    repo_root.mkdir()
+    (repo_root / "data").mkdir()
+    (repo_root / "data" / "vuln.json").write_text("[]", encoding="utf-8")
+    (repo_root / "source-repos").mkdir()
+    (repo_root / "target-repos").write_text("not-a-dir", encoding="utf-8")
+    monkeypatch.setitem(batch_scanner._path_config, "repo_root", repo_root)
+
+    args = Namespace(
+        vuln_json="data/vuln.json",
+        source_repos_root="source-repos",
+        target_repos_root="target-repos",
+        profile_base_path="profiles",
+        source_soft_profiles_dir="soft-source",
+        target_soft_profiles_dir="soft-target",
+        vuln_profiles_dir="vuln",
+        scan_output_dir="results/scan-out",
+    )
+
+    assert batch_scanner._resolve_batch_scan_paths(args) is None
+
+
+def test_ensure_source_inputs_available_rejects_non_directory_source_root(tmp_path):
+    source_root = tmp_path / "source-repos"
+    source_root.write_text("not-a-dir", encoding="utf-8")
+    paths = batch_scanner.BatchScanPaths(
+        vuln_json=tmp_path / "vuln.json",
+        source_repos_root=source_root,
+        target_repos_root=tmp_path / "target-repos",
+        source_repo_profiles_dir=tmp_path / "soft-source",
+        target_repo_profiles_dir=tmp_path / "soft-target",
+        vuln_profiles_dir=tmp_path / "vuln",
+        scan_output_dir=tmp_path / "scan-out",
+    )
+
+    ok = batch_scanner._ensure_source_inputs_available(
+        args=Namespace(force_regenerate_profiles=False),
+        paths=paths,
+        entries=[],
+    )
+
+    assert ok is False
+
+
 def test_run_target_scan_passes_profile_base_path_and_dirname(monkeypatch, tmp_path):
     captured = {}
 
@@ -241,6 +333,47 @@ def test_run_target_scan_reports_skipped_for_existing_findings(monkeypatch, tmp_
     assert status == "skipped"
 
 
+def test_run_target_scan_does_not_skip_existing_when_profiles_are_regenerated(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_single_target_scan(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(batch_scanner.agent_scanner, "run_single_target_scan", fake_run_single_target_scan)
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        force_regenerate_profiles=True,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text("{}", encoding="utf-8")
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "ok"
+    assert captured["repo_base_path"] == tmp_path / "repos"
+
+
 def test_ensure_vulnerability_profile_uses_source_repos_root_for_vuln_loading(monkeypatch, tmp_path):
     repo_name = "demo"
     commit_hash = "abc123"
@@ -303,6 +436,41 @@ def test_ensure_vulnerability_profile_uses_source_repos_root_for_vuln_loading(mo
     assert captured["vuln_json_path"] == str(tmp_path / "vuln.json")
     assert captured["repo_path"] == str(source_repos_root / repo_name)
     assert captured["vuln_entry_cve"] == cve_id
+
+
+def test_build_batch_summary_records_run_selection_knobs(tmp_path):
+    args = Namespace(
+        similarity_threshold=0.7,
+        max_targets=3,
+        fallback_top_n=2,
+        include_same_repo=True,
+        limit=5,
+        max_iterations_cap=10,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        force_regenerate_profiles=True,
+        skip_existing_scans=False,
+        llm_provider="deepseek",
+        llm_name="deepseek-chat",
+    )
+    paths = batch_scanner.BatchScanPaths(
+        vuln_json=tmp_path / "vuln.json",
+        source_repos_root=tmp_path / "source-repos",
+        target_repos_root=tmp_path / "target-repos",
+        source_repo_profiles_dir=tmp_path / "soft-source",
+        target_repo_profiles_dir=tmp_path / "soft-target",
+        vuln_profiles_dir=tmp_path / "vuln",
+        scan_output_dir=tmp_path / "scan-out",
+    )
+
+    summary = batch_scanner._build_batch_summary(args, paths)
+
+    assert summary["max_targets"] == 3
+    assert summary["fallback_top_n"] == 2
+    assert summary["include_same_repo"] is True
+    assert summary["limit"] == 5
+    assert summary["force_regenerate_profiles"] is True
+    assert summary["llm_name"] == "deepseek-chat"
 
 
 def test_main_uses_separate_source_and_target_roots_and_profile_dirs(monkeypatch, tmp_path):

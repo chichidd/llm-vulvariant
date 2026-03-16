@@ -25,3 +25,11 @@ def test_resolve_path_override_falls_back_to_default_path(tmp_path) -> None:
 
     assert resolve_path_override(None, default_path) == default_path
     assert resolve_path_override("custom", default_path) == Path("custom")
+
+
+def test_resolve_path_override_uses_optional_base_dir_for_relative_override(tmp_path) -> None:
+    default_path = tmp_path / "profiles"
+    repo_root = tmp_path / "repo-root"
+    repo_root.mkdir()
+
+    assert resolve_path_override("custom", default_path, base_dir=repo_root) == repo_root / "custom"

@@ -197,15 +197,10 @@ class ModuleAnalyzerToolkit:
         
         for file_path in file_paths:
             try:
-                # Find matching file
-                actual_path = file_path
-                if file_path not in self.file_list:
-                    matching = [f for f in self.file_list if file_path in f]
-                    if matching:
-                        actual_path = matching[0]
-                    else:
-                        files_content.append(f"No file found for '{file_path}'.")
-                        continue
+                actual_path, resolution_error = self._resolve_requested_file_path(file_path)
+                if actual_path is None:
+                    files_content.append(resolution_error or f"No file found for '{file_path}'.")
+                    continue
                 
                 # Read file content
                 if self.repo_path:
@@ -226,6 +221,31 @@ class ModuleAnalyzerToolkit:
             return ToolResult(success=False, content="", error="Failed to read any of the requested file contents.")
         
         return ToolResult(success=True, content="\n\n".join(files_content))
+
+    def _resolve_requested_file_path(self, file_path: str) -> tuple[Optional[str], Optional[str]]:
+        """Resolve one requested file path without silently picking ambiguous matches."""
+        normalized_path = file_path.strip().replace("\\", "/")
+        while normalized_path.startswith("./"):
+            normalized_path = normalized_path[2:]
+
+        if normalized_path in self.file_list:
+            return normalized_path, None
+
+        suffix_matches = [
+            candidate
+            for candidate in self.file_list
+            if candidate.endswith(f"/{normalized_path}") or candidate == normalized_path
+        ]
+        if len(suffix_matches) == 1:
+            return suffix_matches[0], None
+        if len(suffix_matches) > 1:
+            matches_preview = ", ".join(sorted(suffix_matches)[:5])
+            return None, (
+                f"Ambiguous file path '{file_path}'. "
+                f"Please use an exact relative path. Matches: {matches_preview}"
+            )
+
+        return None, f"No file found for '{file_path}'."
     
     def _finalize(self, modules: List[Dict[str, Any]]) -> ToolResult:
         """Finalize the analysis and return the modules."""

@@ -44,6 +44,7 @@ class ProfileRef:
     repo_name: str
     commit_hash: str
     profile: SoftwareProfile
+    profile_path: Optional[Path] = None
 
     @property
     def label(self) -> str:
@@ -118,11 +119,35 @@ def load_all_software_profiles(repo_profiles_dir: Path) -> List[ProfileRef]:
                         repo_name=repo_name,
                         commit_hash=commit_dir.name,
                         profile=profile,
+                        profile_path=profile_path,
                     )
                 )
             except Exception as exc:  # pylint: disable=broad-except
                 logger.warning(f"Failed to load profile {profile_path}: {exc}")
     return refs
+
+
+def _profile_mtime_ns(profile_path: Optional[Path]) -> int:
+    """Return profile mtime for latest-profile selection with safe fallbacks."""
+    if profile_path is None:
+        return -1
+    try:
+        return profile_path.stat().st_mtime_ns
+    except OSError:
+        return -1
+
+
+def _select_latest_profile_ref(profile_refs: Sequence[ProfileRef]) -> Optional[ProfileRef]:
+    """Pick the newest profile reference using persisted profile mtimes."""
+    if not profile_refs:
+        return None
+    return max(
+        profile_refs,
+        key=lambda ref: (
+            _profile_mtime_ns(ref.profile_path),
+            ref.commit_hash,
+        ),
+    )
 
 
 def resolve_profile_commit(
@@ -135,18 +160,39 @@ def resolve_profile_commit(
     if not repo_dir.exists() or not repo_dir.is_dir():
         return None
 
-    commits = sorted([p.name for p in repo_dir.iterdir() if p.is_dir()])
-    if not commits:
+    profile_candidates = []
+    for commit_dir in repo_dir.iterdir():
+        if not commit_dir.is_dir():
+            continue
+        profile_path = commit_dir / "software_profile.json"
+        if not profile_path.exists():
+            continue
+        profile_candidates.append((commit_dir.name, profile_path))
+
+    if not profile_candidates:
         return None
 
     if commit_hint:
-        for commit in commits:
-            if commit == commit_hint or commit.startswith(commit_hint):
-                return commit
+        exact_matches = [candidate for candidate in profile_candidates if candidate[0] == commit_hint]
+        if exact_matches:
+            return exact_matches[0][0]
+
+        prefix_matches = [
+            candidate for candidate in profile_candidates
+            if candidate[0].startswith(commit_hint)
+        ]
+        if prefix_matches:
+            return max(
+                prefix_matches,
+                key=lambda item: (_profile_mtime_ns(item[1]), item[0]),
+            )[0]
         return None
 
-    # No hint: pick the lexicographically latest commit directory.
-    return commits[-1]
+    selected = max(
+        profile_candidates,
+        key=lambda item: (_profile_mtime_ns(item[1]), item[0]),
+    )
+    return selected[0]
 
 
 def select_profile_ref(
@@ -160,12 +206,16 @@ def select_profile_ref(
         return None
 
     if commit_hint:
-        for ref in by_repo:
-            if ref.commit_hash == commit_hint or ref.commit_hash.startswith(commit_hint):
-                return ref
+        exact_matches = [ref for ref in by_repo if ref.commit_hash == commit_hint]
+        if exact_matches:
+            return exact_matches[0]
+
+        prefix_matches = [ref for ref in by_repo if ref.commit_hash.startswith(commit_hint)]
+        if prefix_matches:
+            return _select_latest_profile_ref(prefix_matches)
         return None
 
-    return sorted(by_repo, key=lambda r: r.commit_hash)[-1]
+    return _select_latest_profile_ref(by_repo)
 
 
 def build_text_retriever(

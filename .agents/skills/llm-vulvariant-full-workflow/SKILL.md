@@ -1,6 +1,6 @@
 ---
 name: llm-vulvariant-full-workflow
-description: Execute the complete llm-vulvariant workflow from profile construction to scanning and exploitability/report generation. Use when given a vulnerability list (vuln.json-compatible) plus affected-version repositories and an optional explicit target repository subset materialized as a curated target root, and you need one reproducible run plan that outputs scan results and exploitable submission artifacts.
+description: Execute the complete llm-vulvariant workflow from profile construction to scanning and exploitability/report generation. Use when given a vulnerability list (vuln.json-compatible) plus affected-version repositories and an optional explicit target repository subset materialized as a curated target root, and you need one reproducible run plan that outputs scan results and exploitable submission artifacts (`exploitable_findings_<run-id>[_strict].*`).
 ---
 
 # LLM-VulVariant Full Workflow
@@ -94,12 +94,14 @@ For an explicit allowlist, first materialize a dedicated target root containing 
 
 ```bash
 cd "$APP_DIR"
-TARGET_REPOS_ROOT="$ROOT/data/repos-allowlist"
-TARGET_SOFT_PROFILES_DIR="$PROFILE_BASE/soft-allowlist"
+TARGET_REPO_SOURCE_ROOT="$TARGET_REPOS_ROOT"
+ALLOWLIST_TAG="$(date +%Y%m%d-%H%M%S)"
+TARGET_REPOS_ROOT="$ROOT/data/repos-allowlist-$ALLOWLIST_TAG"
+TARGET_SOFT_PROFILES_DIR="$PROFILE_BASE/soft-allowlist-$ALLOWLIST_TAG"
 mkdir -p "$TARGET_REPOS_ROOT" "$TARGET_SOFT_PROFILES_DIR"
 while IFS= read -r repo || [[ -n "$repo" ]]; do
   [[ -n "$repo" ]] || continue
-  ln -sfn "$ROOT/data/repos/$repo" "$TARGET_REPOS_ROOT/$repo"
+  ln -sfn "$TARGET_REPO_SOURCE_ROOT/$repo" "$TARGET_REPOS_ROOT/$repo"
   cmd=(
     software-profile
     --repo-name "$repo"
@@ -115,6 +117,8 @@ done < "$TARGET_REPO_LIST"
 ```
 
 ## Phase 1: Batch Scan
+
+Add `--max-targets N` when you need a hard upper bound on threshold-selected targets; the cap is enforced even when `--similarity-threshold` is used.
 
 ```bash
 SCAN_LOG="$ROOT/output-batch-scan-$(date +%Y%m%d-%H%M%S).log"
@@ -132,6 +136,7 @@ cmd=(
   --scan-output-dir "$SCAN_OUTPUT_DIR"
   --similarity-threshold 0.7
   --fallback-top-n 3
+  --max-targets 3
   --max-iterations-cap 10
   --llm-provider "$LLM_PROVIDER"
 )
@@ -156,6 +161,7 @@ python -m cli.batch_scanner \
   --scan-output-dir "$SCAN_OUTPUT_DIR" \
   --similarity-threshold 0.7 \
   --fallback-top-n 3 \
+  --max-targets 3 \
   --max-iterations-cap 10 \
   --llm-provider "$LLM_PROVIDER" \
   --limit 1
@@ -191,14 +197,16 @@ ls -l "$EXP_OUTPUT_DIR"
 ```
 
 Expected artifacts:
-- `exploitable_findings_<run-id>.json`
-- `exploitable_findings_<run-id>.csv`
-- `exploitable_findings_<run-id>_submission_index.json`
-- `exploitable_findings_<run-id>_exploitable_security_report.md`
+- `exploitable_findings_<run-id>_strict.json`
+- `exploitable_findings_<run-id>_strict.csv`
+- `exploitable_findings_<run-id>_strict_submission_index.json`
+- `exploitable_findings_<run-id>_strict_exploitable_security_report.md`
 
 ## Notes
 
 - Source vulnerability profiles should be built from `data/repos` unless `vuln.json` explicitly points elsewhere.
 - For NVIDIA targets, keep source profiles at `profiles/soft`, and scan with `--target-repos-root "$ROOT/data/repos-nvidia"` plus `--target-soft-profiles-dir "$ROOT/profiles/soft-nvidia"`.
 - Batch scan commands must pass explicit source/target roots and software-profile dirs.
+- `--force-regenerate-profiles` now implies fresh scans even if `--skip-existing-scans` is also enabled, so regenerated profile inputs are not paired with stale findings.
+- `--max-targets` still caps threshold-selected repos; `--fallback-top-n` only applies when no repo clears the threshold.
 - To scan only an allowlist, `TARGET_REPOS_ROOT` itself must contain only the allowed repos.

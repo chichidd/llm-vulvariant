@@ -1,10 +1,11 @@
 """Repository information collector."""
 
+import fnmatch
 import os
 import re
-from pathlib import Path
-from typing import Dict, List, Any
 from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, List
 
 from utils.logger import get_logger
 from utils.text_utils import clean_readme_for_llm
@@ -24,7 +25,7 @@ class RepoInfoCollector:
         dependency_files: List[str] = None,
     ):
         self.file_extensions = normalize_file_extensions(file_extensions or DEFAULT_FILE_EXTENSIONS)
-        self.exclude_dirs = set(exclude_dirs or [
+        self.exclude_dirs = list(exclude_dirs or [
             '.git', '__pycache__', 'node_modules', '.pytest_cache', 
             '.mypy_cache', '.tox', 'venv', '.venv', 'dist', 'build',
             '.eggs', '*.egg-info'
@@ -52,10 +53,20 @@ class RepoInfoCollector:
         """
         logger.info(f"Collecting repo info from {repo_path}")
         
-        def _should_exclude(file_path: Path) -> bool:
-            """Check whether a file should be excluded."""
-            path_str = str(file_path)
-            return any(excluded in path_str for excluded in self.exclude_dirs)
+        def _should_exclude(relative_path: Path) -> bool:
+            """Check whether a relative repo path should be excluded."""
+            parts = relative_path.parts
+            path_str = relative_path.as_posix()
+            for excluded in self.exclude_dirs:
+                if any(char in excluded for char in "*?[]"):
+                    if fnmatch.fnmatch(path_str, excluded):
+                        return True
+                    if any(fnmatch.fnmatch(part, excluded) for part in parts):
+                        return True
+                    continue
+                if excluded in parts:
+                    return True
+            return False
         
         info = {
             "files": [],
@@ -72,17 +83,20 @@ class RepoInfoCollector:
         
         for root, dirs, files in os.walk(repo_path):
             # Filter excluded directories
-            dirs[:] = [d for d in dirs if d not in self.exclude_dirs]
+            dirs[:] = [
+                d for d in dirs
+                if not _should_exclude((Path(root) / d).relative_to(repo_path))
+            ]
             
             for file in files:
                 file_path = Path(root) / file
+                rel_path = file_path.relative_to(repo_path)
                 
-                if _should_exclude(file_path):
+                if _should_exclude(rel_path):
                     continue
                 
                 ext = file_path.suffix.lower()
                 if ext in self.file_extensions:
-                    rel_path = file_path.relative_to(repo_path)
                     info["files"].append(str(rel_path))
                     languages[EXTENSION_MAPPING.get(ext, "Unknown")] += 1
         

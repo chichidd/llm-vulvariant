@@ -106,3 +106,45 @@ module_analyzer_config: {}
 
     assert profiler_a.file_extensions == [".py"]
     assert profiler_b.file_extensions == [".rb"]
+
+
+def test_software_profiler_reload_rules_when_same_path_changes(tmp_path, monkeypatch):
+    original_init_analyzers = SoftwareProfiler._init_analyzers
+    original_cache = dict(SoftwareProfiler._detection_rules_cache)
+
+    monkeypatch.setattr(SoftwareProfiler, "_init_analyzers", lambda self: None)
+    SoftwareProfiler._detection_rules_cache = {}
+
+    output_dir = tmp_path / "run-a"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rules_path = output_dir / "software_profile_rule.yaml"
+    rules_path.write_text(
+        """
+analyzer_config:
+  file_extensions:
+    - .py
+  exclude_dirs: []
+module_analyzer_config: {}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    try:
+        profiler_first = SoftwareProfiler(output_dir=str(output_dir))
+        rules_path.write_text(
+            """
+analyzer_config:
+  file_extensions:
+    - .rb
+  exclude_dirs: []
+module_analyzer_config: {}
+""".strip(),
+            encoding="utf-8",
+        )
+        profiler_second = SoftwareProfiler(output_dir=str(output_dir))
+    finally:
+        SoftwareProfiler._init_analyzers = original_init_analyzers
+        SoftwareProfiler._detection_rules_cache = original_cache
+
+    assert profiler_first.file_extensions == [".py"]
+    assert profiler_second.file_extensions == [".rb"]

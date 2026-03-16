@@ -1,8 +1,11 @@
 from argparse import Namespace
 from types import SimpleNamespace
+import io
+from contextlib import redirect_stdout
 
 import cli.software as cli_software
 import cli.vulnerability as cli_vulnerability
+from profiler.vulnerability.models import FlowFeature, VulnerabilityProfile
 
 
 def test_software_main_uses_shared_generation_helper(monkeypatch, tmp_path) -> None:
@@ -54,6 +57,89 @@ def test_software_main_uses_shared_generation_helper(monkeypatch, tmp_path) -> N
         "force_regenerate": True,
         "target_version": "abc123",
     }
+
+
+def test_software_main_resolves_relative_repo_base_path_against_repo_root(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "repo-root"
+    (repo_root / "repos").mkdir(parents=True)
+    profile_root = tmp_path / "profiles"
+    profile_root.mkdir()
+    captured = {}
+
+    monkeypatch.setitem(cli_software._path_config, "repo_root", repo_root)
+    monkeypatch.setattr(
+        cli_software,
+        "parse_args",
+        lambda: Namespace(
+            repo_name="demo",
+            llm_provider="deepseek",
+            llm_name="deepseek-chat",
+            profile_base_path=str(profile_root),
+            software_profile_dirname="soft",
+            output_dir=None,
+            repo_base_path="repos",
+            target_version="abc123",
+            force_regenerate=False,
+            verbose=False,
+        ),
+    )
+    monkeypatch.setattr(cli_software, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(cli_software, "resolve_profile_dirs", lambda **kwargs: (profile_root / "soft", None))
+    monkeypatch.setattr(cli_software, "create_profile_llm_client", lambda provider, model: "llm")
+    monkeypatch.setattr(
+        cli_software,
+        "run_software_profile_generation",
+        lambda *, repo_path, output_dir, llm_client, force_regenerate, target_version: captured.update(
+            {
+                "repo_path": repo_path,
+                "output_dir": output_dir,
+            }
+        ),
+    )
+
+    assert cli_software.main() == 0
+    assert captured["repo_path"] == repo_root / "repos" / "demo"
+
+
+def test_software_main_resolves_relative_output_dir_against_repo_root(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "repo-root"
+    (repo_root / "repos").mkdir(parents=True)
+    profile_root = tmp_path / "profiles"
+    profile_root.mkdir()
+    captured = {}
+
+    monkeypatch.setitem(cli_software._path_config, "repo_root", repo_root)
+    monkeypatch.setattr(
+        cli_software,
+        "parse_args",
+        lambda: Namespace(
+            repo_name="demo",
+            llm_provider="deepseek",
+            llm_name="deepseek-chat",
+            profile_base_path=str(profile_root),
+            software_profile_dirname="soft",
+            output_dir="results/soft-out",
+            repo_base_path=str(repo_root / "repos"),
+            target_version="abc123",
+            force_regenerate=False,
+            verbose=False,
+        ),
+    )
+    monkeypatch.setattr(cli_software, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(cli_software, "resolve_profile_dirs", lambda **kwargs: (profile_root / "soft", None))
+    monkeypatch.setattr(cli_software, "create_profile_llm_client", lambda provider, model: "llm")
+    monkeypatch.setattr(
+        cli_software,
+        "run_software_profile_generation",
+        lambda *, repo_path, output_dir, llm_client, force_regenerate, target_version: captured.update(
+            {
+                "output_dir": output_dir,
+            }
+        ),
+    )
+
+    assert cli_software.main() == 0
+    assert captured["output_dir"] == repo_root / "results" / "soft-out"
 
 
 def test_vulnerability_main_uses_shared_generation_helper(monkeypatch, tmp_path) -> None:
@@ -129,6 +215,74 @@ def test_vulnerability_main_uses_shared_generation_helper(monkeypatch, tmp_path)
     assert captured["profile"] is fake_profile
 
 
+def test_vulnerability_main_resolves_relative_override_dirs_against_repo_root(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "repo-root"
+    (repo_root / "repos" / "demo").mkdir(parents=True)
+    captured = {}
+    fake_profile = SimpleNamespace(repo_name="demo")
+
+    monkeypatch.setitem(cli_vulnerability._path_config, "repo_root", repo_root)
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "parse_args",
+        lambda: Namespace(
+            vuln_index=4,
+            vuln_json=str(tmp_path / "vuln.json"),
+            llm_provider="deepseek",
+            llm_name="deepseek-chat",
+            profile_base_path=str(tmp_path / "profiles"),
+            software_profile_dirname="soft",
+            vuln_profile_dirname="vuln",
+            output_dir="results/vuln-out",
+            soft_profile_dir="profiles/soft-custom",
+            repo_base_path="repos",
+            verbose=False,
+        ),
+    )
+    monkeypatch.setattr(cli_vulnerability, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "resolve_profile_dirs",
+        lambda **kwargs: (tmp_path / "profiles" / "soft", tmp_path / "profiles" / "vuln"),
+    )
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "read_vuln_data",
+        lambda **kwargs: [
+            {
+                "repo_name": "demo",
+                "commit": "abc123",
+                "call_chain": [{"file_path": "src/a.py", "function_name": "entry"}],
+                "payload": "payload",
+                "cve_id": "CVE-2026-0001",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "load_software_profile",
+        lambda repo_name, commit, base_dir=None: captured.update({"base_dir": base_dir}) or object(),
+    )
+    monkeypatch.setattr(cli_vulnerability, "create_profile_llm_client", lambda provider, model: "llm")
+    monkeypatch.setattr(cli_vulnerability, "display_vulnerability_profile", lambda profile: None)
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "run_vulnerability_profile_generation",
+        lambda *, repo_path, output_dir, llm_client, repo_profile, vuln_entry: captured.update(
+            {
+                "repo_path": repo_path,
+                "output_dir": output_dir,
+            }
+        )
+        or fake_profile,
+    )
+
+    assert cli_vulnerability.main() == 0
+    assert captured["base_dir"] == repo_root / "profiles" / "soft-custom"
+    assert captured["repo_path"] == repo_root / "repos" / "demo"
+    assert captured["output_dir"] == repo_root / "results" / "vuln-out"
+
+
 def test_vulnerability_main_returns_error_when_software_profile_is_missing(monkeypatch, tmp_path) -> None:
     repo_root = tmp_path / "repos"
     (repo_root / "demo").mkdir(parents=True)
@@ -179,3 +333,22 @@ def test_vulnerability_main_returns_error_when_software_profile_is_missing(monke
     )
 
     assert cli_vulnerability.main() == 1
+
+
+def test_display_vulnerability_profile_handles_non_dict_call_path_steps() -> None:
+    profile = VulnerabilityProfile(
+        repo_name="demo",
+        affected_version="abc123",
+        flow_features=FlowFeature(
+            description="flow",
+            call_path=[{"function": "entry", "role": "source"}, "entry -> sink"],
+        ),
+    )
+    stdout = io.StringIO()
+
+    with redirect_stdout(stdout):
+        cli_vulnerability.display_vulnerability_profile(profile)
+
+    rendered = stdout.getvalue()
+    assert "entry" in rendered
+    assert "entry -> sink" in rendered

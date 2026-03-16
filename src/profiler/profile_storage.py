@@ -221,8 +221,7 @@ class ProfileStorageManager:
         
         # Build filename (no longer includes a timestamp).
         if file_identifier:
-            # Sanitize file identifier.
-            safe_identifier = file_identifier.replace('/', '_').replace('\\', '_').replace(':', '_')
+            safe_identifier = self._sanitize_file_identifier(file_identifier)
             filename = f"{safe_identifier}.json"
         else:
             filename = f"{conversation_type}.json"
@@ -232,13 +231,19 @@ class ProfileStorageManager:
         if self._write_json(conversation_path, conversation_data):
             logger.debug(f"Conversation saved: {conversation_path}")
     
-    def load_conversation(self, conversation_type: str, *path_parts: str) -> Optional[Dict[str, Any]]:
+    def load_conversation(
+        self,
+        conversation_type: str,
+        *path_parts: str,
+        file_identifier: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         Load the latest conversation history (used to resume from checkpoints).
 
         Args:
             conversation_type: Conversation type (e.g., 'module_analysis').
             *path_parts: Path components.
+            file_identifier: Optional exact conversation identifier.
 
         Returns:
             Conversation data dict, or None if it does not exist.
@@ -246,11 +251,20 @@ class ProfileStorageManager:
         conversation_dir = self.get_conversation_dir(conversation_type, *path_parts)
         if not conversation_dir or not conversation_dir.exists():
             return None
+
+        if file_identifier:
+            conversation_path = conversation_dir / f"{self._sanitize_file_identifier(file_identifier)}.json"
+            if not conversation_path.exists():
+                return None
+            data = self._read_json(conversation_path)
+            if data is not None:
+                logger.info(f"Loaded conversation: {conversation_path}")
+            return data
         
         # Find all conversation files of this type (filenames no longer include a timestamp prefix).
         conversation_files = sorted(
             conversation_dir.glob("*.json"),
-            key=lambda p: p.stat().st_mtime,
+            key=lambda p: p.stat().st_mtime_ns,
             reverse=True  # Newest first.
         )
         
@@ -303,3 +317,7 @@ class ProfileStorageManager:
         if result_path.exists():
             return self._read_text(result_path)
         return None
+    @staticmethod
+    def _sanitize_file_identifier(file_identifier: str) -> str:
+        """Normalize conversation identifiers so they map to safe filenames."""
+        return file_identifier.replace('/', '_').replace('\\', '_').replace(':', '_')

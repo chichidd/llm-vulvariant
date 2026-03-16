@@ -59,7 +59,11 @@ def run_agent_analysis(
     
     if resume_from_saved and storage_manager and conversation_name and path_parts:
         # Load the corresponding conversation from the module_analysis directory
-        saved_conv = storage_manager.load_conversation("module_analysis", *path_parts)
+        saved_conv = storage_manager.load_conversation(
+            "module_analysis",
+            *path_parts,
+            file_identifier=conversation_name,
+        )
         if saved_conv and saved_conv.get('conversation_name') == conversation_name:
             logger.info(f"Resuming from saved conversation: {conversation_name}")
             messages = saved_conv.get('messages', [])
@@ -139,7 +143,7 @@ def run_agent_analysis(
         
         logger.debug(f"[LLM call {llm_call_count}] content={content[:200] if content else None}... tool_calls={tool_calls}")
         
-        if tool_calls is None:
+        if not tool_calls:
             # No tool calls: try parsing the result from the content
             if content:
                 try:

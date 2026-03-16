@@ -75,10 +75,13 @@ find profiles/NeMo/*/conversations -name "*.json" -mtime +7 -delete
 
 import json
 import sys
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
-from .logger import get_logger
+try:
+    from .logger import get_logger
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -90,7 +93,7 @@ def parse_conversation_filename(filename: str):
         timestamp = f"{parts[0]}_{parts[1]}_{parts[2]}"
         step_name = '_'.join(parts[3:]).replace('.json', '')
         return timestamp, step_name
-    return None, None
+    return None, Path(filename).stem
 
 
 def load_conversation(filepath: Path):

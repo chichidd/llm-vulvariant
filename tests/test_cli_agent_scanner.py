@@ -36,6 +36,36 @@ def test_validate_args_rejects_out_of_range_similarity_threshold():
     assert agent_scanner._validate_args(args) is False
 
 
+def test_resolve_output_dir_anchors_relative_base_to_repo_root(monkeypatch, tmp_path):
+    repo_root = tmp_path / "llm-vulvariant"
+    repo_root.mkdir()
+    monkeypatch.setitem(agent_scanner._path_config, "repo_root", repo_root)
+
+    resolved = agent_scanner.resolve_output_dir(
+        cve_id="CVE-2026-0001",
+        target_repo="demo",
+        target_commit="a" * 40,
+        output_base="results/scan-out",
+    )
+
+    assert resolved == repo_root / "results" / "scan-out" / "CVE-2026-0001" / "demo-aaaaaaaaaaaa"
+
+
+def test_resolve_output_dir_uses_repo_root_default_when_output_base_is_omitted(monkeypatch, tmp_path):
+    repo_root = tmp_path / "llm-vulvariant"
+    repo_root.mkdir()
+    monkeypatch.setitem(agent_scanner._path_config, "repo_root", repo_root)
+
+    resolved = agent_scanner.resolve_output_dir(
+        cve_id="CVE-2026-0001",
+        target_repo="demo",
+        target_commit="a" * 40,
+        output_base=None,
+    )
+
+    assert resolved == repo_root / "scan-results" / "CVE-2026-0001" / "demo-aaaaaaaaaaaa"
+
+
 def test_resolve_manual_targets_prefers_vuln_commit_for_same_repo(monkeypatch, tmp_path):
     args = Namespace(target_repo="repo-a", target_commit=None, vuln_repo="repo-a")
     vuln = SimpleNamespace(repo_name="repo-a", affected_version="deadbeef1234")
@@ -104,6 +134,42 @@ def test_resolve_auto_targets_uses_ranked_candidates(monkeypatch, tmp_path):
     assert targets[0].repo_name == "target-repo"
     assert targets[0].commit_hash == "222233334444"
     assert targets[0].similarity is similarity
+
+
+def test_resolve_auto_targets_respects_top_k_when_similarity_threshold_is_set(monkeypatch, tmp_path):
+    args = Namespace(
+        vuln_repo="src-repo",
+        top_k=1,
+        include_same_repo=False,
+        similarity_model_name="model",
+        similarity_device="cpu",
+        similarity_threshold=0.7,
+    )
+    source_profile = _mk_profile("src-repo", version="1111")
+    candidate_profile = _mk_profile("target-repo", version="2222")
+    source_ref = ProfileRef("src-repo", "111122223333", source_profile)
+    candidate_ref = ProfileRef("target-repo", "222233334444", candidate_profile)
+    similarity = SimilarProfileCandidate(
+        profile_ref=candidate_ref,
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    vuln = SimpleNamespace(repo_name="src-repo", affected_version="1111")
+    captured = {}
+
+    monkeypatch.setattr(agent_scanner, "load_all_software_profiles", lambda _: [source_ref, candidate_ref])
+    monkeypatch.setattr(agent_scanner, "select_profile_ref", lambda refs, repo, commit_hint: source_ref)
+    monkeypatch.setattr(agent_scanner, "build_text_retriever", lambda **kwargs: None)
+
+    def fake_rank(**kwargs):
+        captured["top_k"] = kwargs["top_k"]
+        return [similarity]
+
+    monkeypatch.setattr(agent_scanner, "rank_similar_profiles", fake_rank)
+
+    targets = agent_scanner._resolve_auto_targets(args, vuln, tmp_path)
+
+    assert captured["top_k"] == 1
+    assert len(targets) == 1
 
 
 def test_save_scan_outputs_writes_similarity_file(tmp_path):
@@ -297,3 +363,29 @@ def test_run_single_target_scan_passes_critical_stop_flag(monkeypatch, tmp_path)
         "python": "target-repo-targetha-python",
         "javascript": "target-repo-targetha-javascript",
     }
+
+
+def test_main_initializes_logging_before_validation(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        agent_scanner,
+        "parse_args",
+        lambda: Namespace(
+            target_repo=None,
+            target_commit=None,
+            top_k=0,
+            similarity_threshold=None,
+            verbose=True,
+        ),
+    )
+    monkeypatch.setattr(
+        agent_scanner,
+        "setup_logging",
+        lambda verbose: captured.setdefault("verbose", verbose),
+    )
+
+    result = agent_scanner.main()
+
+    assert result == 1
+    assert captured["verbose"] is True

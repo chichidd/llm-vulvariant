@@ -343,6 +343,32 @@ def test_run_turn_commits_progress_when_next_request_hits_context_limit(monkeypa
     assert finder.conversation_history[-1]["role"] == "tool"
 
 
+def test_run_turn_treats_empty_tool_calls_as_completed_turn(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.llm_client = _UsageDrivenLLM(
+        responses=[
+            SimpleNamespace(
+                content="Analysis complete",
+                reasoning_content=None,
+                tool_calls=[],
+            )
+        ],
+        input_tokens=[512],
+    )
+    finder.toolkit = _ToolAwareToolkit()
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 1
+    assert finder.llm_client.chat_calls == 1
+    assert finder.toolkit.executed == []
+    assert finder.conversation_history[-1].content == "Analysis complete"
+
+
 def test_run_invalid_critical_stop_mode_falls_back_to_min(monkeypatch):
     monkeypatch.setattr(finder_module, "AgenticToolkit", DummyToolkit)
     finder = finder_module.AgenticVulnFinder(

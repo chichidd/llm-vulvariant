@@ -74,6 +74,50 @@ class ReportGenerator:
             return "python"
         return normalized
 
+    @staticmethod
+    def _normalize_mapping(value: Any) -> Dict[str, Any]:
+        """Return a mapping payload or an empty dict for type-drifted data."""
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _normalize_mapping_list(value: Any) -> List[Dict[str, Any]]:
+        """Keep only mapping items from list-shaped payloads."""
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    @staticmethod
+    def _format_path_step(step: Any) -> str:
+        """Render one structured path step into stable text."""
+        if isinstance(step, dict):
+            label = str(
+                step.get("function")
+                or step.get("location")
+                or step.get("name")
+                or step.get("description")
+                or step.get("step")
+                or ""
+            ).strip()
+            role = str(step.get("role") or "").strip()
+            if label and role:
+                return f"{label} [{role}]"
+            if label:
+                return label
+            return json.dumps(step, ensure_ascii=False, sort_keys=True)
+        return str(step).strip()
+
+    @classmethod
+    def _normalize_path_steps(cls, value: Any) -> List[str]:
+        """Normalize path-like step lists into rendered strings."""
+        if not isinstance(value, list):
+            return []
+        rendered_steps: List[str] = []
+        for step in value:
+            rendered_step = cls._format_path_step(step)
+            if rendered_step:
+                rendered_steps.append(rendered_step)
+        return rendered_steps
+
     def generate_all(
         self,
         exploitability_results: Dict[str, Any],
@@ -197,11 +241,15 @@ class ReportGenerator:
         cve_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build a single GHSA advisory report."""
-        file_path = vuln_info.get("file_path", "unknown")
-        vuln_type = vuln_info.get("vulnerability_type", "unknown")
-        description = vuln_info.get("description", "")
-        evidence = vuln_info.get("evidence", "")
-        attack_scenario = vuln_info.get("attack_scenario", "")
+        vuln_info = self._normalize_mapping(vuln_info)
+        exploitability = self._normalize_mapping(exploitability)
+        file_path = str(vuln_info.get("file_path") or "unknown")
+        vuln_type = str(vuln_info.get("vulnerability_type") or "unknown")
+        description = str(vuln_info.get("description") or "")
+        evidence = str(vuln_info.get("evidence") or "")
+        attack_scenario = self._format_attack_scenario(
+            exploitability.get("attack_scenario", vuln_info.get("attack_scenario", ""))
+        )
         verdict = exploitability.get("verdict", "UNKNOWN")
 
         # Map vulnerability types to CWE IDs
@@ -227,9 +275,10 @@ class ReportGenerator:
         title = f"{vuln_type_display} in {file_path}"
 
         # Build attack path description
-        source_analysis = exploitability.get("source_analysis", {})
-        attack_path = source_analysis.get("attack_path", [])
-        sources = source_analysis.get("sources_found", [])
+        source_analysis = self._normalize_mapping(exploitability.get("source_analysis"))
+        attack_path = self._normalize_path_steps(source_analysis.get("attack_path", []))
+        sources_raw = source_analysis.get("sources_found", [])
+        sources = sources_raw if isinstance(sources_raw, list) else []
 
         # Docker verification section
         docker_section = ""
@@ -280,8 +329,11 @@ class ReportGenerator:
         attack_scenario = kwargs["attack_scenario"]
         attack_path = kwargs.get("attack_path", [])
         sources = kwargs.get("sources", [])
-        exploitability = kwargs.get("exploitability", {})
+        exploitability = self._normalize_mapping(kwargs.get("exploitability", {}))
         docker_section = kwargs.get("docker_section", "")
+        attack_path = self._normalize_path_steps(attack_path)
+        if not isinstance(sources, list):
+            sources = []
 
         # Build attack path text
         path_text = ""
@@ -295,15 +347,24 @@ class ReportGenerator:
         if sources:
             sources_text = "\n### User-Controllable Sources\n\n"
             for s in sources:
-                sources_text += f"- **{s.get('type', 'unknown')}**: `{s.get('location', '')}` (controllability: {s.get('controllability', 'unknown')})\n"
+                if isinstance(s, dict):
+                    source_type = str(s.get("type") or "unknown")
+                    source_location = str(s.get("location") or "")
+                    source_control = str(s.get("controllability") or "unknown")
+                    sources_text += (
+                        f"- **{source_type}**: `{source_location}` "
+                        f"(controllability: {source_control})\n"
+                    )
+                else:
+                    sources_text += f"- `{str(s).strip()}`\n"
 
         # Remediation
-        remediation = exploitability.get("remediation", {})
+        remediation = self._normalize_mapping(exploitability.get("remediation"))
         remediation_text = remediation.get("recommendation", "No specific remediation provided.")
         remediation_ref = remediation.get("reference", "")
 
         # Sink analysis
-        sink = exploitability.get("sink_analysis", {})
+        sink = self._normalize_mapping(exploitability.get("sink_analysis"))
         sink_text = ""
         if sink:
             sink_text = f"""
@@ -396,6 +457,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
 
     def _build_docker_evidence_section(self, docker_verification: Dict[str, Any]) -> str:
         """Build the Docker verification evidence section."""
+        docker_verification = self._normalize_mapping(docker_verification)
         lines = [
             "## Docker Verification Evidence",
             "",
@@ -404,7 +466,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         ]
 
         # Execution rounds
-        rounds = docker_verification.get("execution_rounds", [])
+        rounds = self._normalize_mapping_list(docker_verification.get("execution_rounds", []))
         if rounds:
             lines.append("### Execution Log")
             lines.append("")
@@ -412,7 +474,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                 round_num = r.get("round", 0)
                 exit_code = r.get("exit_code", "N/A")
                 confirmed = r.get("exploit_confirmed", False)
-                stdout = r.get("stdout_excerpt", "").strip()
+                stdout = str(r.get("stdout_excerpt") or "").strip()
 
                 lines.append(f"**Round {round_num}** (exit code: {exit_code}, confirmed: {confirmed})")
                 if stdout:
@@ -423,7 +485,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                     lines.append("```")
                 lines.append("")
         else:
-            execution_output = docker_verification.get("execution_output", "").strip()
+            execution_output = str(docker_verification.get("execution_output") or "").strip()
             if execution_output:
                 lines.extend([
                     "### Execution Log",
@@ -435,9 +497,9 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                 ])
 
         # PoC generation info
-        poc_gen = docker_verification.get("poc_generation", {})
+        poc_gen = self._normalize_mapping(docker_verification.get("poc_generation"))
         if poc_gen and poc_gen.get("status") == "ok":
-            steps = poc_gen.get("attack_steps", [])
+            steps = self._normalize_path_steps(poc_gen.get("attack_steps", []))
             if steps:
                 lines.append("### PoC Attack Steps")
                 lines.append("")
@@ -446,14 +508,18 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                 lines.append("")
 
         # Evidence files
-        evidence = docker_verification.get("evidence_summary", {})
+        evidence = self._normalize_mapping(docker_verification.get("evidence_summary"))
         if evidence:
             files = evidence.get("files", [])
+            if not isinstance(files, list):
+                files = []
             if files:
                 lines.append("### Evidence Files")
                 lines.append("")
                 for f in files:
-                    lines.append(f"- `{f}`")
+                    file_entry = str(f).strip()
+                    if file_entry:
+                        lines.append(f"- `{file_entry}`")
                 lines.append("")
         elif docker_verification.get("poc_script_path"):
             lines.extend([
@@ -665,17 +731,19 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         docker_verification: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Render detailed section for a single finding."""
-        vuln = result.get("original_finding", {})
-        file_path = vuln.get("file_path", "unknown")
-        vuln_type = vuln.get("vulnerability_type", "unknown")
-        description = vuln.get("description", "")
-        evidence = vuln.get("evidence", "")
-        attack_scenario = vuln.get("attack_scenario", "")
-        confidence = vuln.get("confidence", "unknown")
+        vuln = self._normalize_mapping(result.get("original_finding"))
+        file_path = str(vuln.get("file_path") or "unknown")
+        vuln_type = str(vuln.get("vulnerability_type") or "unknown")
+        description = str(vuln.get("description") or "")
+        evidence = str(vuln.get("evidence") or "")
+        attack_scenario = self._format_attack_scenario(
+            result.get("attack_scenario", vuln.get("attack_scenario", ""))
+        )
+        confidence = result.get("confidence") or vuln.get("confidence", "unknown")
         verdict = result.get("verdict", "UNKNOWN")
 
-        source_analysis = result.get("source_analysis", {})
-        attack_path = source_analysis.get("attack_path", []) if source_analysis else []
+        source_analysis = self._normalize_mapping(result.get("source_analysis"))
+        attack_path = self._normalize_path_steps(source_analysis.get("attack_path", []))
 
         lines = [
             f"#### Finding {index}: {vuln_type.replace('_', ' ').title()} in `{file_path}`",
@@ -710,6 +778,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
 
         # Docker verification results
         if docker_verification:
+            docker_verification = self._normalize_mapping(docker_verification)
             dv_verdict = self._docker_verification_verdict(docker_verification) or "N/A"
             lines.append(f"**Docker Verification**: {dv_verdict}")
             lines.append("")
@@ -719,10 +788,10 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                 lines.append("")
 
                 # Show execution output
-                rounds = docker_verification.get("execution_rounds", [])
+                rounds = self._normalize_mapping_list(docker_verification.get("execution_rounds", []))
                 for r in rounds:
                     if r.get("exploit_confirmed"):
-                        stdout = r.get("stdout_excerpt", "").strip()
+                        stdout = str(r.get("stdout_excerpt") or "").strip()
                         if stdout:
                             lines.extend([
                                 "**PoC Output**:",
@@ -733,7 +802,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                             ])
                         break
                 else:
-                    execution_output = docker_verification.get("execution_output", "").strip()
+                    execution_output = str(docker_verification.get("execution_output") or "").strip()
                     if execution_output:
                         lines.extend([
                             "**PoC Output**:",
@@ -746,6 +815,31 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         lines.append("---")
         lines.append("")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_attack_scenario(attack_scenario: Any) -> str:
+        """Normalize attack-scenario payloads into report-friendly text."""
+        if isinstance(attack_scenario, str):
+            return attack_scenario.strip()
+        if not isinstance(attack_scenario, dict):
+            return ""
+
+        parts: List[str] = []
+        description = str(attack_scenario.get("description", "")).strip()
+        if description:
+            parts.append(description)
+
+        steps = attack_scenario.get("steps", [])
+        if isinstance(steps, list):
+            rendered_steps = [str(step).strip() for step in steps if str(step).strip()]
+            if rendered_steps:
+                parts.append("Steps: " + " -> ".join(rendered_steps))
+
+        impact = str(attack_scenario.get("impact", "")).strip()
+        if impact:
+            parts.append(f"Impact: {impact}")
+
+        return "\n".join(parts)
 
     # ---- Helpers ----
 
@@ -805,6 +899,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
 
     def _determine_severity(self, vuln_type: str, verdict: str) -> str:
         """Determine severity level based on vulnerability type and verdict."""
+        vuln_type_norm = str(vuln_type or "unknown").lower()
         high_severity_types = {
             "deserialization", "command_injection", "code_injection",
             "code_execution", "sql_injection",
@@ -814,14 +909,14 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         }
 
         if verdict == "EXPLOITABLE":
-            if vuln_type.lower() in high_severity_types:
+            if vuln_type_norm in high_severity_types:
                 return "Critical"
-            elif vuln_type.lower() in medium_severity_types:
+            elif vuln_type_norm in medium_severity_types:
                 return "High"
             else:
                 return "High"
         elif verdict == "CONDITIONALLY_EXPLOITABLE":
-            if vuln_type.lower() in high_severity_types:
+            if vuln_type_norm in high_severity_types:
                 return "High"
             else:
                 return "Medium"
@@ -835,6 +930,8 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
 
         This is an approximation based on vulnerability type.
         """
+        exploitability = self._normalize_mapping(exploitability)
+        vuln_type_norm = str(vuln_type or "unknown").lower()
         # Base vectors by type
         vectors = {
             "deserialization": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H",
@@ -847,11 +944,15 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         }
 
         # Check if source requires user interaction
-        source_analysis = exploitability.get("source_analysis", {})
-        sources = source_analysis.get("sources_found", []) if source_analysis else []
-        has_direct = any(s.get("controllability") == "direct" for s in sources)
+        source_analysis = self._normalize_mapping(exploitability.get("source_analysis"))
+        sources_raw = source_analysis.get("sources_found", [])
+        sources = sources_raw if isinstance(sources_raw, list) else []
+        has_direct = any(
+            isinstance(source, dict) and source.get("controllability") == "direct"
+            for source in sources
+        )
 
-        base = vectors.get(vuln_type.lower(), "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H")
+        base = vectors.get(vuln_type_norm, "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H")
 
         # Adjust for indirect sources
         if not has_direct and sources:
@@ -861,6 +962,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
 
     def _impact_description(self, vuln_type: str) -> str:
         """Get impact description for a vulnerability type."""
+        vuln_type_norm = str(vuln_type or "unknown").lower()
         impacts = {
             "deserialization": "Remote Code Execution (RCE) via malicious deserialization payload",
             "command_injection": "Remote Code Execution (RCE) via OS command injection",
@@ -871,32 +973,33 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
             "sql_injection": "SQL Injection allowing data exfiltration or modification",
             "xxe": "XML External Entity (XXE) allowing file disclosure or SSRF",
         }
-        return impacts.get(vuln_type.lower(), "Security impact dependent on context")
+        return impacts.get(vuln_type_norm, "Security impact dependent on context")
 
     def _manual_reproduction_steps(
         self, vuln_type: str, file_path: str, attack_scenario: str
     ) -> str:
         """Generate manual reproduction steps."""
+        vuln_type_norm = str(vuln_type or "unknown").lower()
         steps = [
             f"1. Open the vulnerable file: `{file_path}`",
             f"2. Locate the vulnerable code pattern described in the evidence above.",
         ]
 
-        if vuln_type.lower() == "deserialization":
+        if vuln_type_norm == "deserialization":
             steps.extend([
                 "3. Create a malicious serialized payload appropriate for the project language.",
                 f"   For {self.language} projects, craft a payload that triggers the vulnerable deserialization path.",
                 "4. Feed the malicious file through the vulnerable code path.",
                 "5. Observe arbitrary code execution.",
             ])
-        elif vuln_type.lower() in ("command_injection", "code_injection"):
+        elif vuln_type_norm in ("command_injection", "code_injection"):
             steps.extend([
                 "3. Craft input that includes shell metacharacters or code:",
                 '   ```\n   malicious_input = "; id #"\n   ```',
                 "4. Provide this input through the identified source (CLI/API/config).",
                 "5. Observe command execution in the output.",
             ])
-        elif vuln_type.lower() == "path_traversal":
+        elif vuln_type_norm == "path_traversal":
             steps.extend([
                 "3. Craft a path traversal payload:",
                 '   ```\n   malicious_path = "../../../etc/passwd"\n   ```',
