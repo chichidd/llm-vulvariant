@@ -1,5 +1,6 @@
 import copy
 from abc import ABC, abstractmethod
+import threading
 from typing import Any, Dict, List, Optional
 import os
 import time
@@ -358,6 +359,7 @@ class BaseLLMClient(ABC):
     def __init__(self, config: LLMConfig):
         self.config = config
         self.context_limit = max(0, to_int(getattr(config, "context_limit", 0)))
+        self._usage_lock = threading.Lock()
         self._last_usage_summary = build_empty_llm_usage_summary(
             requested_model=config.model,
             provider=config.provider,
@@ -384,18 +386,21 @@ class BaseLLMClient(ABC):
         )
 
     def _record_usage_summary(self, usage_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        summary = self._normalize_usage_summary(usage_summary)
-        self._last_usage_summary = copy.deepcopy(summary)
-        self._usage_history.append(copy.deepcopy(summary))
-        return summary
+        with self._usage_lock:
+            summary = self._normalize_usage_summary(usage_summary)
+            self._last_usage_summary = copy.deepcopy(summary)
+            self._usage_history.append(copy.deepcopy(summary))
+            return copy.deepcopy(summary)
 
     def _set_last_usage_summary(self, usage_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        summary = self._normalize_usage_summary(usage_summary)
-        self._last_usage_summary = copy.deepcopy(summary)
-        return summary
+        with self._usage_lock:
+            summary = self._normalize_usage_summary(usage_summary)
+            self._last_usage_summary = copy.deepcopy(summary)
+            return copy.deepcopy(summary)
 
     def get_last_usage_summary(self) -> Dict[str, Any]:
-        return copy.deepcopy(self._last_usage_summary)
+        with self._usage_lock:
+            return copy.deepcopy(self._last_usage_summary)
 
     def get_last_request_input_tokens(self) -> int:
         summary = self.get_last_usage_summary()
@@ -428,11 +433,13 @@ class BaseLLMClient(ABC):
         return max(0, to_int(getattr(self, "context_limit", 0)))
 
     def usage_history_snapshot(self) -> int:
-        return len(self._usage_history)
+        with self._usage_lock:
+            return len(self._usage_history)
 
     def get_usage_history_since(self, snapshot: int) -> List[Dict[str, Any]]:
-        start = max(0, int(snapshot))
-        return [copy.deepcopy(item) for item in self._usage_history[start:]]
+        with self._usage_lock:
+            start = max(0, int(snapshot))
+            return [copy.deepcopy(item) for item in self._usage_history[start:]]
 
     def aggregate_usage_since(self, snapshot: int) -> Dict[str, Any]:
         summary = aggregate_usage_summaries(
@@ -535,12 +542,15 @@ class BaseLLMClient(ABC):
         last_exception = None
         
         for attempt in range(self.max_retries):
-            usage_history_start = len(self._usage_history)
+            with self._usage_lock:
+                usage_history_start = len(self._usage_history)
             try:
                 return func(*args, **kwargs)
             except Exception as e:
                 last_exception = e
-                if len(self._usage_history) == usage_history_start:
+                with self._usage_lock:
+                    usage_len = len(self._usage_history)
+                if usage_len == usage_history_start:
                     error_summary = build_empty_llm_usage_summary(
                         requested_model=self.config.model,
                         provider=self.config.provider,

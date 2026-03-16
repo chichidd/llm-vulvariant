@@ -1,3 +1,4 @@
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -46,6 +47,7 @@ class _DummyClient(BaseLLMClient):
             requested_model=self.config.model,
             provider=self.config.provider,
         )
+        self._usage_lock = threading.Lock()
         self._usage_history = []
         self.max_retries = 1
         self.initial_delay = 0.0

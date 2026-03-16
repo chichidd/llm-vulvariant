@@ -7,6 +7,7 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config, resolve_software_profiles_path, resolve_vuln_profiles_path
@@ -21,6 +22,7 @@ from scanner.similarity import (
 )
 from utils.git_utils import get_git_commit
 from utils.logger import get_logger
+from utils.concurrency import ConcurrencyConfig, RepoPathLockManager, run_thread_pool_tasks
 from utils.vuln_utils import normalize_cve_id, read_vuln_data
 
 try:
@@ -173,13 +175,27 @@ def parse_args() -> argparse.Namespace:
         help="Skip target scan when output file agentic_vuln_findings.json already exists",
     )
     parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Global max worker count for threaded execution (default: 1)",
+    )
+    parser.add_argument(
+        "--scan-workers",
+        type=int,
+        default=None,
+        help="Worker count for batch target scans (default: same as --max-workers)",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
         help="Optional limit on number of vuln entries from vuln.json",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logs")
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.scan_workers = args.max_workers if args.scan_workers is None else args.scan_workers
+    return args
 
 
 def _validate_args(args: argparse.Namespace) -> bool:
@@ -194,6 +210,12 @@ def _validate_args(args: argparse.Namespace) -> bool:
         return False
     if args.max_iterations_cap <= 0:
         logger.error("--max-iterations-cap must be >= 1")
+        return False
+    if args.max_workers <= 0:
+        logger.error("--max-workers must be >= 1")
+        return False
+    if args.scan_workers <= 0:
+        logger.error("--scan-workers must be >= 1")
         return False
     if not str(args.soft_profiles_dir).strip():
         logger.error("--soft-profiles-dir must not be empty")
@@ -229,6 +251,17 @@ def _resolve_software_profile_locator(
             str(software_profile_dirname),
         )
     return str(repo_profiles_dir.parent), repo_profiles_dir.name
+
+
+@dataclass(frozen=True)
+class _BatchScanTask:
+    task_id: str
+    cve_id: str
+    target_repo_name: str
+    target_commit: str
+    target_repo_path: Path
+    vulnerability_profile: object
+    target: SimilarProfileCandidate
 
 
 def _normalize_cve_id(entry: Dict[str, object], index: int) -> str:
@@ -457,6 +490,42 @@ def _select_similar_targets(
     return fallback, bool(fallback)
 
 
+def _build_task_id(cve_id: str, target_repo_name: str, target_commit: str) -> str:
+    return f"{cve_id}:{target_repo_name}:{target_commit}"
+
+
+def _scan_target_worker(
+    task: _BatchScanTask,
+    *,
+    batch_args: argparse.Namespace,
+    repo_profiles_dir: Path,
+    repo_path_lock_manager: RepoPathLockManager,
+) -> Dict[str, object]:
+    """Worker wrapper used by the shared thread-pool.
+
+    Every worker creates its own LLM client and holds the repo lock for the full scan.
+    """
+    scan_llm = create_llm_client(
+        LLMConfig(provider=batch_args.llm_provider, model=batch_args.llm_name)
+    )
+    lock = repo_path_lock_manager.get_lock(task.target_repo_path)
+    with lock:
+        success = _run_target_scan(
+            batch_args=batch_args,
+            repo_profiles_dir=repo_profiles_dir,
+            cve_id=task.cve_id,
+            vulnerability_profile=task.vulnerability_profile,
+            llm_client=scan_llm,
+            target=task.target,
+        )
+    return {
+        "task_id": task.task_id,
+        "repo_name": task.target_repo_name,
+        "commit_hash": task.target_commit,
+        "status": "success" if success else "failed",
+    }
+
+
 def _run_target_scan(
     *,
     batch_args: argparse.Namespace,
@@ -532,11 +601,16 @@ def main() -> int:
 
     logger.info(f"Loaded {len(entries)} vulnerabilities from {vuln_json}")
     profile_llm = create_llm_client(LLMConfig(provider=args.llm_provider, model=args.llm_name))
-    scan_llm = create_llm_client(LLMConfig(provider=args.llm_provider, model=args.llm_name))
     text_retriever = build_text_retriever(
         model_name=args.similarity_model_name,
         device=args.similarity_device,
     )
+    concurrency_config = ConcurrencyConfig(
+        max_workers=args.max_workers,
+        scan_workers=args.scan_workers,
+        exploitability_workers=1,
+    )
+    repo_lock_manager = RepoPathLockManager()
 
     software_cache: Dict[Tuple[str, str], object] = {}
     regenerated_software_keys: Set[Tuple[str, str]] = set()
@@ -673,24 +747,77 @@ def main() -> int:
             "selected_targets": [candidate.to_dict() for candidate in similar_targets],
             "scan_results": [],
         }
-
+        task_ids: Set[str] = set()
+        scan_tasks: List[_BatchScanTask] = []
         for candidate in similar_targets:
-            total_scans += 1
-            ok = _run_target_scan(
+            task_id = _build_task_id(
+                cve_id,
+                candidate.profile_ref.repo_name,
+                candidate.profile_ref.commit_hash,
+            )
+            if task_id in task_ids:
+                logger.warning(f"[Vuln {vuln_index}] Duplicate scan task ignored: {task_id}")
+                vuln_record["scan_results"].append(
+                    {
+                        "repo_name": candidate.profile_ref.repo_name,
+                        "commit_hash": candidate.profile_ref.commit_hash,
+                        "overall_similarity": candidate.metrics.overall_sim,
+                        "status": "skipped",
+                        "reason": "duplicate_task_id",
+                    }
+                )
+                total_scans += 1
+                continue
+            task_ids.add(task_id)
+            scan_tasks.append(
+                _BatchScanTask(
+                    task_id=task_id,
+                    cve_id=cve_id,
+                    target_repo_name=candidate.profile_ref.repo_name,
+                    target_commit=candidate.profile_ref.commit_hash,
+                    target_repo_path=repos_root / candidate.profile_ref.repo_name,
+                    vulnerability_profile=vulnerability_profile,
+                    target=candidate,
+                )
+            )
+
+        task_results = run_thread_pool_tasks(
+            tasks=scan_tasks,
+            worker_fn=lambda task: _scan_target_worker(
+                task,
                 batch_args=args,
                 repo_profiles_dir=repo_profiles_dir,
-                cve_id=cve_id,
-                vulnerability_profile=vulnerability_profile,
-                llm_client=scan_llm,
-                target=candidate,
-            )
-            success_scans += int(ok)
+                repo_path_lock_manager=repo_lock_manager,
+            ),
+            max_workers=concurrency_config.scan_workers,
+            fail_fast=False,
+        )
+
+        for task, task_result in zip(scan_tasks, task_results):
+            total_scans += 1
+            worker_result = task_result.result or {}
+            if task_result.status == "error":
+                vuln_record["scan_results"].append(
+                    {
+                        "repo_name": task.target_repo_name,
+                        "commit_hash": task.target_commit,
+                        "overall_similarity": task.target.metrics.overall_sim,
+                        "status": "error",
+                        "error": task_result.error,
+                    }
+                )
+                continue
+
+            status = str(worker_result.get("status", "failed"))
+            if status == "success":
+                success_scans += 1
             vuln_record["scan_results"].append(
                 {
-                    "repo_name": candidate.profile_ref.repo_name,
-                    "commit_hash": candidate.profile_ref.commit_hash,
-                    "overall_similarity": candidate.metrics.overall_sim,
-                    "status": "ok" if ok else "failed",
+                    "repo_name": task.target_repo_name,
+                    "commit_hash": task.target_commit,
+                    "overall_similarity": task.target.metrics.overall_sim,
+                    "status": "ok" if status == "success" else "failed",
+                    "error": worker_result.get("error"),
                 }
             )
 

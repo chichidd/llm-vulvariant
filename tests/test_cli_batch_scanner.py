@@ -1,7 +1,10 @@
 from argparse import Namespace
+import sys
+from pathlib import Path
 
 from profiler.software.models import ModuleInfo, SoftwareProfile
 from scanner.similarity.retriever import ProfileRef, ProfileSimilarityMetrics, SimilarProfileCandidate
+from utils.concurrency import RepoPathLockManager
 
 import cli.batch_scanner as batch_scanner
 
@@ -209,3 +212,118 @@ def test_ensure_vulnerability_profile_uses_repos_root_for_vuln_loading(monkeypat
     assert captured["repo_path"] == str(repos_root / repo_name)
     assert captured["save_results"] is True
     assert captured["vuln_entry_cve"] == cve_id
+
+
+def test_parse_args_defaults_scan_workers_to_max_workers():
+    argv_backup = sys.argv
+    try:
+        sys.argv = ["batch_scanner"]
+        args = batch_scanner.parse_args()
+    finally:
+        sys.argv = argv_backup
+
+    assert args.max_workers == 1
+    assert args.scan_workers == 1
+
+
+def test_validate_args_rejects_non_positive_workers():
+    bad_args = Namespace(
+        similarity_threshold=0.5,
+        max_targets=10,
+        fallback_top_n=1,
+        max_iterations_cap=1,
+        max_workers=0,
+        scan_workers=1,
+        soft_profiles_dir="soft",
+        vuln_profiles_dir="vuln",
+    )
+    assert batch_scanner._validate_args(bad_args) is False
+
+    bad_scan_args = Namespace(
+        similarity_threshold=0.5,
+        max_targets=10,
+        fallback_top_n=1,
+        max_iterations_cap=1,
+        max_workers=1,
+        scan_workers=0,
+        soft_profiles_dir="soft",
+        vuln_profiles_dir="vuln",
+    )
+    assert batch_scanner._validate_args(bad_scan_args) is False
+
+
+def test_build_task_id_generates_stable_task_key():
+    assert (
+        batch_scanner._build_task_id("CVE-1", "repo-a", "deadbeef123456")
+        == "CVE-1:repo-a:deadbeef123456"
+    )
+
+
+def test_run_target_worker_builds_isolated_llm_client(monkeypatch, tmp_path):
+    fake_calls = []
+
+    class DummyClient:
+        def __init__(self, tag: str):
+            self.tag = tag
+
+    def fake_create_llm_client(config):
+        fake_calls.append((config.provider, config.model))
+        return DummyClient(f"client-{len(fake_calls)}")
+
+    run_calls = []
+
+    def fake_run_target_scan(*, batch_args, repo_profiles_dir, cve_id, vulnerability_profile, llm_client, target):
+        run_calls.append((batch_args.llm_provider, batch_args.llm_name, type(llm_client).__name__, llm_client.tag))
+        return True
+
+    monkeypatch.setattr(batch_scanner, "create_llm_client", fake_create_llm_client)
+    monkeypatch.setattr(batch_scanner, "_run_target_scan", fake_run_target_scan)
+
+    task = batch_scanner._BatchScanTask(
+        task_id="cve-1:repo-a:deadbeef123456",
+        cve_id="CVE-1",
+        target_repo_name="repo-a",
+        target_commit="deadbeef123456",
+        target_repo_path=(tmp_path / "repo-a").resolve() / ".." / "repo-a",
+        vulnerability_profile=object(),
+        target=SimilarProfileCandidate(
+            profile_ref=ProfileRef(
+                "repo-a",
+                "deadbeef123456",
+                _mk_profile("repo-a"),
+            ),
+            metrics=ProfileSimilarityMetrics(0.7, 0.7, 0.7, 0.7, 0.7, 0.7),
+        ),
+    )
+    args = Namespace(llm_provider="mock", llm_name="m", scan_output_dir="/tmp", repos_root=tmp_path)
+    repo_lock_manager = RepoPathLockManager()
+
+    first = batch_scanner._scan_target_worker(
+        task,
+        batch_args=args,
+        repo_profiles_dir=tmp_path,
+        repo_path_lock_manager=repo_lock_manager,
+    )
+    second = batch_scanner._scan_target_worker(
+        task,
+        batch_args=args,
+        repo_profiles_dir=tmp_path,
+        repo_path_lock_manager=repo_lock_manager,
+    )
+
+    assert first["status"] == "success"
+    assert second["status"] == "success"
+    assert len(fake_calls) == 2
+    assert fake_calls == [("mock", "m"), ("mock", "m")]
+    assert len(run_calls) == 2
+
+
+def test_repo_path_lock_manager_uses_absolute_path_key():
+    manager = RepoPathLockManager()
+    repo_root = Path("/tmp")
+    first = manager.get_lock(repo_root / "repo-a")
+    second = manager.get_lock(repo_root / "repo-a" / ".." / "repo-a")
+    third = manager.get_lock((repo_root / "repo-a").resolve())
+
+    assert first is second
+    assert first is third
