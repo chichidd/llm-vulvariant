@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple
 
-from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config, resolve_software_profiles_path, resolve_vuln_profiles_path
+from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config
 from llm import LLMConfig, create_llm_client
-from profiler import SoftwareProfiler, VulnerabilityProfiler, VulnEntry
 from scanner.agent import load_software_profile, load_vulnerability_profile
 from scanner.similarity import (
     ProfileRef,
@@ -25,12 +25,46 @@ from utils.vuln_utils import normalize_cve_id, read_vuln_data
 
 try:
     from cli import agent_scanner
-    from cli.common import setup_logging
+    from cli.common import resolve_cli_path, resolve_profile_dirs, setup_logging
+    from cli.profile_generation import (
+        build_vulnerability_entry,
+        run_software_profile_generation,
+        run_vulnerability_profile_generation,
+    )
 except ImportError:  # pragma: no cover - direct script execution fallback
     import agent_scanner
-    from common import setup_logging
+    from common import resolve_cli_path, resolve_profile_dirs, setup_logging
+    from profile_generation import (
+        build_vulnerability_entry,
+        run_software_profile_generation,
+        run_vulnerability_profile_generation,
+    )
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class BatchScanPaths:
+    """Resolved filesystem inputs for one batch scan run."""
+
+    vuln_json: Path
+    source_repos_root: Path
+    target_repos_root: Path
+    source_repo_profiles_dir: Path
+    target_repo_profiles_dir: Path
+    vuln_profiles_dir: Path
+    scan_output_dir: Path
+
+
+@dataclass
+class BatchScanCaches:
+    """Cached profile state reused across vulnerability entries."""
+
+    source_software_cache: Dict[Tuple[str, str], object]
+    target_software_cache: Dict[Tuple[str, str], object]
+    vulnerability_cache: Dict[Tuple[str, str], object]
+    regenerated_source_software_keys: Set[Tuple[str, str]]
+    regenerated_target_software_keys: Set[Tuple[str, str]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,10 +81,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to vuln.json (default from config/paths.yaml)",
     )
     parser.add_argument(
-        "--repos-root",
+        "--source-repos-root",
         type=str,
         default=str(_path_config["repo_base_path"]),
-        help="Root directory of target repositories (default: data/repos)",
+        help="Root directory of source repositories referenced by vuln.json (default: data/repos)",
+    )
+    parser.add_argument(
+        "--target-repos-root",
+        type=str,
+        default=str(_path_config["repo_base_path"]),
+        help="Root directory of target repositories to scan (default: data/repos)",
     )
     parser.add_argument(
         "--profile-base-path",
@@ -59,19 +99,22 @@ def parse_args() -> argparse.Namespace:
         help="Base directory containing profile folders (default from config/paths.yaml)",
     )
     parser.add_argument(
-        "--soft-profiles-dir",
+        "--source-soft-profiles-dir",
         type=str,
         default=DEFAULT_SOFTWARE_PROFILE_DIRNAME,
         help=(
-            "Software profile directory name under --profile-base-path, "
+            "Source software profile directory name under --profile-base-path, "
             "or an absolute path"
         ),
     )
     parser.add_argument(
-        "--repo-profiles-dir",
-        dest="soft_profiles_dir",
+        "--target-soft-profiles-dir",
         type=str,
-        help=argparse.SUPPRESS,
+        default=DEFAULT_SOFTWARE_PROFILE_DIRNAME,
+        help=(
+            "Target software profile directory name under --profile-base-path, "
+            "or an absolute path"
+        ),
     )
     parser.add_argument(
         "--vuln-profiles-dir",
@@ -195,8 +238,11 @@ def _validate_args(args: argparse.Namespace) -> bool:
     if args.max_iterations_cap <= 0:
         logger.error("--max-iterations-cap must be >= 1")
         return False
-    if not str(args.soft_profiles_dir).strip():
-        logger.error("--soft-profiles-dir must not be empty")
+    if not str(args.source_soft_profiles_dir).strip():
+        logger.error("--source-soft-profiles-dir must not be empty")
+        return False
+    if not str(args.target_soft_profiles_dir).strip():
+        logger.error("--target-soft-profiles-dir must not be empty")
         return False
     if not str(args.vuln_profiles_dir).strip():
         logger.error("--vuln-profiles-dir must not be empty")
@@ -204,31 +250,139 @@ def _validate_args(args: argparse.Namespace) -> bool:
     return True
 
 
-def _resolve_profile_dirs_from_args(args: argparse.Namespace) -> tuple[Path, Path]:
-    profile_base_path = str(args.profile_base_path)
-    soft_profiles_dir = resolve_software_profiles_path(
-        profile_base_path=profile_base_path,
-        software_profile_dirname=args.soft_profiles_dir,
-    )
-    vuln_profiles_dir = resolve_vuln_profiles_path(
-        profile_base_path=profile_base_path,
+def _resolve_source_software_profile_dir_from_args(args: argparse.Namespace) -> Path:
+    return resolve_profile_dirs(
+        profile_base_path=args.profile_base_path,
+        software_profile_dirname=args.source_soft_profiles_dir,
+        vuln_profile_dirname=None,
+    )[0]
+
+
+def _resolve_target_and_vuln_profile_dirs_from_args(args: argparse.Namespace) -> tuple[Path, Path]:
+    return resolve_profile_dirs(
+        profile_base_path=args.profile_base_path,
+        software_profile_dirname=args.target_soft_profiles_dir,
         vuln_profile_dirname=args.vuln_profiles_dir,
     )
-    return soft_profiles_dir, vuln_profiles_dir
+
+
+def _resolve_batch_scan_paths(args: argparse.Namespace) -> Optional[BatchScanPaths]:
+    """Resolve and validate batch-scan paths from CLI args."""
+    target_repo_profiles_dir, vuln_profiles_dir = _resolve_target_and_vuln_profile_dirs_from_args(args)
+    paths = BatchScanPaths(
+        vuln_json=resolve_cli_path(args.vuln_json),
+        source_repos_root=resolve_cli_path(args.source_repos_root),
+        target_repos_root=resolve_cli_path(args.target_repos_root),
+        source_repo_profiles_dir=_resolve_source_software_profile_dir_from_args(args),
+        target_repo_profiles_dir=target_repo_profiles_dir,
+        vuln_profiles_dir=vuln_profiles_dir,
+        scan_output_dir=resolve_cli_path(args.scan_output_dir),
+    )
+    if not paths.vuln_json.exists():
+        logger.error(f"vuln.json not found: {paths.vuln_json}")
+        return None
+    if not paths.target_repos_root.exists():
+        logger.error(f"target repos root not found: {paths.target_repos_root}")
+        return None
+    return paths
+
+
+def _ensure_source_inputs_available(
+    *,
+    args: argparse.Namespace,
+    paths: BatchScanPaths,
+    entries: Sequence[Tuple[int, Dict[str, object]]],
+) -> bool:
+    """Validate source-root access or cached profile availability."""
+    if paths.source_repos_root.exists():
+        return True
+    if args.force_regenerate_profiles:
+        logger.error(
+            "source repos root not found for forced regeneration: %s",
+            paths.source_repos_root,
+        )
+        return False
+
+    missing_cached_inputs = _find_missing_cached_source_inputs(
+        entries=entries,
+        source_repo_profiles_dir=paths.source_repo_profiles_dir,
+        vuln_profiles_dir=paths.vuln_profiles_dir,
+    )
+    if missing_cached_inputs:
+        preview = ", ".join(missing_cached_inputs[:3])
+        suffix = " ..." if len(missing_cached_inputs) > 3 else ""
+        logger.error(
+            "source repos root not found: %s; missing cached source/vulnerability profiles: %s%s",
+            paths.source_repos_root,
+            preview,
+            suffix,
+        )
+        return False
+
+    logger.warning(
+        "source repos root not found: %s; reusing cached source/vulnerability profiles only",
+        paths.source_repos_root,
+    )
+    return True
+
+
+def _initialize_profile_caches(paths: BatchScanPaths) -> BatchScanCaches:
+    """Build shared or independent source/target caches based on resolved paths."""
+    target_software_cache: Dict[Tuple[str, str], object] = {}
+    regenerated_target_software_keys: Set[Tuple[str, str]] = set()
+    shared_source_target_profile_state = (
+        _paths_resolve_equal(paths.source_repos_root, paths.target_repos_root)
+        and _paths_resolve_equal(paths.source_repo_profiles_dir, paths.target_repo_profiles_dir)
+    )
+    if shared_source_target_profile_state:
+        source_software_cache = target_software_cache
+        regenerated_source_software_keys = regenerated_target_software_keys
+    else:
+        source_software_cache = {}
+        regenerated_source_software_keys = set()
+
+    return BatchScanCaches(
+        source_software_cache=source_software_cache,
+        target_software_cache=target_software_cache,
+        vulnerability_cache={},
+        regenerated_source_software_keys=regenerated_source_software_keys,
+        regenerated_target_software_keys=regenerated_target_software_keys,
+    )
+
+
+def _build_batch_summary(args: argparse.Namespace, paths: BatchScanPaths) -> Dict[str, object]:
+    """Build the batch summary document header."""
+    return {
+        "started_at": datetime.now().isoformat(),
+        "vuln_json": str(paths.vuln_json),
+        "source_repos_root": str(paths.source_repos_root),
+        "target_repos_root": str(paths.target_repos_root),
+        "source_soft_profiles_dir": str(paths.source_repo_profiles_dir),
+        "target_soft_profiles_dir": str(paths.target_repo_profiles_dir),
+        "vuln_profiles_dir": str(paths.vuln_profiles_dir),
+        "similarity_threshold": args.similarity_threshold,
+        "max_iterations_cap": args.max_iterations_cap,
+        "critical_stop_enabled": not args.disable_critical_stop,
+        "critical_stop_mode": args.critical_stop_mode,
+        "entries": [],
+    }
+
+
+def _paths_resolve_equal(left: Path, right: Path) -> bool:
+    """Compare paths after normalization so shared source/target inputs can reuse state."""
+    return left.resolve() == right.resolve()
 
 
 def _resolve_software_profile_locator(
     batch_args: argparse.Namespace,
-    repo_profiles_dir: Path,
 ) -> tuple[str | None, str]:
+    """Resolve the software-profile locator passed through to agent scanning."""
     profile_base_path = getattr(batch_args, "profile_base_path", None)
-    software_profile_dirname = getattr(batch_args, "soft_profiles_dir", None)
-    if software_profile_dirname is not None and str(software_profile_dirname).strip():
-        return (
-            None if profile_base_path is None else str(profile_base_path),
-            str(software_profile_dirname),
-        )
-    return str(repo_profiles_dir.parent), repo_profiles_dir.name
+    software_profile_dirname = str(getattr(batch_args, "target_soft_profiles_dir", "")).strip()
+    return (
+        None if profile_base_path is None else str(profile_base_path),
+        software_profile_dirname,
+    )
 
 
 def _normalize_cve_id(entry: Dict[str, object], index: int) -> str:
@@ -241,6 +395,42 @@ def _load_vuln_entries(vuln_json: Path, limit: Optional[int] = None) -> List[Tup
     if limit is not None:
         indexed = indexed[:limit]
     return indexed
+
+
+def _find_missing_cached_source_inputs(
+    *,
+    entries: Sequence[Tuple[int, Dict[str, object]]],
+    source_repo_profiles_dir: Path,
+    vuln_profiles_dir: Path,
+) -> List[str]:
+    """Return missing cached source profile artefacts required for source-root-free runs."""
+    missing: List[str] = []
+    seen: Set[str] = set()
+
+    for vuln_index, entry in entries:
+        repo_name = str(entry.get("repo_name", ""))
+        commit_hash = str(entry.get("commit", ""))
+        if not repo_name or not commit_hash:
+            continue
+
+        cve_id = _normalize_cve_id(entry, vuln_index)
+        required_paths = [
+            (
+                source_repo_profiles_dir / repo_name / commit_hash / "software_profile.json",
+                f"software profile {repo_name}@{commit_hash[:12]}",
+            ),
+            (
+                vuln_profiles_dir / repo_name / cve_id / "vulnerability_profile.json",
+                f"vulnerability profile {repo_name}@{cve_id}",
+            ),
+        ]
+        for path, label in required_paths:
+            if path.exists() or label in seen:
+                continue
+            seen.add(label)
+            missing.append(label)
+
+    return missing
 
 
 def _ensure_software_profile(
@@ -277,12 +467,10 @@ def _ensure_software_profile(
         return None
 
     logger.info(f"[Profile] Generating software profile: {repo_name}@{commit_hash[:12]}")
-    profiler = SoftwareProfiler(
+    run_software_profile_generation(
+        repo_path=repo_path,
+        output_dir=repo_profiles_dir,
         llm_client=llm_client,
-        output_dir=str(repo_profiles_dir),
-    )
-    profiler.generate_profile(
-        repo_path=str(repo_path),
         force_regenerate=force_regenerate,
         target_version=commit_hash,
     )
@@ -348,26 +536,14 @@ def _ensure_vulnerability_profile(
         logger.error(f"Failed to read vulnerability entry index={vuln_index}")
         return None
     vuln_data = selected[0]
-    call_chain_str = " -> ".join(
-        f"{call.get('file_path', '')}#{call.get('function_name', call.get('vuln_sink', 'unknown'))}"
-        for call in vuln_data["call_chain"]
-    )
-    vuln_entry = VulnEntry(
-        repo_name=repo_name,
-        commit=commit_hash,
-        call_chain=vuln_data["call_chain"],
-        call_chain_str=call_chain_str,
-        payload=vuln_data.get("payload"),
-        cve_id=cve_id,
-    )
     logger.info(f"[Profile] Generating vulnerability profile: {repo_name}@{cve_id}")
-    vuln_profiler = VulnerabilityProfiler(
+    run_vulnerability_profile_generation(
+        repo_path=repos_root / repo_name,
+        output_dir=vuln_profiles_dir,
         llm_client=llm_client,
         repo_profile=source_profile,
-        vuln_entry=vuln_entry,
-        output_dir=str(vuln_profiles_dir),
+        vuln_entry=build_vulnerability_entry(vuln_data),
     )
-    vuln_profiler.generate_vulnerability_profile(str(repos_root / repo_name), save_results=True)
 
     profile = load_vulnerability_profile(repo_name, cve_id, base_dir=vuln_profiles_dir)
     if profile:
@@ -460,27 +636,13 @@ def _select_similar_targets(
 def _run_target_scan(
     *,
     batch_args: argparse.Namespace,
-    repo_profiles_dir: Path,
     cve_id: str,
     vulnerability_profile,
     llm_client,
     target: SimilarProfileCandidate,
-) -> bool:
+) -> Literal["ok", "skipped", "failed"]:
     profile_base_path, software_profile_dirname = _resolve_software_profile_locator(
         batch_args,
-        repo_profiles_dir,
-    )
-    scan_args = argparse.Namespace(
-        cve=cve_id,
-        output=str(batch_args.scan_output_dir),
-        repo_base_path=str(batch_args.repos_root),
-        max_iterations=batch_args.max_iterations_cap,
-        stop_when_critical_complete=not batch_args.disable_critical_stop,
-        critical_stop_mode=batch_args.critical_stop_mode,
-        verbose=batch_args.verbose,
-        profile_base_path=profile_base_path,
-        software_profile_dirname=software_profile_dirname,
-        repo_profiles_dir=repo_profiles_dir,
     )
     scan_target = agent_scanner.ScanTarget(
         repo_name=target.profile_ref.repo_name,
@@ -491,18 +653,30 @@ def _run_target_scan(
         cve_id=cve_id,
         target_repo=scan_target.repo_name,
         target_commit=scan_target.commit_hash,
-        output_base=scan_args.output,
+        output_base=str(batch_args.scan_output_dir),
     )
     findings_path = output_dir / "agentic_vuln_findings.json"
     if batch_args.skip_existing_scans and findings_path.exists():
         logger.info(f"[Skip] Existing scan result: {findings_path}")
-        return True
+        return "skipped"
 
-    return agent_scanner._run_single_target_scan(
-        args=scan_args,
-        vulnerability_profile=vulnerability_profile,
-        llm_client=llm_client,
-        target=scan_target,
+    return (
+        "ok"
+        if agent_scanner.run_single_target_scan(
+            cve_id=cve_id,
+            output_base=batch_args.scan_output_dir,
+            repo_base_path=batch_args.target_repos_root,
+            max_iterations=batch_args.max_iterations_cap,
+            vulnerability_profile=vulnerability_profile,
+            llm_client=llm_client,
+            target=scan_target,
+            verbose=batch_args.verbose,
+            stop_when_critical_complete=not batch_args.disable_critical_stop,
+            critical_stop_mode=batch_args.critical_stop_mode,
+            profile_base_path=profile_base_path,
+            software_profile_dirname=software_profile_dirname,
+        )
+        else "failed"
     )
 
 
@@ -512,25 +686,20 @@ def main() -> int:
     if not _validate_args(args):
         return 1
 
-    vuln_json = Path(args.vuln_json).expanduser()
-    repos_root = Path(args.repos_root).expanduser()
-    repo_profiles_dir, vuln_profiles_dir = _resolve_profile_dirs_from_args(args)
-    scan_output_dir = Path(args.scan_output_dir).expanduser()
-    args.scan_output_dir = str(scan_output_dir)
-
-    if not vuln_json.exists():
-        logger.error(f"vuln.json not found: {vuln_json}")
+    paths = _resolve_batch_scan_paths(args)
+    if paths is None:
         return 1
-    if not repos_root.exists():
-        logger.error(f"repos root not found: {repos_root}")
-        return 1
+    args.scan_output_dir = str(paths.scan_output_dir)
 
-    entries = _load_vuln_entries(vuln_json, limit=args.limit)
+    entries = _load_vuln_entries(paths.vuln_json, limit=args.limit)
     if not entries:
         logger.warning("No vulnerability entries found")
         return 0
 
-    logger.info(f"Loaded {len(entries)} vulnerabilities from {vuln_json}")
+    if not _ensure_source_inputs_available(args=args, paths=paths, entries=entries):
+        return 1
+
+    logger.info(f"Loaded {len(entries)} vulnerabilities from {paths.vuln_json}")
     profile_llm = create_llm_client(LLMConfig(provider=args.llm_provider, model=args.llm_name))
     scan_llm = create_llm_client(LLMConfig(provider=args.llm_provider, model=args.llm_name))
     text_retriever = build_text_retriever(
@@ -538,33 +707,26 @@ def main() -> int:
         device=args.similarity_device,
     )
 
-    software_cache: Dict[Tuple[str, str], object] = {}
-    regenerated_software_keys: Set[Tuple[str, str]] = set()
-    vulnerability_cache: Dict[Tuple[str, str], object] = {}
+    caches = _initialize_profile_caches(paths)
 
     logger.info("Ensuring latest software profiles for candidate repositories...")
     latest_repo_refs = _discover_latest_repo_refs(
-        repos_root=repos_root,
-        repo_profiles_dir=repo_profiles_dir,
+        repos_root=paths.target_repos_root,
+        repo_profiles_dir=paths.target_repo_profiles_dir,
         llm_client=profile_llm,
         force_regenerate_profiles=args.force_regenerate_profiles,
-        software_cache=software_cache,
-        regenerated_software_keys=regenerated_software_keys,
+        software_cache=caches.target_software_cache,
+        regenerated_software_keys=caches.regenerated_target_software_keys,
     )
     logger.info(f"Candidate repositories with latest profiles: {len(latest_repo_refs)}")
 
-    summary = {
-        "started_at": datetime.now().isoformat(),
-        "vuln_json": str(vuln_json),
-        "similarity_threshold": args.similarity_threshold,
-        "max_iterations_cap": args.max_iterations_cap,
-        "critical_stop_enabled": not args.disable_critical_stop,
-        "critical_stop_mode": args.critical_stop_mode,
-        "entries": [],
-    }
+    summary = _build_batch_summary(args, paths)
 
     total_scans = 0
     success_scans = 0
+    skipped_scans = 0
+    failed_scans = 0
+    failed_profile_generation = 0
 
     for vuln_index, entry in entries:
         repo_name = str(entry.get("repo_name", ""))
@@ -582,32 +744,33 @@ def main() -> int:
         source_profile = _ensure_software_profile(
             repo_name=repo_name,
             commit_hash=commit_hash,
-            repos_root=repos_root,
-            repo_profiles_dir=repo_profiles_dir,
+            repos_root=paths.source_repos_root,
+            repo_profiles_dir=paths.source_repo_profiles_dir,
             llm_client=profile_llm,
             force_regenerate=args.force_regenerate_profiles,
-            cache=software_cache,
-            regenerated_keys=regenerated_software_keys,
+            cache=caches.source_software_cache,
+            regenerated_keys=caches.regenerated_source_software_keys,
         )
         vulnerability_profile = _ensure_vulnerability_profile(
             vuln_index=vuln_index,
             repo_name=repo_name,
             commit_hash=commit_hash,
             cve_id=cve_id,
-            repos_root=repos_root,
-            repo_profiles_dir=repo_profiles_dir,
-            vuln_profiles_dir=vuln_profiles_dir,
+            repos_root=paths.source_repos_root,
+            repo_profiles_dir=paths.source_repo_profiles_dir,
+            vuln_profiles_dir=paths.vuln_profiles_dir,
             llm_client=profile_llm,
             force_regenerate=args.force_regenerate_profiles,
-            software_cache=software_cache,
-            regenerated_software_keys=regenerated_software_keys,
-            cache=vulnerability_cache,
+            software_cache=caches.source_software_cache,
+            regenerated_software_keys=caches.regenerated_source_software_keys,
+            cache=caches.vulnerability_cache,
             verbose=args.verbose,
-            vuln_json_path=str(vuln_json),
+            vuln_json_path=str(paths.vuln_json),
         )
 
         if not source_profile or not vulnerability_profile:
             logger.error(f"[Vuln {vuln_index}] Missing required profiles, skip")
+            failed_profile_generation += 1
             summary["entries"].append(
                 {
                     "index": vuln_index,
@@ -620,11 +783,15 @@ def main() -> int:
             continue
 
         source_ref = ProfileRef(repo_name=repo_name, commit_hash=commit_hash, profile=source_profile)
-        candidate_refs = [
-            ref
-            for cand_repo, ref in latest_repo_refs.items()
-            if args.include_same_repo or cand_repo != repo_name
-        ]
+        candidate_refs = list(latest_repo_refs.values())
+        if not args.include_same_repo:
+            # Batch auto-targeting should exclude same-repo candidates by repo identity
+            # even when source and target roots come from different directories.
+            candidate_refs = [
+                ref
+                for ref in candidate_refs
+                if ref.repo_name != source_ref.repo_name
+            ]
         ranked_candidates = _rank_similar_candidates(
             source_ref=source_ref,
             candidate_refs=candidate_refs,
@@ -676,21 +843,25 @@ def main() -> int:
 
         for candidate in similar_targets:
             total_scans += 1
-            ok = _run_target_scan(
+            scan_status = _run_target_scan(
                 batch_args=args,
-                repo_profiles_dir=repo_profiles_dir,
                 cve_id=cve_id,
                 vulnerability_profile=vulnerability_profile,
                 llm_client=scan_llm,
                 target=candidate,
             )
-            success_scans += int(ok)
+            if scan_status == "ok":
+                success_scans += 1
+            elif scan_status == "skipped":
+                skipped_scans += 1
+            else:
+                failed_scans += 1
             vuln_record["scan_results"].append(
                 {
                     "repo_name": candidate.profile_ref.repo_name,
                     "commit_hash": candidate.profile_ref.commit_hash,
                     "overall_similarity": candidate.metrics.overall_sim,
-                    "status": "ok" if ok else "failed",
+                    "status": scan_status,
                 }
             )
 
@@ -699,14 +870,31 @@ def main() -> int:
     summary["finished_at"] = datetime.now().isoformat()
     summary["total_scans"] = total_scans
     summary["successful_scans"] = success_scans
+    summary["skipped_scans"] = skipped_scans
+    summary["failed_profile_generation"] = failed_profile_generation
+    summary["failed_scans"] = failed_scans
 
-    scan_output_dir.mkdir(parents=True, exist_ok=True)
-    summary_path = scan_output_dir / f"batch-summary-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    paths.scan_output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = paths.scan_output_dir / f"batch-summary-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
     logger.info(f"Batch summary saved to: {summary_path}")
-    logger.info(f"Finished: {success_scans}/{total_scans} target scans succeeded")
-    return 0 if success_scans > 0 else 1
+    logger.info(
+        "Finished: %s ok, %s skipped, %s failed target scans, %s profile failures (target scans total=%s)",
+        success_scans,
+        skipped_scans,
+        failed_scans,
+        failed_profile_generation,
+        total_scans,
+    )
+    # Reused results are useful for summaries, but they should not hide fresh
+    # scan failures during a resumed run.
+    return (
+        0
+        if success_scans > 0
+        or (skipped_scans > 0 and failed_scans == 0 and failed_profile_generation == 0)
+        else 1
+    )
 
 
 if __name__ == "__main__":

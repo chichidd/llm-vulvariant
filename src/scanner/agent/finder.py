@@ -350,14 +350,8 @@ class AgenticVulnFinder:
         findings = []
         
         if self.memory:
-            progress = self.memory.get_progress()
             pending = self.memory.get_pending_files(max_priority=2)
-            progress_info = (
-                f"{progress['completed']}/{progress['total_files']} files scanned, "
-                f"{progress['findings']} findings. "
-                f"Priority-1: {progress['priority_1']['completed']}/{progress['priority_1']['total']}, "
-                f"Priority-2: {progress['priority_2']['completed']}/{progress['priority_2']['total']}."
-            )
+            progress_info = self.memory.format_progress_info()
             if pending:
                 progress_info += f" Pending: {pending[:50]}"
                 progress_info += "\nUse 'check_file_status' tool to get the status of specific files."

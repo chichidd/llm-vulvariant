@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 class SoftwareProfiler:
     """软件画像生成器 - 协调各个分析组件"""
     
-    _detection_rules = None
+    _detection_rules_cache: Dict[Path, Dict[str, Any]] = {}
     _rules_lock = threading.Lock()
     _C_API_ALIASES = {
         "open": {"fopen"},
@@ -211,29 +211,36 @@ class SoftwareProfiler:
     def _load_detection_rules(cls, rules_path: Path = None, output_dir: Path = None) -> Dict[str, Any]:
         """加载检测规则配置文件"""
         _empty_rule = {'data_sources': {}, 'data_formats': {}, 'processing_operations': {}}
+        resolved_rules_path = rules_path
+        if resolved_rules_path is None:
+            resolved_rules_path = _path_config['repo_root'] / "config" / "software_profile_rule.yaml"
+            if output_dir and Path(output_dir).exists():
+                save_config_path = Path(output_dir) / "software_profile_rule.yaml"
+                if save_config_path.exists():
+                    logger.info(f"Loading saved config from: {save_config_path}")
+                    resolved_rules_path = save_config_path
+        resolved_rules_path = Path(resolved_rules_path).expanduser()
+        cache_key = resolved_rules_path.resolve()
+
         with cls._rules_lock:
-            if cls._detection_rules is not None:
-                return cls._detection_rules
-            
-            if rules_path is None:
-                rules_path = _path_config['repo_root'] / "config" / "software_profile_rule.yaml"
-                if output_dir and Path(output_dir).exists():
-                    save_config_path = Path(output_dir) / "software_profile_rule.yaml"
-                    if save_config_path.exists():
-                        logger.info(f"Loading saved config from: {save_config_path}")
-                        rules_path = save_config_path
+            if cache_key in cls._detection_rules_cache:
+                return cls._detection_rules_cache[cache_key]
             try:
-                if rules_path.exists():
-                    with open(rules_path, 'r', encoding='utf-8') as f:
-                        cls._detection_rules = yaml.safe_load(f)
-                    logger.info(f"Loaded detection rules from {rules_path}")
+                if resolved_rules_path.exists():
+                    loaded_rules = yaml.safe_load(
+                        resolved_rules_path.read_text(encoding='utf-8')
+                    )
+                    if not isinstance(loaded_rules, dict):
+                        loaded_rules = _empty_rule
+                    logger.info(f"Loaded detection rules from {resolved_rules_path}")
                 else:
-                    logger.warning(f"Detection rules file not found: {rules_path}")
-                    cls._detection_rules = _empty_rule
+                    logger.warning(f"Detection rules file not found: {resolved_rules_path}")
+                    loaded_rules = _empty_rule
             except Exception as e:
                 logger.error(f"Failed to load detection rules: {e}")
-                cls._detection_rules = _empty_rule
-            return cls._detection_rules
+                loaded_rules = _empty_rule
+            cls._detection_rules_cache[cache_key] = loaded_rules
+            return loaded_rules
     
     def _save_config_to_output_dir(self):
         """将当前配置保存到输出目录"""
@@ -243,8 +250,10 @@ class SoftwareProfiler:
         try:
             config_save_path = self.output_dir / "software_profile_rule.yaml"
             # 直接保存完整的配置，确保所有内容都被保存
-            with open(config_save_path, 'w', encoding='utf-8') as f:
-                yaml.dump(self._detection_rules, f, allow_unicode=True, default_flow_style=False)
+            config_save_path.write_text(
+                yaml.dump(self._detection_rules, allow_unicode=True, default_flow_style=False),
+                encoding='utf-8',
+            )
             
             logger.info(f"Saved configuration to: {config_save_path}")
         except Exception as e:
@@ -271,6 +280,7 @@ class SoftwareProfiler:
         
         # 加载配置
         all_config = self._load_detection_rules(rules_path, output_dir=self.output_dir)
+        self._detection_rules = all_config
         self.detection_rules = {
             'data_sources': all_config.get('data_sources', {}),
             'data_formats': all_config.get('data_formats', {}),
@@ -812,12 +822,19 @@ class SoftwareProfiler:
             base_internal_dependencies = module.get('dependencies', [])
             if not isinstance(base_internal_dependencies, list):
                 base_internal_dependencies = []
+            preserved_dependencies = []
+            seen_preserved_dependencies = set()
             internal_dependencies = set(calls_modules)
             for dep_name in base_internal_dependencies:
                 if not isinstance(dep_name, str):
                     continue
                 normalized_dep_name = dep_name.strip()
-                if not normalized_dep_name or normalized_dep_name == module_name:
+                if not normalized_dep_name:
+                    continue
+                if normalized_dep_name not in seen_preserved_dependencies:
+                    preserved_dependencies.append(normalized_dep_name)
+                    seen_preserved_dependencies.add(normalized_dep_name)
+                if normalized_dep_name == module_name:
                     continue
                 if normalized_dep_name in module_name_to_files:
                     internal_dependencies.add(normalized_dep_name)
@@ -833,6 +850,7 @@ class SoftwareProfiler:
                 processing_operations=processing_operations,
                 external_dependencies=sorted(list(external_dependencies)),
                 internal_dependencies=sorted(list(internal_dependencies)),
+                dependencies=preserved_dependencies,
                 called_by_modules=sorted(list(called_by_modules)),
                 calls_modules=sorted(list(calls_modules))
             )

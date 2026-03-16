@@ -50,6 +50,16 @@ class DummyMemory:
             "priority_1": {"completed": 1, "total": 1},
         }
 
+    def format_progress_info(self):
+        progress = self.get_progress()
+        return (
+            f"{progress['completed']}/{progress['total_files']} files scanned, "
+            f"{progress['findings']} findings. "
+            f"Priority-1: {progress['priority_1']['completed']}/{progress['priority_1']['total']}, "
+            f"Priority-2: {progress.get('priority_2', {}).get('completed', 0)}/"
+            f"{progress.get('priority_2', {}).get('total', 0)}."
+        )
+
     def is_critical_complete(self):
         return True
 
@@ -118,6 +128,10 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
             "priority_1": {"completed": 1, "total": 2},
             "priority_2": {"completed": 1, "total": 3},
         },
+        format_progress_info=lambda: (
+            "3/10 files scanned, 1 findings. "
+            "Priority-1: 1/2, Priority-2: 1/3."
+        ),
         get_pending_files=lambda max_priority=2: ["a.py", "b.py"],
         get_scanned_files=lambda: ["done.py"],
         get_findings_summary=lambda: [{"file": "x.py", "type": "cmd", "confidence": "high"}],

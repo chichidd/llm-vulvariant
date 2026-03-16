@@ -3,15 +3,19 @@ set -euo pipefail
 
 # Run `software-profile p-analysis` for each first-level repo under data/repos.
 #
+# Shared path helper for profile-dir fallback logic.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+source "$SCRIPT_DIR/profile_paths.sh"
+
 # Examples:
 #   ./run_profiles.sh
 #   ./run_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir ~/vuln/profiles/soft --verbose
 #   ./run_profiles.sh --force-regenerate
-#   ./run_profiles.sh -- --verbose --some-other-flag 123
+#   ./run_profiles.sh -- --verbose
 #.  under llm-vulvariant: ./scripts/run_all_software_profiles.sh --llm-provider deepseek --output-dir ~/vuln/profiles/soft
 # Notes:
 # - Repo name A is the folder name under data/repos (first level only).
-# - You can pass any extra args; they will be forwarded to the command.
+# - Extra args must be supported by the current software-profile CLI.
 
 ROOT_DIR="${ROOT_DIR:-../data/repos}"
 
@@ -63,7 +67,7 @@ Examples:
   $0
   $0 --llm-provider openai --llm-name gpt-4.1 --output-dir ~/vuln/profiles/soft --verbose
   $0 --force-regenerate
-  $0 -- --verbose --dry-run
+  $0 -- --verbose
 EOF
 }
 
@@ -114,18 +118,11 @@ if command -v realpath >/dev/null 2>&1; then
 fi
 
 if [[ -n "$OUTPUT_DIR" ]]; then
-  # If OUTPUT_DIR is relative, make it absolute based on START_DIR.
-  if [[ "$OUTPUT_DIR" != /* ]]; then
-    OUTPUT_DIR="$START_DIR/$OUTPUT_DIR"
-  fi
-
-  # Normalize path if realpath is available; otherwise keep as-is.
-  if command -v realpath >/dev/null 2>&1; then
-    OUTPUT_DIR="$(realpath -m "$OUTPUT_DIR")"
-  fi
-
-  # Ensure output directory exists (so the tool can write into it).
+  OUTPUT_DIR="$(_profile_realpath "$OUTPUT_DIR")"
   mkdir -p "$OUTPUT_DIR"
+fi
+if [[ -n "$PROFILE_BASE_PATH" ]]; then
+  PROFILE_BASE_PATH="$(_profile_realpath "$PROFILE_BASE_PATH")"
 fi
 
 
@@ -160,7 +157,7 @@ fi
 # Pass the root directory so software-profile knows where to find repos
 BASE_CMD+=(--repo-base-path "$ROOT_DIR")
 
-# Forward any additional flags like --verbose, --enable-dee, etc.
+# Forward additional supported software-profile flags such as --verbose.
 BASE_CMD+=("${EXTRA_ARGS[@]}")
 
 
@@ -204,12 +201,3 @@ for repo_dir in "$ROOT_DIR"/*; do
     echo "=== Skipping (not a git repo): $repo_dir ==="
   fi
 done
-
-
-# software-profile   --repo-name ms-swift   --llm-provider openai --llm-name deepseek-chat      --enable-deep-analysis  --output-dir ~/vuln/profiles/soft --enable-deep-analysis
-
-# software-profile   --repo-name llama_index   --llm-provider openai --llm-name deepseek-chat     --enable-deep-analysis  --output-dir ~/vuln/profiles/soft --enable-deep-analysis
-
-# software-profile   --repo-name langchain   --llm-provider openai --llm-name deepseek-chat     --enable-deep-analysis  --output-dir ~/vuln/profiles/soft --enable-deep-analysis
-
-# software-profile   --repo-name llama_index   --llm-provider openai --llm-name deepseek-chat     --enable-deep-analysis  --output-dir ~/vuln/profiles/soft --enable-deep-analysis

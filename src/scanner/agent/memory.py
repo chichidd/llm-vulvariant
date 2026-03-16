@@ -150,6 +150,39 @@ class AgentMemoryManager:
         """Record an issue encountered during scan."""
         self.memory.issues.append(issue)
         self.save()
+
+    def count_statuses(self, file_status: Dict[str, str]) -> Dict[str, int]:
+        """Count file status values used for scan progress summaries."""
+        completed = sum(1 for s in file_status.values() if s == "completed")
+        pending = sum(1 for s in file_status.values() if s == "pending")
+        skipped = sum(1 for s in file_status.values() if s == "skipped")
+        not_tracked = sum(1 for s in file_status.values() if s == "not_tracked")
+        return {
+            "completed": completed,
+            "pending": pending,
+            "skipped": skipped,
+            "not_tracked": not_tracked,
+            "total": len(file_status),
+        }
+
+    def summarize_statuses(self, file_status: Dict[str, str]) -> str:
+        """Format a compact status summary string from a status map."""
+        counts = self.count_statuses(file_status)
+        return (
+            f"{counts['completed']} completed, {counts['pending']} pending, "
+            f"{counts['skipped']} skipped, "
+            f"{counts['not_tracked']} not tracked"
+        )
+
+    def format_progress_info(self) -> str:
+        """Format scan progress in a reusable human-readable form."""
+        progress = self.get_progress()
+        return (
+            f"{progress['completed']}/{progress['total_files']} files scanned, "
+            f"{progress['findings']} findings. "
+            f"Priority-1: {progress['priority_1']['completed']}/{progress['priority_1']['total']}, "
+            f"Priority-2: {progress['priority_2']['completed']}/{progress['priority_2']['total']}."
+        )
     
     def get_pending_files(self, max_priority: int = 3) -> List[str]:
         """Get pending files up to given priority, sorted by priority."""
@@ -167,8 +200,7 @@ class AgentMemoryManager:
     def get_progress(self) -> Dict[str, Any]:
         """Get scan progress statistics."""
         total = len(self.memory.file_status)
-        completed = sum(1 for s in self.memory.file_status.values() if s == "completed")
-        pending = sum(1 for s in self.memory.file_status.values() if s == "pending")
+        counts = self.count_statuses(self.memory.file_status)
         
         # Priority breakdown
         priority_stats = {1: {"total": 0, "completed": 0}, 2: {"total": 0, "completed": 0}}
@@ -182,8 +214,8 @@ class AgentMemoryManager:
         
         return {
             "total_files": total,
-            "completed": completed,
-            "pending": pending,
+            "completed": counts["completed"],
+            "pending": counts["pending"],
             "findings": len(self.memory.findings),
             "priority_1": priority_stats[1],
             "priority_2": priority_stats[2],

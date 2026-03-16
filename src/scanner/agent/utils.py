@@ -8,6 +8,91 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from utils.logger import get_logger
+from utils.llm_utils import extract_json_from_text
+
+logger = get_logger(__name__)
+
+
+def _is_compression_payload(payload: Dict[str, Any]) -> bool:
+    """Return whether a JSON object matches the iteration-compression schema."""
+    summary = payload.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return False
+    if "reasoning" in payload and not isinstance(payload["reasoning"], dict):
+        return False
+    if "failed_attempts" in payload and not isinstance(payload["failed_attempts"], list):
+        return False
+    if "next_step_insights" in payload and not isinstance(payload["next_step_insights"], list):
+        return False
+    if "next_steps" in payload and not isinstance(payload["next_steps"], list):
+        return False
+    if _contains_placeholder_values(payload):
+        return False
+    if not _has_meaningful_compression_context(payload):
+        return False
+    return True
+
+
+def _contains_placeholder_values(payload: Any) -> bool:
+    """Return whether the payload still contains prompt placeholder markers."""
+    if isinstance(payload, str):
+        return re.fullmatch(r"<[^>\n]+>", payload.strip()) is not None
+    if isinstance(payload, dict):
+        return any(_contains_placeholder_values(value) for value in payload.values())
+    if isinstance(payload, list):
+        return any(_contains_placeholder_values(value) for value in payload)
+    return False
+
+
+def _has_meaningful_compression_context(payload: Dict[str, Any]) -> bool:
+    """Require real reasoning context so summary-only echoes are rejected."""
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict):
+        motivation = reasoning.get("motivation")
+        analysis = reasoning.get("analysis")
+        conclusions = reasoning.get("conclusions")
+        if isinstance(motivation, str) and motivation.strip():
+            return True
+        if isinstance(analysis, str) and analysis.strip():
+            return True
+        if isinstance(conclusions, str) and conclusions.strip():
+            return True
+        if isinstance(conclusions, list) and any(
+            isinstance(item, str) and item.strip() for item in conclusions
+        ):
+            return True
+
+    failed_attempts = payload.get("failed_attempts")
+    if isinstance(failed_attempts, list):
+        for attempt in failed_attempts:
+            if isinstance(attempt, dict):
+                what = attempt.get("what")
+                why_failed = attempt.get("why_failed")
+                if isinstance(what, str) and what.strip():
+                    return True
+                if isinstance(why_failed, str) and why_failed.strip():
+                    return True
+            elif isinstance(attempt, str) and attempt.strip():
+                return True
+
+    for key in ("next_step_insights", "next_steps"):
+        values = payload.get(key)
+        if isinstance(values, list) and any(
+            isinstance(item, str) and item.strip() for item in values
+        ):
+            return True
+    return False
+
+
+def _extract_compression_payload(response_text: str) -> Optional[Dict[str, Any]]:
+    """Extract the last valid compression payload from model output."""
+    return extract_json_from_text(
+        response_text,
+        validator=_is_compression_payload,
+        prefer_last=True,
+    )
+
 
 def _to_dict(obj: Any) -> Dict[str, Any]:
     """Best-effort conversion of dataclass-like objects into dictionaries."""
@@ -158,19 +243,16 @@ def compress_iteration_conversation(
             ]
         )
         content = response.content if hasattr(response, "content") else str(response)
-        json_match = re.search(r"```(?:json)?\s*({.*?})\s*```", content, re.DOTALL)
-        if json_match:
-            # Prefer fenced JSON because providers sometimes prepend explanatory
-            # prose around the payload even when the prompt forbids it.
-            compressed_data["content"] = json.loads(json_match.group(1))
-        else:
-            compressed_data["content"] = json.loads(content)
+        parsed = _extract_compression_payload(content)
+        if parsed is None:
+            raise ValueError("No valid compression JSON object found in response")
+        compressed_data["content"] = parsed
         compressed_data["iteration_number"] = iteration
         compressed_data["compression_timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
         return compressed_data
     except Exception as exc:  # pylint: disable=broad-except
         if verbose:
-            print(f"Failed to compress iteration {iteration}: {exc}")
+            logger.warning(f"Failed to compress iteration {iteration}: {exc}")
         return {
             "iteration_number": iteration,
             "error": str(exc),

@@ -27,6 +27,27 @@ def _mk_profile(name: str, desc: str, modules, apps=None, users=None, dep_count=
     )
 
 
+def test_module_dependency_similarity_uses_raw_module_dependencies():
+    left = _mk_profile(
+        "left",
+        "demo",
+        modules=[
+            ModuleInfo(name="api", dependencies=["core"]),
+        ],
+    )
+    right = _mk_profile(
+        "right",
+        "demo",
+        modules=[
+            ModuleInfo(name="api", dependencies=["core"]),
+        ],
+    )
+
+    metrics = compute_profile_similarity(left, right)
+
+    assert metrics.module_dependency_import_sim > 0.0
+
+
 def test_module_dependency_import_tokens_include_internal_external_and_project_level():
     profile = _mk_profile(
         name="src",

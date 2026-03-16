@@ -1,6 +1,6 @@
 ---
 name: llm-vulvariant-full-workflow
-description: Execute the complete llm-vulvariant workflow from profile construction to scanning and exploitability/report generation. Use when given a vulnerability list (vuln.json-compatible) plus affected-version repositories and an optional explicit target repository list, and you need one reproducible run plan that outputs scan results and exploitable submission artifacts.
+description: Execute the complete llm-vulvariant workflow from profile construction to scanning and exploitability/report generation. Use when given a vulnerability list (vuln.json-compatible) plus affected-version repositories and an optional explicit target repository subset materialized as a curated target root, and you need one reproducible run plan that outputs scan results and exploitable submission artifacts.
 ---
 
 # LLM-VulVariant Full Workflow
@@ -90,12 +90,16 @@ fi
 "${cmd[@]}"
 ```
 
-For an explicit allowlist instead:
+For an explicit allowlist, first materialize a dedicated target root containing only the repos you want to scan. `batch_scanner` walks every repo under `TARGET_REPOS_ROOT`, so prebuilding a few profiles alone does not restrict the scan set.
 
 ```bash
 cd "$APP_DIR"
+TARGET_REPOS_ROOT="$ROOT/data/repos-allowlist"
+TARGET_SOFT_PROFILES_DIR="$PROFILE_BASE/soft-allowlist"
+mkdir -p "$TARGET_REPOS_ROOT" "$TARGET_SOFT_PROFILES_DIR"
 while IFS= read -r repo || [[ -n "$repo" ]]; do
   [[ -n "$repo" ]] || continue
+  ln -sfn "$ROOT/data/repos/$repo" "$TARGET_REPOS_ROOT/$repo"
   cmd=(
     software-profile
     --repo-name "$repo"
@@ -119,9 +123,11 @@ cd "$APP_DIR"
 cmd=(
   python -m cli.batch_scanner
   --vuln-json "$VULN_JSON"
-  --repos-root "$TARGET_REPOS_ROOT"
+  --source-repos-root "$SOURCE_REPOS_ROOT"
+  --target-repos-root "$TARGET_REPOS_ROOT"
   --profile-base-path "$PROFILE_BASE"
-  --soft-profiles-dir "$TARGET_SOFT_PROFILES_DIR"
+  --source-soft-profiles-dir "$SOURCE_SOFT_PROFILES_DIR"
+  --target-soft-profiles-dir "$TARGET_SOFT_PROFILES_DIR"
   --vuln-profiles-dir "$VULN_PROFILES_DIR"
   --scan-output-dir "$SCAN_OUTPUT_DIR"
   --similarity-threshold 0.7
@@ -141,9 +147,11 @@ Only the first vuln entry:
 cd "$APP_DIR"
 python -m cli.batch_scanner \
   --vuln-json "$VULN_JSON" \
-  --repos-root "$TARGET_REPOS_ROOT" \
+  --source-repos-root "$SOURCE_REPOS_ROOT" \
+  --target-repos-root "$TARGET_REPOS_ROOT" \
   --profile-base-path "$PROFILE_BASE" \
-  --soft-profiles-dir "$TARGET_SOFT_PROFILES_DIR" \
+  --source-soft-profiles-dir "$SOURCE_SOFT_PROFILES_DIR" \
+  --target-soft-profiles-dir "$TARGET_SOFT_PROFILES_DIR" \
   --vuln-profiles-dir "$VULN_PROFILES_DIR" \
   --scan-output-dir "$SCAN_OUTPUT_DIR" \
   --similarity-threshold 0.7 \
@@ -183,13 +191,14 @@ ls -l "$EXP_OUTPUT_DIR"
 ```
 
 Expected artifacts:
-- `exploitable_findings.json`
-- `exploitable_findings.csv`
-- `submission_index.json`
-- `exploitable_security_report.md`
+- `exploitable_findings_<run-id>.json`
+- `exploitable_findings_<run-id>.csv`
+- `exploitable_findings_<run-id>_submission_index.json`
+- `exploitable_findings_<run-id>_exploitable_security_report.md`
 
 ## Notes
 
 - Source vulnerability profiles should be built from `data/repos` unless `vuln.json` explicitly points elsewhere.
-- For NVIDIA targets, keep source profiles at `profiles/soft`, but scan with `--repos-root "$ROOT/data/repos-nvidia"` and `--soft-profiles-dir "$ROOT/profiles/soft-nvidia"`.
-- Deprecated aliases still work, but skills should use `--soft-profile-dir` and `--soft-profiles-dir`.
+- For NVIDIA targets, keep source profiles at `profiles/soft`, and scan with `--target-repos-root "$ROOT/data/repos-nvidia"` plus `--target-soft-profiles-dir "$ROOT/profiles/soft-nvidia"`.
+- Batch scan commands must pass explicit source/target roots and software-profile dirs.
+- To scan only an allowlist, `TARGET_REPOS_ROOT` itself must contain only the allowed repos.

@@ -19,6 +19,9 @@ SIMILARITY_THRESHOLD="${SIMILARITY_THRESHOLD:-0.7}"
 FALLBACK_TOP_N="${FALLBACK_TOP_N:-3}"
 CRITICAL_STOP_MODE="${CRITICAL_STOP_MODE:-min}"
 SOFTWARE_PROFILE_TIMEOUT="${SOFTWARE_PROFILE_TIMEOUT:-1800}"
+EXPLOITABILITY_TIMEOUT="${EXPLOITABILITY_TIMEOUT:-1800}"
+LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
+LLM_NAME="${LLM_NAME:-}"
 RUN_ID="${RUN_ID:-nvidia-full-$(date +%Y%m%d-%H%M%S)}"
 
 LOG_DIR="$ROOT"
@@ -144,13 +147,18 @@ for d in "$REPOS_NVIDIA"/*; do
   fi
 
   echo "[$(date -Iseconds)] [profile $idx/$total] build $repo@$commit" | tee -a "$STATUS_LOG"
-  if timeout "$SOFTWARE_PROFILE_TIMEOUT" python -m cli.software \
-      --repo-name "$repo" \
-      --repo-base-path "$REPOS_NVIDIA" \
-      --target-version "$commit" \
-      --output-dir "$REPO_PROFILES_NVIDIA" \
-      --llm-provider deepseek \
-      >> "$PROFILE_LOG" 2>&1; then
+  profile_cmd=(
+    python -m cli.software
+    --repo-name "$repo"
+    --repo-base-path "$REPOS_NVIDIA"
+    --target-version "$commit"
+    --output-dir "$REPO_PROFILES_NVIDIA"
+    --llm-provider "$LLM_PROVIDER"
+  )
+  if [[ -n "$LLM_NAME" ]]; then
+    profile_cmd+=(--llm-name "$LLM_NAME")
+  fi
+  if timeout "$SOFTWARE_PROFILE_TIMEOUT" "${profile_cmd[@]}" >> "$PROFILE_LOG" 2>&1; then
     ok=$((ok+1))
     echo "[$(date -Iseconds)] [profile $idx/$total] ok $repo@$commit" | tee -a "$STATUS_LOG"
   else
@@ -161,18 +169,25 @@ done
 echo "[$(date -Iseconds)] Stage 3 summary: total=$total ok=$ok skip=$skip fail=$fail" | tee -a "$STATUS_LOG"
 
 echo "[$(date -Iseconds)] Stage 4/5: run batch scanner" | tee -a "$STATUS_LOG"
-python -m cli.batch_scanner \
-  --vuln-json "$VULN_JSON" \
-  --repos-root "$REPOS_NVIDIA" \
-  --soft-profiles-dir "$REPO_PROFILES_NVIDIA" \
-  --vuln-profiles-dir "$VULN_PROFILES_DIR" \
-  --scan-output-dir "$SCAN_OUTPUT_DIR" \
-  --similarity-threshold "$SIMILARITY_THRESHOLD" \
-  --fallback-top-n "$FALLBACK_TOP_N" \
-  --max-iterations-cap "$MAX_ITERATIONS_CAP" \
-  --critical-stop-mode "$CRITICAL_STOP_MODE" \
-  --llm-provider deepseek \
-  >> "$SCAN_LOG" 2>&1
+scan_cmd=(
+  python -m cli.batch_scanner
+  --vuln-json "$VULN_JSON"
+  --source-repos-root "$SOURCE_REPOS_ROOT"
+  --source-soft-profiles-dir "$SOURCE_REPO_PROFILES"
+  --target-repos-root "$REPOS_NVIDIA"
+  --target-soft-profiles-dir "$REPO_PROFILES_NVIDIA"
+  --vuln-profiles-dir "$VULN_PROFILES_DIR"
+  --scan-output-dir "$SCAN_OUTPUT_DIR"
+  --similarity-threshold "$SIMILARITY_THRESHOLD"
+  --fallback-top-n "$FALLBACK_TOP_N"
+  --max-iterations-cap "$MAX_ITERATIONS_CAP"
+  --critical-stop-mode "$CRITICAL_STOP_MODE"
+  --llm-provider "$LLM_PROVIDER"
+)
+if [[ -n "$LLM_NAME" ]]; then
+  scan_cmd+=(--llm-name "$LLM_NAME")
+fi
+"${scan_cmd[@]}" >> "$SCAN_LOG" 2>&1
 echo "[$(date -Iseconds)] Stage 4 completed" | tee -a "$STATUS_LOG"
 
 echo "[$(date -Iseconds)] Stage 5/5: run exploitability and generate reports" | tee -a "$STATUS_LOG"
@@ -187,7 +202,7 @@ python -m cli.exploitability \
   --claude-runtime-root "$RUNTIME_ROOT" \
   --claude-runtime-mode run \
   --run-id "$RUN_ID" \
-  --timeout 1800 \
+  --timeout "$EXPLOITABILITY_TIMEOUT" \
   >> "$EXP_LOG" 2>&1
 echo "[$(date -Iseconds)] Stage 5 completed" | tee -a "$STATUS_LOG"
 

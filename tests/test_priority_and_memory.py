@@ -57,13 +57,16 @@ def test_agent_memory_manager_deduplicate_findings_and_progress(tmp_path):
     )
 
     mgr.mark_file("a.py", "completed")
+    mgr.mark_file("b.py", "skipped")
     progress = mgr.get_progress()
+    summary = mgr.summarize_statuses(mgr.memory.file_status)
 
     assert added is True
     assert duplicate is False
     assert progress["completed"] == 1
     assert progress["priority_1"]["completed"] == 1
-    assert mgr.get_pending_files(max_priority=2) == ["b.py"]
+    assert mgr.get_pending_files(max_priority=2) == []
+    assert summary == "1 completed, 0 pending, 1 skipped, 0 not tracked"
 
 
 def test_agent_memory_manager_reload_existing_state(tmp_path):

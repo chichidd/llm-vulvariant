@@ -1,4 +1,4 @@
-from utils.llm_utils import parse_llm_json
+from utils.llm_utils import extract_json_from_text, extract_json_object_matches, parse_llm_json
 
 
 class RepairLLM:
@@ -81,3 +81,94 @@ def test_parse_llm_json_returns_none_when_repair_remains_invalid():
     )
     assert parsed is None
     assert repair_llm.calls == 2
+
+
+def test_extract_json_from_text_skips_non_matching_objects():
+    response = (
+        'prefix {"note": "tmp"}\n'
+        '```json\n{"verdict": "EXPLOITABLE", "confidence": "high"}\n```'
+    )
+
+    parsed = extract_json_from_text(response, required_keys=["verdict"])
+
+    assert parsed == {"verdict": "EXPLOITABLE", "confidence": "high"}
+
+
+def test_extract_json_from_text_validator_skips_schema_echo():
+    response = (
+        'Schema: {"verdict":"EXPLOITABLE|CONDITIONALLY_EXPLOITABLE|LIBRARY_RISK|NOT_EXPLOITABLE"}\n'
+        'Final: {"verdict":"NOT_EXPLOITABLE","confidence":"medium"}'
+    )
+
+    parsed = extract_json_from_text(
+        response,
+        required_keys=["verdict"],
+        validator=lambda payload: payload["verdict"] in {
+            "EXPLOITABLE",
+            "CONDITIONALLY_EXPLOITABLE",
+            "LIBRARY_RISK",
+            "NOT_EXPLOITABLE",
+        },
+    )
+
+    assert parsed == {"verdict": "NOT_EXPLOITABLE", "confidence": "medium"}
+
+
+def test_extract_json_object_matches_skip_nested_objects():
+    response = (
+        '{"verdict":"NOT_EXPLOITABLE","sink_analysis":{"confirmed":false}}\n'
+        '{"verdict":"EXPLOITABLE","confidence":"high"}'
+    )
+
+    matches = extract_json_object_matches(response)
+
+    assert [match.payload for match in matches] == [
+        {
+            "verdict": "NOT_EXPLOITABLE",
+            "sink_analysis": {"confirmed": False},
+        },
+        {
+            "confirmed": False,
+        },
+        {
+            "verdict": "EXPLOITABLE",
+            "confidence": "high",
+        },
+    ]
+
+
+def test_extract_json_from_text_match_filter_skips_inline_example():
+    response = (
+        'Example format: {"verdict":"EXPLOITABLE","confidence":"high"}\n'
+        'Final: {"verdict":"NOT_EXPLOITABLE","confidence":"medium"}'
+    )
+
+    parsed = extract_json_from_text(
+        response,
+        required_keys=["verdict"],
+        validator=lambda payload: payload["verdict"] in {"EXPLOITABLE", "NOT_EXPLOITABLE"},
+        prefer_last=True,
+        match_filter=lambda match, previous_match, text: "Example format:" not in text[max(0, match.start - 32):match.start],
+    )
+
+    assert parsed == {"verdict": "NOT_EXPLOITABLE", "confidence": "medium"}
+
+
+def test_parse_llm_json_finds_nested_payload_inside_wrapper():
+    response = '{"result":{"description":"ok","target_application":[],"target_user":[]}}'
+
+    parsed = parse_llm_json(
+        response,
+        required_keys=["description", "target_application", "target_user"],
+        expected_types={
+            "description": str,
+            "target_application": list,
+            "target_user": list,
+        },
+    )
+
+    assert parsed == {
+        "description": "ok",
+        "target_application": [],
+        "target_user": [],
+    }
