@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,6 +20,7 @@ from utils.claude_cli import (
     run_claude_cli,
 )
 from utils.logger import get_logger
+from profiler.software.module_analyzer.taxonomy_loader import load_ai_infra_taxonomy
 
 logger = get_logger(__name__)
 
@@ -113,19 +113,7 @@ class SkillModuleAnalyzer:
         return skill_root if skill_root.exists() else None
 
     def _load_taxonomy(self) -> Dict[str, Any]:
-        if not self.skill_root:
-            return {}
-        scripts_dir = self.skill_root / "scripts"
-        sys.path.insert(0, str(scripts_dir))
-        try:
-            taxonomy_mod = __import__("ai_infra_taxonomy")
-            return getattr(taxonomy_mod, "AI_INFRA_TAXONOMY", {})
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(f"Failed to import ai_infra_taxonomy: {exc}")
-            return {}
-        finally:
-            if sys.path and sys.path[0] == str(scripts_dir):
-                sys.path.pop(0)
+        return load_ai_infra_taxonomy(self.skill_root)
 
     def _resolve_output_dir(
         self,

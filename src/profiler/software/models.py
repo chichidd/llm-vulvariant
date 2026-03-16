@@ -1,15 +1,10 @@
-"""
-软件画像数据模型
+"""软件画像数据模型。"""
 
-包含软件画像相关的所有数据类定义：
-- ModuleInfo: 模块信息
-- DataFlowPattern: 数据流模式
-- SoftwareProfile: 软件画像主类
-"""
+from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
-import json
 
 
 # 扩展名到语言的映射
@@ -83,7 +78,8 @@ class ModuleInfo:
     # 依赖特征
     external_dependencies: List[str] = field(default_factory=list)    # 外部库依赖
     internal_dependencies: List[str] = field(default_factory=list)    # 内部模块依赖
-    
+    dependencies: List[str] = field(default_factory=list)             # 原始模块分析依赖
+
     # 调用关系（来自调用图）
     called_by_modules: List[str] = field(default_factory=list)        # 被哪些模块调用
     calls_modules: List[str] = field(default_factory=list)            # 调用哪些模块
@@ -103,6 +99,8 @@ class ModuleInfo:
             "called_by_modules": self.called_by_modules,
             "calls_modules": self.calls_modules,
         }
+        if self.dependencies:
+            data["dependencies"] = self.dependencies
         return data
     
     @classmethod
@@ -118,6 +116,7 @@ class ModuleInfo:
             processing_operations=data.get("processing_operations", []),
             external_dependencies=data.get("external_dependencies", []),
             internal_dependencies=data.get("internal_dependencies", []),
+            dependencies=data.get("dependencies", []),
             called_by_modules=data.get("called_by_modules", []),
             calls_modules=data.get("calls_modules", []),
         )
@@ -140,6 +139,16 @@ class DataFlowPattern:
             "intermediate_operations": self.intermediate_operations,
             "file_paths": self.file_paths,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DataFlowPattern":
+        return cls(
+            pattern_type=data.get("pattern_type", ""),
+            source_apis=data.get("source_apis", []),
+            sink_apis=data.get("sink_apis", []),
+            intermediate_operations=data.get("intermediate_operations", []),
+            file_paths=data.get("file_paths", []),
+        )
 
 
 @dataclass
@@ -175,6 +184,20 @@ class SoftwareProfile:
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
+        serialized_modules = [
+            module.to_dict()
+            if isinstance(module, ModuleInfo)
+            else ModuleInfo.from_dict(module).to_dict()
+            for module in self.modules
+            if isinstance(module, (ModuleInfo, dict))
+        ]
+        serialized_patterns = [
+            pattern.to_dict()
+            if isinstance(pattern, DataFlowPattern)
+            else DataFlowPattern.from_dict(pattern).to_dict()
+            for pattern in self.data_flow_patterns
+            if isinstance(pattern, (DataFlowPattern, dict))
+        ]
         result = {
             "basic_info": {
                 "name": self.name,
@@ -184,14 +207,11 @@ class SoftwareProfile:
                 "target_user": self.target_user,
             },
             "repo_info": self.repo_info,
-            "modules": self.modules,
+            "modules": serialized_modules,
         }
 
-        if self.modules and hasattr(self.modules[0], "to_dict"):
-            result["modules"] = [m.to_dict() for m in self.modules]
-        
-        if self.data_flow_patterns:
-            result["data_flow_patterns"] = [p.to_dict() for p in self.data_flow_patterns]
+        if serialized_patterns:
+            result["data_flow_patterns"] = serialized_patterns
         
         if self.common_data_sources:
             result["common_data_sources"] = self.common_data_sources
@@ -227,36 +247,31 @@ class SoftwareProfile:
         repo_info = data.get("repo_info", {})
         if not isinstance(repo_info, dict):
             repo_info = {}
-        
-        # 解析模块信息 - 统一从modules字段解析
-        modules = []
-        if "modules" in data:
-            modules_data = data["modules"]
-            if modules_data and isinstance(modules_data, list):
-                # 判断是否是ModuleInfo格式（包含enhanced字段）
-                if isinstance(modules_data[0], dict) and "external_dependencies" in modules_data[0]:
-                    # 新格式：直接包含ModuleInfo的完整字段
-                    modules = [ModuleInfo.from_dict(m) for m in modules_data]
-                else:
-                    # 旧格式或简单格式：可能只有基本字段
-                    modules = modules_data
-        
-        # 兼容旧版本的enhanced_modules字段
-        if "enhanced_modules" in data:
-            enhanced_modules_data = data["enhanced_modules"]
-            if enhanced_modules_data:
-                modules = [ModuleInfo.from_dict(m) for m in enhanced_modules_data]
-        
-        # 解析数据流模式
-        data_flow_patterns = []
-        if "data_flow_patterns" in data:
-            data_flow_patterns = [DataFlowPattern(**p) for p in data["data_flow_patterns"]]
-        
-        # 解析调用图统计
+
+        modules_data = data.get("modules", [])
+        modules = [
+            module
+            if isinstance(module, ModuleInfo)
+            else ModuleInfo.from_dict(module)
+            for module in modules_data
+            if isinstance(module, (ModuleInfo, dict))
+        ]
+
+        data_flow_patterns_data = data.get("data_flow_patterns", [])
+        data_flow_patterns = [
+            pattern
+            if isinstance(pattern, DataFlowPattern)
+            else DataFlowPattern.from_dict(pattern)
+            for pattern in data_flow_patterns_data
+            if isinstance(pattern, (DataFlowPattern, dict))
+        ]
+
         call_graph_stats = data.get("call_graph_stats", {})
-        
-        # 解析依赖详情
         deps_detailed = data.get("dependencies_detailed", {})
+        if not isinstance(call_graph_stats, dict):
+            call_graph_stats = {}
+        if not isinstance(deps_detailed, dict):
+            deps_detailed = {}
         
         return cls(
             name=basic.get("name", ""),

@@ -12,13 +12,14 @@ Key design:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import _path_config
 from utils.claude_cli import (
@@ -29,9 +30,128 @@ from utils.claude_cli import (
     merge_aggregated_usage_summaries,
     run_claude_cli,
 )
+from utils.io_utils import write_atomic_json
 from utils.logger import get_logger
+from utils.llm_utils import extract_json_from_text, extract_json_object_matches
 
 logger = get_logger(__name__)
+
+VALID_EXPLOITABILITY_VERDICTS = {
+    "EXPLOITABLE",
+    "CONDITIONALLY_EXPLOITABLE",
+    "LIBRARY_RISK",
+    "NOT_EXPLOITABLE",
+}
+RETRYABLE_RESULT_VERDICTS = {"ERROR", "UNKNOWN"}
+STRUCTURED_EXPLOITABILITY_VERDICTS = VALID_EXPLOITABILITY_VERDICTS | RETRYABLE_RESULT_VERDICTS
+EXPLOITABILITY_OUTPUT_STATE_MISSING = "missing"
+EXPLOITABILITY_OUTPUT_STATE_INVALID = "invalid"
+EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS = "in_progress"
+EXPLOITABILITY_OUTPUT_STATE_COMPLETE = "complete"
+FINDINGS_FRESHNESS_STATE_MISSING = "missing"
+FINDINGS_FRESHNESS_STATE_READY = "ready"
+FINDINGS_FRESHNESS_STATE_INVALID = "invalid"
+
+
+def normalize_exploitability_verdict(verdict: Any) -> str:
+    """Normalize verdict text into the persisted underscore enum format."""
+    if not isinstance(verdict, str):
+        return ""
+    normalized = re.sub(r"[\s-]+", "_", verdict.strip().upper())
+    return re.sub(r"_+", "_", normalized)
+
+
+def order_findings_stably(vulnerabilities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return findings sorted by canonical payload so ids stay stable across reruns."""
+    ordered_pairs = sorted(
+        enumerate(vulnerabilities),
+        key=lambda item: (
+            json.dumps(item[1], sort_keys=True, ensure_ascii=False, separators=(",", ":")),
+            item[0],
+        ),
+    )
+    return [vulnerability for _, vulnerability in ordered_pairs]
+
+
+def compute_findings_signature(vulnerabilities: List[Dict[str, Any]]) -> str:
+    """Build a stable signature for the current findings set."""
+    payload = json.dumps(
+        order_findings_stably(vulnerabilities),
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def load_findings_freshness(findings_path: Path) -> Tuple[str, Optional[int], Optional[str]]:
+    """Load the current findings freshness state, count, and signature."""
+    if not findings_path.exists():
+        return FINDINGS_FRESHNESS_STATE_MISSING, None, None
+    try:
+        findings_data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(f"Failed to load findings {findings_path}: {exc}")
+        return FINDINGS_FRESHNESS_STATE_INVALID, None, None
+    if not isinstance(findings_data, dict):
+        logger.warning(f"Findings payload is not a JSON object: {findings_path}")
+        return FINDINGS_FRESHNESS_STATE_INVALID, None, None
+    vulnerabilities = findings_data.get("vulnerabilities", [])
+    if not isinstance(vulnerabilities, list):
+        logger.warning(f"Findings payload is missing a valid vulnerabilities list: {findings_path}")
+        return FINDINGS_FRESHNESS_STATE_INVALID, None, None
+    return FINDINGS_FRESHNESS_STATE_READY, len(vulnerabilities), compute_findings_signature(vulnerabilities)
+
+
+def get_exploitability_output_state(exploitability_data: Optional[Dict[str, Any]]) -> str:
+    """Return whether exploitability output is missing, in progress, invalid, or complete."""
+    if exploitability_data is None:
+        return EXPLOITABILITY_OUTPUT_STATE_MISSING
+
+    metadata = exploitability_data.get("metadata")
+    results = exploitability_data.get("results")
+    if not isinstance(metadata, dict) or not isinstance(results, list):
+        return EXPLOITABILITY_OUTPUT_STATE_INVALID
+
+    completed_at = metadata.get("completed_at")
+    total_vulnerabilities = metadata.get("total_vulnerabilities")
+    if not isinstance(completed_at, str) or not completed_at.strip():
+        return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
+    if not isinstance(total_vulnerabilities, int) or total_vulnerabilities < 0:
+        return EXPLOITABILITY_OUTPUT_STATE_INVALID
+    if len(results) != total_vulnerabilities:
+        return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
+    if any(
+        isinstance(item, dict)
+        and normalize_exploitability_verdict(item.get("verdict")) in RETRYABLE_RESULT_VERDICTS
+        for item in results
+    ):
+        return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
+    return EXPLOITABILITY_OUTPUT_STATE_COMPLETE
+
+
+def get_exploitability_output_state_for_findings(
+    exploitability_data: Optional[Dict[str, Any]],
+    findings_path: Path,
+) -> str:
+    """Resolve exploitability output state against the current findings file."""
+    output_state = get_exploitability_output_state(exploitability_data)
+    if output_state != EXPLOITABILITY_OUTPUT_STATE_COMPLETE or exploitability_data is None:
+        return output_state
+
+    findings_state, _, current_findings_signature = load_findings_freshness(findings_path)
+    if findings_state == FINDINGS_FRESHNESS_STATE_MISSING:
+        return output_state
+    if findings_state != FINDINGS_FRESHNESS_STATE_READY:
+        return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
+
+    metadata = exploitability_data.get("metadata", {})
+    saved_signature = metadata.get("findings_signature") if isinstance(metadata, dict) else None
+    if isinstance(saved_signature, str) and saved_signature.strip():
+        if saved_signature == current_findings_signature:
+            return output_state
+        return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
+    return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
 
 
 class SkillExploitabilityChecker:
@@ -68,6 +188,142 @@ class SkillExploitabilityChecker:
     def _skill_exists(self) -> bool:
         """Check if the skill exists."""
         return self._get_skill_path().exists()
+
+    @staticmethod
+    def _normalize_finding_id(finding_id: Any) -> str:
+        """Normalize finding identifiers used in persisted result rows."""
+        if isinstance(finding_id, str):
+            return finding_id.strip()
+        return ""
+
+    @classmethod
+    def _finding_id_within_scope(cls, finding_id: Any, total_vulns: int) -> bool:
+        """Return whether a persisted finding id still belongs to the current findings set."""
+        normalized = cls._normalize_finding_id(finding_id)
+        match = re.fullmatch(r"vuln_(\d+)", normalized)
+        if match is None:
+            return True
+        return int(match.group(1)) < total_vulns
+
+    @staticmethod
+    def _finding_matches_current(saved_finding: Any, current_finding: Dict[str, Any]) -> bool:
+        """Return whether a saved finding still matches the current finding payload."""
+        if not isinstance(saved_finding, dict):
+            return False
+        return saved_finding == current_finding
+
+    @classmethod
+    def _classify_persisted_result(
+        cls,
+        item: Dict[str, Any],
+        current_total_vulns: Optional[int] = None,
+        current_findings: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> str:
+        """Classify one persisted result row against the current findings set."""
+        finding_id = cls._normalize_finding_id(item.get("finding_id"))
+        if finding_id:
+            if current_total_vulns is not None and not cls._finding_id_within_scope(
+                finding_id,
+                current_total_vulns,
+            ):
+                return "stale_scope"
+            if current_findings is not None:
+                current_finding = current_findings.get(finding_id)
+                if current_finding is None:
+                    return "stale_scope"
+                saved_finding = item.get("original_finding")
+                if isinstance(saved_finding, dict) and not cls._finding_matches_current(
+                    saved_finding,
+                    current_finding,
+                ):
+                    return "stale_changed"
+            if cls._is_retryable_result(item):
+                return "retryable"
+        return "keep"
+
+    @staticmethod
+    def _is_retryable_result(item: Dict[str, Any]) -> bool:
+        """Return whether a saved result should be retried on resume."""
+        verdict = normalize_exploitability_verdict(item.get("verdict"))
+        return verdict in RETRYABLE_RESULT_VERDICTS
+
+    @classmethod
+    def _get_processed_ids(cls, results: List[Dict[str, Any]]) -> set[str]:
+        """Return finding ids that should count as completed for this run."""
+        processed_ids: set[str] = set()
+        for item in results:
+            if cls._is_retryable_result(item):
+                continue
+            finding_id = cls._normalize_finding_id(item.get("finding_id"))
+            if finding_id:
+                processed_ids.add(finding_id)
+        return processed_ids
+
+    @staticmethod
+    def _is_analysis_payload(payload: Dict[str, Any]) -> bool:
+        """Return whether the parsed JSON looks like a concrete analysis payload."""
+        verdict = normalize_exploitability_verdict(payload.get("verdict"))
+        # Reject schema echoes like "EXPLOITABLE|...|NOT_EXPLOITABLE" and
+        # only accept concrete verdicts produced by the skill, including
+        # structured retryable states that resume logic persists on disk.
+        return verdict in STRUCTURED_EXPLOITABILITY_VERDICTS
+
+    @staticmethod
+    def _looks_like_example_payload(
+        text: str,
+        start: int,
+        end: int,
+        previous_object_end: Optional[int] = None,
+    ) -> bool:
+        """Return whether a JSON object appears to be an inline example instead of the final answer."""
+        prefix_start = max(previous_object_end or 0, start - 160)
+        prefix_window = text[prefix_start:start]
+
+        if re.search(r"\b(final|actual|answer|result|conclusion)\b", prefix_window, flags=re.IGNORECASE):
+            return False
+        # Only reject clearly illustrative prefixes. Bare "Schema:" / "Output schema:"
+        # are ambiguous in Claude output and can prefix the final concrete payload.
+        if re.search(
+            r"\bexample\b|\bsample\b|e\.g\.",
+            prefix_window,
+            flags=re.IGNORECASE,
+        ):
+            return True
+        return False
+
+    @classmethod
+    def _extract_analysis_payload(cls, text: str) -> Optional[Dict[str, Any]]:
+        """Extract a structured exploitability analysis payload from text."""
+        return extract_json_from_text(
+            text,
+            required_keys=["verdict"],
+            validator=cls._is_analysis_payload,
+            prefer_last=True,
+            match_filter=lambda match, previous_match, full_text: not cls._looks_like_example_payload(
+                full_text,
+                match.start,
+                match.end,
+                previous_object_end=None if previous_match is None else previous_match.end,
+            ),
+        )
+
+    @staticmethod
+    def _strip_inline_json_objects(text: str) -> str:
+        """Remove inline JSON objects so verdict inference only sees prose."""
+        top_level_matches: List[Any] = []
+        for match in extract_json_object_matches(text):
+            if top_level_matches and match.start >= top_level_matches[-1].start and match.end <= top_level_matches[-1].end:
+                continue
+            top_level_matches.append(match)
+
+        chunks: List[str] = []
+        cursor = 0
+        for match in top_level_matches:
+            chunks.append(text[cursor:match.start])
+            cursor = match.end
+
+        chunks.append(text[cursor:])
+        return " ".join(chunk.strip() for chunk in chunks if chunk.strip())
 
     def check_single(
         self,
@@ -114,15 +370,49 @@ class SkillExploitabilityChecker:
             logger.error(f"Failed to load findings: {e}")
             return self._error_result(f"Failed to load findings: {e}")
 
-        if not vulnerabilities:
-            logger.info(f"No vulnerabilities found in {findings_path}")
-            return self._create_empty_result(findings_path)
-
-        logger.info(f"Analyzing {len(vulnerabilities)} vulnerabilities from {findings_path}")
+        ordered_vulnerabilities = order_findings_stably(vulnerabilities)
+        current_findings_by_id = {
+            f"vuln_{idx:03d}": vuln
+            for idx, vuln in enumerate(ordered_vulnerabilities)
+            if isinstance(vuln, dict)
+        }
+        findings_signature = compute_findings_signature(ordered_vulnerabilities)
 
         runtime_dir = Path(claude_config_dir) if claude_config_dir else self._default_claude_config_dir
         self._ensure_claude_runtime_dir(runtime_dir)
         self._active_claude_config_dir = runtime_dir
+
+        if not ordered_vulnerabilities:
+            logger.info(f"No vulnerabilities found in {findings_path}")
+            result_doc = self._init_or_load_results(
+                output_path=output_path,
+                findings_path=findings_path,
+                repo_path=repo_path,
+                software_profile_path=software_profile_path,
+                total_vulns=0,
+                current_findings=current_findings_by_id,
+                findings_signature=findings_signature,
+                run_id=run_id,
+                claude_config_dir=runtime_dir,
+            )
+            result_doc["metadata"]["completed_at"] = datetime.now().isoformat()
+            result_doc = self._save_results(
+                output_path,
+                result_doc,
+                current_findings=current_findings_by_id,
+            )
+            return {
+                "status": "success",
+                "message": "No vulnerabilities to analyze",
+                "findings_path": str(findings_path),
+                "output_path": str(output_path),
+                "num_analyzed": 0,
+                "summary": result_doc.get("summary", {}),
+                "llm_usage_summary": result_doc.get("metadata", {}).get("llm_usage_summary", {}),
+                "results": [],
+            }
+
+        logger.info(f"Analyzing {len(ordered_vulnerabilities)} vulnerabilities from {findings_path}")
 
         # Initialize or load existing results
         result_doc = self._init_or_load_results(
@@ -130,23 +420,29 @@ class SkillExploitabilityChecker:
             findings_path=findings_path,
             repo_path=repo_path,
             software_profile_path=software_profile_path,
-            total_vulns=len(vulnerabilities),
+            total_vulns=len(ordered_vulnerabilities),
+            current_findings=current_findings_by_id,
+            findings_signature=findings_signature,
             run_id=run_id,
             claude_config_dir=runtime_dir,
         )
 
         # Get already processed indices
-        processed_ids = {r.get("finding_id") for r in result_doc.get("results", [])}
+        # Keep retryable rows out of the processed set so resumed runs revisit them.
+        processed_ids = self._get_processed_ids(result_doc.get("results", []))
         
         # Process each vulnerability
-        for idx, vuln in enumerate(vulnerabilities):
+        for idx, vuln in enumerate(ordered_vulnerabilities):
             finding_id = f"vuln_{idx:03d}"
             
             if finding_id in processed_ids:
-                logger.info(f"[{idx+1}/{len(vulnerabilities)}] Skipping {finding_id} (already processed)")
+                logger.info(f"[{idx+1}/{len(ordered_vulnerabilities)}] Skipping {finding_id} (already processed)")
                 continue
             
-            logger.info(f"[{idx+1}/{len(vulnerabilities)}] Analyzing {finding_id}: {vuln.get('file_path', 'unknown')}")
+            logger.info(
+                f"[{idx+1}/{len(ordered_vulnerabilities)}] Analyzing {finding_id}: "
+                f"{vuln.get('file_path', 'unknown')}"
+            )
             
             # Prepare evidence directory for Docker PoC verification
             evidence_dir = output_path.parent / "evidence" / finding_id
@@ -161,23 +457,36 @@ class SkillExploitabilityChecker:
                 evidence_dir=evidence_dir,
             )
             
-            # Append result and save
+            # Replace any stale in-memory entry before saving the refreshed result.
+            result_doc["results"] = [
+                item for item in result_doc.get("results", [])
+                if item.get("finding_id") != finding_id
+            ]
             result_doc["results"].append(vuln_result)
             self._update_summary(result_doc)
-            self._save_results(output_path, result_doc)
+            result_doc = self._save_results(
+                output_path,
+                result_doc,
+                current_findings=current_findings_by_id,
+            )
+            processed_ids = self._get_processed_ids(result_doc.get("results", []))
             
             logger.info(f"  -> Verdict: {vuln_result.get('verdict', 'UNKNOWN')}")
             if vuln_result.get('verdict') == 'EXPLOITABLE':
                 logger.info(f"     Source: {vuln_result.get('source_analysis')}")
         # Final update
         result_doc["metadata"]["completed_at"] = datetime.now().isoformat()
-        self._save_results(output_path, result_doc)
+        result_doc = self._save_results(
+            output_path,
+            result_doc,
+            current_findings=current_findings_by_id,
+        )
         
         return {
             "status": "success",
             "findings_path": str(findings_path),
             "output_path": str(output_path),
-            "num_analyzed": len(vulnerabilities),
+            "num_analyzed": len(ordered_vulnerabilities),
             "summary": result_doc.get("summary", {}),
             "llm_usage_summary": result_doc.get("metadata", {}).get("llm_usage_summary", {}),
         }
@@ -231,7 +540,9 @@ class SkillExploitabilityChecker:
 
         # File fallback: if stdout is missing/invalid (or only UNKNOWN/ERROR),
         # try loading structured JSON from RESULT_JSON_PATH.
-        needs_fallback = not analysis or str(analysis.get("verdict", "")).upper() in {"UNKNOWN", "ERROR"}
+        needs_fallback = not analysis or normalize_exploitability_verdict(
+            analysis.get("verdict")
+        ) in {"UNKNOWN", "ERROR"}
         if needs_fallback and result_json_path:
             file_analysis = self._load_analysis_from_output_path(
                 result_json_path,
@@ -369,29 +680,10 @@ class SkillExploitabilityChecker:
         if not text:
             return None
 
-        payload: Optional[Dict[str, Any]] = None
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, dict):
-                payload = parsed
-        except json.JSONDecodeError:
-            json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
-            candidate = json_match.group(1).strip() if json_match else text
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, dict):
-                    payload = parsed
-            except json.JSONDecodeError:
-                object_match = re.search(r"\{.*\}", candidate, re.DOTALL)
-                if object_match:
-                    try:
-                        parsed = json.loads(object_match.group(0))
-                        if isinstance(parsed, dict):
-                            payload = parsed
-                    except json.JSONDecodeError:
-                        payload = None
+        payload = self._extract_analysis_payload(text)
 
-        if payload:
+        if payload is not None:
+            payload["verdict"] = normalize_exploitability_verdict(payload.get("verdict"))
             logger.info(f"Loaded analysis JSON from file fallback: {output_json_path}")
         return payload
 
@@ -464,31 +756,28 @@ class SkillExploitabilityChecker:
             return None
         
         result_text = claude_output["result"]
-        
-        # Try to extract JSON from the result text
-        # Remove markdown code blocks if present
-        json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', result_text, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            # Try to parse the whole result as JSON
-            json_str = result_text.strip()
-        
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse analysis JSON: {e}")
-            logger.debug(f"JSON string: {json_str[:500]}")
+        parsed = self._extract_analysis_payload(result_text)
+        if parsed is not None:
+            parsed["verdict"] = normalize_exploitability_verdict(parsed.get("verdict"))
+            return parsed
 
-            inferred_verdict = self._infer_verdict_from_text(result_text)
-            inferred_confidence = self._infer_confidence_from_text(result_text)
+        logger.warning("Failed to parse analysis JSON: no concrete analysis payload found")
+        logger.debug(f"JSON text: {str(result_text)[:500]}")
 
-            # Try to create a minimal result from the text
-            return {
-                "verdict": inferred_verdict or "UNKNOWN",
-                "confidence": inferred_confidence or "low",
-                "raw_result": result_text[:2000],
-            }
+        # Ignore inline JSON examples/schemas here so malformed objects do not
+        # get reinterpreted as concrete verdicts by the free-text fallback.
+        prose_text = self._strip_inline_json_objects(result_text)
+        inferred_verdict = self._infer_verdict_from_text(prose_text)
+        inferred_confidence = self._infer_confidence_from_text(prose_text)
+        if inferred_verdict is None:
+            return None
+
+        # Try to create a minimal result from the text
+        return {
+            "verdict": inferred_verdict,
+            "confidence": inferred_confidence or "low",
+            "raw_result": result_text[:2000],
+        }
 
     def _infer_verdict_from_text(self, text: str) -> Optional[str]:
         """Infer verdict from free-form Claude text."""
@@ -551,7 +840,7 @@ class SkillExploitabilityChecker:
 
         # If Claude failed to return structured JSON but evidence shows exploit
         # confirmation, upgrade UNKNOWN/ERROR to EXPLOITABLE.
-        verdict = str(analysis.get("verdict", "")).upper()
+        verdict = normalize_exploitability_verdict(analysis.get("verdict"))
         if verdict in {"", "UNKNOWN", "ERROR"}:
             if analysis["docker_verification"].get("exploit_confirmed"):
                 analysis["verdict"] = "EXPLOITABLE"
@@ -661,6 +950,8 @@ class SkillExploitabilityChecker:
         repo_path: Path,
         software_profile_path: Optional[Path],
         total_vulns: int,
+        current_findings: Dict[str, Dict[str, Any]],
+        findings_signature: str,
         run_id: Optional[str] = None,
         claude_config_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
@@ -671,21 +962,55 @@ class SkillExploitabilityChecker:
                 if "results" in existing and "metadata" in existing:
                     original_count = len(existing.get("results", []))
                     retained_results = []
-                    dropped_results = []
+                    retry_dropped_results = []
+                    stale_changed_count = 0
+                    stale_scope_count = 0
                     retry_count = 0
+                    existing_metadata = existing.setdefault("metadata", {})
+                    previous_findings_signature = existing_metadata.get("findings_signature")
+                    findings_signature_changed = (
+                        isinstance(previous_findings_signature, str)
+                        and previous_findings_signature != findings_signature
+                    )
                     for item in existing.get("results", []):
-                        verdict = str(item.get("verdict", "")).upper()
-                        if verdict in {"ERROR", "UNKNOWN"}:
+                        classification = self._classify_persisted_result(
+                            item,
+                            current_total_vulns=total_vulns,
+                            current_findings=current_findings,
+                        )
+                        if classification == "retryable":
                             retry_count += 1
-                            dropped_results.append(item)
+                            retry_dropped_results.append(item)
+                            continue
+                        if classification == "stale_scope":
+                            stale_scope_count += 1
+                            continue
+                        if classification == "stale_changed":
+                            stale_changed_count += 1
                             continue
                         retained_results.append(item)
 
-                    metadata = existing.setdefault("metadata", {})
+                    metadata = existing_metadata
+                    previous_total_vulns = metadata.get("total_vulnerabilities")
+                    metadata["total_vulnerabilities"] = total_vulns
+                    metadata["findings_signature"] = findings_signature
                     metadata.setdefault(
                         "llm_usage_retried_attempts_summary",
                         aggregate_usage_summaries([]),
                     )
+                    findings_changed = (
+                        previous_total_vulns != total_vulns
+                        or findings_signature_changed
+                        or stale_scope_count > 0
+                        or stale_changed_count > 0
+                    )
+                    if findings_changed:
+                        logger.info(
+                            "Findings set changed, refreshing resume metadata (%s -> %s)",
+                            previous_total_vulns,
+                            total_vulns,
+                        )
+                        metadata["completed_at"] = None
                     if retry_count > 0:
                         logger.info(
                             f"Resuming with retry: dropping {retry_count} ERROR/UNKNOWN results, "
@@ -695,10 +1020,17 @@ class SkillExploitabilityChecker:
                         metadata["llm_usage_retried_attempts_summary"] = merge_aggregated_usage_summaries(
                             [
                                 metadata.get("llm_usage_retried_attempts_summary"),
-                                self._aggregate_result_llm_usage_summary(dropped_results),
+                                self._aggregate_result_llm_usage_summary(retry_dropped_results),
                             ]
                         )
                         metadata["completed_at"] = None
+                        self._update_summary(existing)
+                    elif stale_scope_count > 0 or stale_changed_count > 0:
+                        logger.info(
+                            "Dropping %s stale results outside the current findings set",
+                            stale_scope_count + stale_changed_count,
+                        )
+                        existing["results"] = retained_results
                         self._update_summary(existing)
                     else:
                         logger.info(f"Resuming from {original_count} existing results")
@@ -708,8 +1040,8 @@ class SkillExploitabilityChecker:
                     if claude_config_dir:
                         metadata["claude_runtime_dir"] = str(claude_config_dir)
                     return existing
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"Failed to resume existing exploitability results from {output_path}: {exc}")
         
         return {
             "metadata": {
@@ -717,6 +1049,7 @@ class SkillExploitabilityChecker:
                 "software_profile": str(software_profile_path) if software_profile_path else None,
                 "repository": str(repo_path),
                 "total_vulnerabilities": total_vulns,
+                "findings_signature": findings_signature,
                 "started_at": datetime.now().isoformat(),
                 "completed_at": None,
                 "run_id": run_id,
@@ -754,7 +1087,7 @@ class SkillExploitabilityChecker:
         }
         
         for r in result_doc.get("results", []):
-            verdict = r.get("verdict", "ERROR").upper()
+            verdict = normalize_exploitability_verdict(r.get("verdict")) or "ERROR"
             key = verdict_map.get(verdict, "error")
             summary[key] += 1
         
@@ -786,22 +1119,117 @@ class SkillExploitabilityChecker:
             ]
         )
 
-    def _save_results(self, output_path: Path, result_doc: Dict[str, Any]) -> None:
-        """Save results to file."""
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(result_doc, indent=2, ensure_ascii=False), 
-            encoding="utf-8"
-        )
+    @staticmethod
+    def _merge_results_for_save(
+        existing_results: List[Dict[str, Any]],
+        current_results: List[Dict[str, Any]],
+        current_total_vulns: Optional[int] = None,
+        current_findings: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Merge current in-memory results with the latest on-disk results by finding id."""
+        current_by_id: Dict[str, Dict[str, Any]] = {}
+        merged_results: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
 
-    def _create_empty_result(self, findings_path: Path) -> Dict[str, Any]:
-        """Create result for empty findings."""
-        return {
-            "status": "success",
-            "message": "No vulnerabilities to analyze",
-            "findings_path": str(findings_path),
-            "results": []
-        }
+        for item in current_results:
+            finding_id = SkillExploitabilityChecker._normalize_finding_id(item.get("finding_id"))
+            if finding_id:
+                current_by_id[finding_id] = item
+
+        for item in existing_results:
+            finding_id = SkillExploitabilityChecker._normalize_finding_id(item.get("finding_id"))
+            if finding_id:
+                if finding_id in seen_ids:
+                    continue
+                classification = SkillExploitabilityChecker._classify_persisted_result(
+                    item,
+                    current_total_vulns=current_total_vulns,
+                    current_findings=current_findings,
+                )
+                if classification not in {"keep", "retryable"}:
+                    continue
+                if finding_id in current_by_id:
+                    merged_results.append(current_by_id[finding_id])
+                    seen_ids.add(finding_id)
+                    continue
+                # Do not resurrect stale ERROR/UNKNOWN rows that a resumed run
+                # intentionally dropped for retry.
+                if classification == "retryable":
+                    continue
+                merged_results.append(item)
+                seen_ids.add(finding_id)
+                continue
+            merged_results.append(item)
+
+        for item in current_results:
+            finding_id = SkillExploitabilityChecker._normalize_finding_id(item.get("finding_id"))
+            if finding_id and finding_id in seen_ids:
+                continue
+            if finding_id:
+                seen_ids.add(finding_id)
+            merged_results.append(item)
+
+        return merged_results
+
+    def _build_results_doc_for_save(
+        self,
+        output_path: Path,
+        result_doc: Dict[str, Any],
+        current_findings: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Build the merged result document that should be written to disk."""
+        merged_doc: Dict[str, Any] = dict(result_doc)
+        merged_doc["metadata"] = dict(result_doc.get("metadata", {}))
+        merged_doc["summary"] = dict(result_doc.get("summary", {}))
+        merged_doc["results"] = list(result_doc.get("results", []))
+
+        if output_path.exists():
+            try:
+                existing = json.loads(output_path.read_text(encoding="utf-8"))
+                existing_results = existing.get("results", [])
+                if isinstance(existing_results, list):
+                    current_total_vulns = merged_doc.get("metadata", {}).get("total_vulnerabilities")
+                    merged_doc["results"] = self._merge_results_for_save(
+                        existing_results=existing_results,
+                        current_results=merged_doc["results"],
+                        current_total_vulns=current_total_vulns if isinstance(current_total_vulns, int) else None,
+                        current_findings=current_findings,
+                    )
+                    existing_metadata = existing.get("metadata", {})
+                    if (
+                        isinstance(existing_metadata, dict)
+                        and get_exploitability_output_state(existing) == EXPLOITABILITY_OUTPUT_STATE_COMPLETE
+                    ):
+                        merged_metadata = merged_doc.setdefault("metadata", {})
+                        merged_completed_at = merged_metadata.get("completed_at")
+                        if not isinstance(merged_completed_at, str) or not merged_completed_at.strip():
+                            merged_metadata["completed_at"] = existing_metadata["completed_at"]
+                            if (
+                                get_exploitability_output_state(merged_doc)
+                                != EXPLOITABILITY_OUTPUT_STATE_COMPLETE
+                            ):
+                                merged_metadata["completed_at"] = None
+            except Exception as exc:
+                logger.warning(f"Failed to merge existing exploitability results from {output_path}: {exc}")
+
+        self._update_summary(merged_doc)
+        return merged_doc
+
+    def _save_results(
+        self,
+        output_path: Path,
+        result_doc: Dict[str, Any],
+        current_findings: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Save results to file and return the merged document that was written."""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        merged_doc = self._build_results_doc_for_save(
+            output_path,
+            result_doc,
+            current_findings=current_findings,
+        )
+        write_atomic_json(output_path, merged_doc)
+        return merged_doc
 
     def _create_error_vuln_result(
         self,

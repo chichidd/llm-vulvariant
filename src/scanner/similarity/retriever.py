@@ -316,6 +316,7 @@ def _module_dependency_import_tokens(profile: SoftwareProfile) -> Set[str]:
             continue
 
         internal_dep_lists = [
+            module.dependencies,
             module.internal_dependencies,
             module.calls_modules,
             module.called_by_modules,
@@ -401,4 +402,3 @@ def _text_similarity(
             logger.debug(f"Embedding similarity failed, using lexical fallback: {exc}")
 
     return _jaccard_similarity(_tokenize_text(left), _tokenize_text(right))
-

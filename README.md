@@ -29,13 +29,13 @@ LLM 驱动的漏洞变种发现与可利用性验证框架。
         ▼              ▼                           ▼                        ▼
   ┌──────────────────────────┐   ┌──────────────────────────────────────────────────┐
   │  profiles/               │   │  results/                                        │
-  │  ├── soft/<repo>/<hash>/ │   │  ├── scan/<cve>/<repo>-<hash>/                  │
+  │  ├── soft/<repo>/<hash>/ │   │  ├── <scan-output-dir>/<cve>/<repo>-<hash12>/   │
   │  │   └── software_       │   │  │   ├── agentic_vuln_findings.json             │
   │  │       profile.json    │   │  │   ├── conversation_history.json              │
   │  └── vuln/<repo>/<cve>/  │   │  │   ├── exploitability.json                    │
   │      └── vulnerability_  │   │  │   ├── reports/security_report.md             │
   │          profile.json    │   │  │   └── evidence/<finding>/                    │
-  │                          │   │  └── exploitable_findings.{json,csv}            │
+  │                          │   │  └── exploitable_findings_<run-id>.*            │
   └──────────────────────────┘   └──────────────────────────────────────────────────┘
 ```
 
@@ -221,6 +221,11 @@ python -m cli.exploitability \
   --run-id demo-001
 ```
 
+上述命令会写出 `results/exploitability/exploitable_findings_demo-001.json`、
+`results/exploitability/exploitable_findings_demo-001.csv`、
+`results/exploitability/exploitable_findings_demo-001_submission_index.json` 和
+`results/exploitability/exploitable_findings_demo-001_exploitable_security_report.md`。
+
 ### 6.2 自动目标选择扫描
 
 不指定目标仓库，让系统通过画像相似度自动选择 Top-K 目标：
@@ -243,8 +248,10 @@ scanner \
 ```bash
 batch-scanner \
   --vuln-json ~/vuln/data/vuln.json \
-  --repos-root ~/vuln/data/repos \
-  --soft-profiles-dir ~/vuln/profiles/soft \
+  --source-repos-root ~/vuln/data/repos \
+  --target-repos-root ~/vuln/data/repos \
+  --source-soft-profiles-dir ~/vuln/profiles/soft \
+  --target-soft-profiles-dir ~/vuln/profiles/soft \
   --vuln-profiles-dir ~/vuln/profiles/vuln \
   --scan-output-dir results/full-batch-scan \
   --similarity-threshold 0.70 \
@@ -276,7 +283,7 @@ python -m cli.exploitability \
 bash scripts/run_nvidia_full_pipeline.sh
 ```
 
-该脚本按顺序执行 5 个阶段：验证漏洞画像 → 链接源画像 → 构建目标软件画像 → 批量扫描 → 可利用性验证与报告。可通过环境变量控制所有参数。
+该脚本按顺序执行 5 个阶段：验证漏洞画像 → 链接源画像 → 构建目标软件画像 → 批量扫描 → 可利用性验证与报告。可通过环境变量控制主要路径、阈值、LLM provider/model 和 timeout 参数。
 
 ---
 
@@ -360,9 +367,10 @@ Agent 特性：
 
 | 路径 | 说明 |
 |------|------|
-| `exploitable_findings.json` | 所有可利用发现的聚合 JSON |
-| `exploitable_findings.csv` | 聚合 CSV（表格化） |
-| `submission_index.json` | 按 CVE 分组的提交索引 |
+| `<prefix>_<run-id>.json` | 所有可利用发现的聚合 JSON |
+| `<prefix>_<run-id>.csv` | 聚合 CSV（表格化） |
+| `<prefix>_<run-id>_submission_index.json` | 按 CVE 分组的提交索引 |
+| `<prefix>_<run-id>_exploitable_security_report.md` | 聚合提交报告 |
 
 ---
 
@@ -402,7 +410,7 @@ pytest -q tests/test_profile_models_and_storage.py
 
 **Software profile not found**
 - 确认 `profiles/soft/<repo>/<commit>/software_profile.json` 已存在
-- 检查 `--soft-profiles-dir` 是否指向正确目录
+- 检查 `--source-soft-profiles-dir` 和 `--target-soft-profiles-dir` 是否指向正确目录
 
 **Vulnerability profile not found**
 - 先执行 `vuln-profile` 生成

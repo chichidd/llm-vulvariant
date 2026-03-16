@@ -21,9 +21,6 @@ from config import (
     DEFAULT_SOFTWARE_PROFILE_DIRNAME,
     DEFAULT_VULN_PROFILE_DIRNAME,
     _path_config,
-    resolve_profile_base_path,
-    resolve_software_profiles_path,
-    resolve_vuln_profiles_path,
 )
 from llm import LLMConfig, create_llm_client
 from scanner.agent import AgenticVulnFinder, load_software_profile, load_vulnerability_profile
@@ -36,6 +33,7 @@ from scanner.similarity import (
     resolve_profile_commit,
     select_profile_ref,
 )
+from utils.io_utils import write_atomic_text
 from utils.git_utils import (
     checkout_commit,
     get_git_commit,
@@ -45,6 +43,10 @@ from utils.git_utils import (
 )
 from utils.language import dedupe_languages as _dedupe_languages, detect_languages as detect_repo_languages
 from utils.logger import get_logger
+try:
+    from cli.common import resolve_profile_dirs
+except ImportError:  # pragma: no cover - direct script execution fallback
+    from common import resolve_profile_dirs
 
 logger = get_logger(__name__)
 
@@ -254,16 +256,11 @@ def _validate_args(args: argparse.Namespace) -> bool:
 
 
 def _resolve_profile_dirs(args: argparse.Namespace) -> tuple[Path, Path]:
-    profile_base_path = resolve_profile_base_path(getattr(args, "profile_base_path", None))
-    repo_profiles_dir = resolve_software_profiles_path(
-        profile_base_path=profile_base_path,
+    return resolve_profile_dirs(
+        profile_base_path=getattr(args, "profile_base_path", None),
         software_profile_dirname=getattr(args, "software_profile_dirname", None),
-    )
-    vuln_profiles_dir = resolve_vuln_profiles_path(
-        profile_base_path=profile_base_path,
         vuln_profile_dirname=getattr(args, "vuln_profile_dirname", None),
     )
-    return repo_profiles_dir, vuln_profiles_dir
 
 
 def _resolve_manual_targets(
@@ -377,50 +374,59 @@ def _save_scan_outputs(
     target: ScanTarget,
 ) -> None:
     output_path = output_dir / "agentic_vuln_findings.json"
-    with open(output_path, "w", encoding="utf-8") as handle:
-        json.dump(results, handle, indent=2, ensure_ascii=False)
+    write_atomic_text(
+        output_path,
+        json.dumps(results, indent=2, ensure_ascii=False),
+    )
 
     conversation_path = output_dir / "conversation_history.json"
-    with open(conversation_path, "w", encoding="utf-8") as handle:
-        json.dump(make_serializable(finder.conversation_history), handle, indent=2, ensure_ascii=False)
+    write_atomic_text(
+        conversation_path,
+        json.dumps(make_serializable(finder.conversation_history), indent=2, ensure_ascii=False),
+    )
 
     if target.similarity:
         similarity_path = output_dir / "target_similarity.json"
-        with open(similarity_path, "w", encoding="utf-8") as handle:
-            json.dump(target.similarity.to_dict(), handle, indent=2, ensure_ascii=False)
+        write_atomic_text(
+            similarity_path,
+            json.dumps(target.similarity.to_dict(), indent=2, ensure_ascii=False),
+        )
 
     logger.info(f"Results saved to: {output_path}")
     logger.info(f"Conversation history saved to: {conversation_path}")
 
 
-def _resolve_soft_profiles_dir_for_scan(args: argparse.Namespace) -> Path:
-    profile_base_path = getattr(args, "profile_base_path", None)
-    software_profile_dirname = getattr(args, "software_profile_dirname", None)
-
-    # Backward compatibility for callers still passing an explicit profile directory.
-    if software_profile_dirname is None:
-        repo_profiles_dir = getattr(args, "repo_profiles_dir", None)
-        if repo_profiles_dir is not None:
-            resolved_repo_profiles_dir = Path(repo_profiles_dir).expanduser()
-            profile_base_path = resolved_repo_profiles_dir.parent
-            software_profile_dirname = resolved_repo_profiles_dir.name
-
-    return resolve_software_profiles_path(
+def _resolve_soft_profiles_dir_for_scan(
+    profile_base_path: Optional[str],
+    software_profile_dirname: Optional[str],
+) -> Path:
+    return resolve_profile_dirs(
         profile_base_path=profile_base_path,
         software_profile_dirname=software_profile_dirname,
-    )
+        vuln_profile_dirname=None,
+    )[0]
 
 
-def _run_single_target_scan(
-    args: argparse.Namespace,
+def run_single_target_scan(
+    *,
+    cve_id: str,
+    output_base: str | Path,
+    repo_base_path: str | Path,
+    max_iterations: int,
     vulnerability_profile,
     llm_client,
     target: ScanTarget,
+    verbose: bool = False,
+    stop_when_critical_complete: bool = False,
+    critical_stop_mode: str = "min",
+    profile_base_path: Optional[str] = None,
+    software_profile_dirname: Optional[str] = None,
 ) -> bool:
-    repo_base_path = Path(getattr(args, "repo_base_path", _path_config["repo_base_path"])).expanduser()
-    if not repo_base_path.is_absolute():
-        repo_base_path = _path_config["repo_root"] / repo_base_path
-    target_repo_path = repo_base_path / target.repo_name
+    """Run one target scan through a stable public interface used by both CLIs."""
+    resolved_repo_base_path = Path(repo_base_path).expanduser()
+    if not resolved_repo_base_path.is_absolute():
+        resolved_repo_base_path = _path_config["repo_root"] / resolved_repo_base_path
+    target_repo_path = resolved_repo_base_path / target.repo_name
     if not target_repo_path.exists():
         logger.error(f"Repository not found: {target_repo_path}")
         return False
@@ -445,7 +451,10 @@ def _run_single_target_scan(
             changed_commit = True
 
         logger.info(f"Loading software profile: {target.repo_name}@{target.commit_hash[:12]}...")
-        soft_profiles_dir = _resolve_soft_profiles_dir_for_scan(args)
+        soft_profiles_dir = _resolve_soft_profiles_dir_for_scan(
+            profile_base_path=profile_base_path,
+            software_profile_dirname=software_profile_dirname,
+        )
         software_profile = load_software_profile(
             target.repo_name,
             target.commit_hash,
@@ -457,13 +466,13 @@ def _run_single_target_scan(
             )
             return False
 
-        output_dir = resolve_output_dir(
-            cve_id=args.cve,
+        target_output_dir = resolve_output_dir(
+            cve_id=cve_id,
             target_repo=target.repo_name,
             target_commit=target.commit_hash,
-            output_base=args.output,
+            output_base=output_base,
         )
-        output_dir.mkdir(parents=True, exist_ok=True)
+        target_output_dir.mkdir(parents=True, exist_ok=True)
 
         scan_languages = _resolve_scan_languages(target_repo_path, software_profile)
         codeql_database_names = _resolve_codeql_database_names(target, scan_languages, software_profile)
@@ -488,16 +497,16 @@ def _run_single_target_scan(
             repo_path=target_repo_path,
             software_profile=software_profile,
             vulnerability_profile=vulnerability_profile,
-            max_iterations=args.max_iterations,
-            stop_when_critical_complete=getattr(args, "stop_when_critical_complete", False),
-            critical_stop_mode=getattr(args, "critical_stop_mode", "min"),
-            verbose=args.verbose,
-            output_dir=output_dir,
+            max_iterations=max_iterations,
+            stop_when_critical_complete=stop_when_critical_complete,
+            critical_stop_mode=critical_stop_mode,
+            verbose=verbose,
+            output_dir=target_output_dir,
             languages=scan_languages,
             codeql_database_names=codeql_database_names,
         )
         results = finder.run()
-        _save_scan_outputs(output_dir, finder, results, target)
+        _save_scan_outputs(target_output_dir, finder, results, target)
 
         vulnerabilities = results.get("vulnerabilities", []) if isinstance(results, dict) else []
         logger.info(
@@ -564,11 +573,19 @@ def main() -> int:
             f"{target.repo_name}@{target.commit_hash[:12]}"
         )
         logger.info("=" * 80)
-        success = _run_single_target_scan(
-            args=args,
+        success = run_single_target_scan(
+            cve_id=args.cve,
+            output_base=args.output,
+            repo_base_path=getattr(args, "repo_base_path", _path_config["repo_base_path"]),
+            max_iterations=args.max_iterations,
             vulnerability_profile=vulnerability_profile,
             llm_client=llm_client,
             target=target,
+            verbose=args.verbose,
+            stop_when_critical_complete=getattr(args, "stop_when_critical_complete", False),
+            critical_stop_mode=getattr(args, "critical_stop_mode", "min"),
+            profile_base_path=getattr(args, "profile_base_path", None),
+            software_profile_dirname=getattr(args, "software_profile_dirname", None),
         )
         success_count += int(success)
 

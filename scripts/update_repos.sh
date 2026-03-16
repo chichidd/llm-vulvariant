@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="data/repos"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="${ROOT:-$SCRIPT_DIR/../../data/repos}"
+
+if command -v realpath >/dev/null 2>&1; then
+  ROOT="$(realpath -m "$ROOT")"
+fi
+
+if [[ ! -d "$ROOT" ]]; then
+  echo "ERROR: repo root not found: $ROOT" >&2
+  exit 1
+fi
 
 for d in "$ROOT"/*; do
   [[ -d "$d" ]] || continue

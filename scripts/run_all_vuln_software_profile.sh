@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Generate software profiles for all repo/commit pairs in vuln.json.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+source "$SCRIPT_DIR/profile_paths.sh"
+
 VULN_JSON="${VULN_JSON:-$HOME/vuln/data/vuln.json}"
 REPO_BASE_PATH="${REPO_BASE_PATH:-$HOME/vuln/data/repos}"
 PROFILE_BASE_PATH="${PROFILE_BASE_PATH:-$HOME/vuln/profiles}"
@@ -86,13 +89,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$OUTPUT_DIR" ]]; then
-  OUTPUT_DIR="$PROFILE_BASE_PATH/$SOFT_PROFILE_DIRNAME"
-fi
-
-VULN_JSON="$(realpath -m "$VULN_JSON")"
-REPO_BASE_PATH="$(realpath -m "$REPO_BASE_PATH")"
-OUTPUT_DIR="$(realpath -m "$OUTPUT_DIR")"
+OUTPUT_DIR="$(resolve_profile_dir "$PROFILE_BASE_PATH" "$SOFT_PROFILE_DIRNAME" "$OUTPUT_DIR")"
+VULN_JSON="$(_profile_realpath "$VULN_JSON")"
+REPO_BASE_PATH="$(_profile_realpath "$REPO_BASE_PATH")"
 
 echo "=========================================="
 echo "Software Profile Batch Generator"
@@ -177,3 +176,7 @@ echo "Total processed: $total"
 echo "Succeeded: $succeeded"
 echo "Failed: $failed"
 echo "Results saved to: $OUTPUT_DIR"
+
+if [[ "$failed" -gt 0 ]]; then
+  exit 1
+fi

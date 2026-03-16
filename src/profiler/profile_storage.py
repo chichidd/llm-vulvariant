@@ -7,10 +7,13 @@ Provides a unified interface for saving and loading different kinds of profile d
 - Final results
 """
 
-import json
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any, Dict, Optional
+
 from utils.logger import get_logger
+from utils.io_utils import read_json_file, write_atomic_json, write_atomic_text
 
 logger = get_logger(__name__)
 
@@ -57,10 +60,39 @@ class ProfileStorageManager:
         
         return profile_dir
     
-    def _ensure_dir(self, dir_path: Path) -> None:
-        """Ensure the directory exists."""
-        if dir_path:
-            dir_path.mkdir(parents=True, exist_ok=True)
+    def _read_json(self, path: Path) -> Optional[Any]:
+        """Read JSON file content."""
+        try:
+            return read_json_file(path)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"Failed to read JSON file {path}: {exc}")
+            return None
+
+    def _write_json(self, path: Path, data: Any) -> bool:
+        """Write JSON data."""
+        try:
+            write_atomic_json(path, data)
+            return True
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"Failed to write JSON file {path}: {exc}")
+            return False
+
+    def _read_text(self, path: Path) -> Optional[str]:
+        """Read text file content."""
+        try:
+            return path.read_text(encoding="utf-8")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"Failed to read text file {path}: {exc}")
+            return None
+
+    def _write_text(self, path: Path, content: str) -> bool:
+        """Write text file content."""
+        try:
+            write_atomic_text(path, content)
+            return True
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"Failed to write text file {path}: {exc}")
+            return False
     
     # ==================== Metadata management ====================
     
@@ -85,11 +117,9 @@ class ProfileStorageManager:
         """
         info_path = self.get_profile_info_path(*path_parts, info_filename=info_filename)
         if info_path and info_path.exists():
-            try:
-                with open(info_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Failed to load {info_filename}: {e}")
+            data = self._read_json(info_path)
+            if data is not None:
+                return data
         return None
     
     def save_profile_info(self, profile_info: Dict[str, Any], *path_parts: str, info_filename: str = "profile_info.json") -> None:
@@ -104,26 +134,18 @@ class ProfileStorageManager:
         info_path = self.get_profile_info_path(*path_parts, info_filename=info_filename)
         if not info_path:
             return
-        
-        self._ensure_dir(info_path.parent)
-        try:
-            with open(info_path, 'w', encoding='utf-8') as f:
-                json.dump(profile_info, f, indent=2, ensure_ascii=False)
+
+        if self._write_json(info_path, profile_info):
             logger.info(f"{self.profile_type} info saved: {info_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save {info_filename}: {e}")
     
     # ==================== Checkpoint management ====================
     
     def get_checkpoint_dir(self, *path_parts: str) -> Optional[Path]:
-        """Get the checkpoint directory."""
+        """Get the checkpoint directory path."""
         profile_dir = self._get_profile_dir(*path_parts)
         if not profile_dir:
             return None
-        
-        checkpoint_dir = profile_dir / "checkpoints"
-        self._ensure_dir(checkpoint_dir)
-        return checkpoint_dir
+        return profile_dir / "checkpoints"
     
     def save_checkpoint(self, checkpoint_name: str, data: Dict[str, Any], *path_parts: str) -> None:
         """
@@ -139,12 +161,8 @@ class ProfileStorageManager:
             return
         
         checkpoint_path = checkpoint_dir / f"{checkpoint_name}.json"
-        try:
-            with open(checkpoint_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+        if self._write_json(checkpoint_path, data):
             logger.info(f"Checkpoint saved: {checkpoint_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save checkpoint {checkpoint_name}: {e}")
     
     def load_checkpoint(self, checkpoint_name: str, *path_parts: str) -> Optional[Dict[str, Any]]:
         """
@@ -160,20 +178,17 @@ class ProfileStorageManager:
         
         checkpoint_path = checkpoint_dir / f"{checkpoint_name}.json"
         if checkpoint_path.exists():
-            try:
-                with open(checkpoint_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+            data = self._read_json(checkpoint_path)
+            if data is not None:
                 logger.info(f"Checkpoint loaded: {checkpoint_path}")
-                return data
-            except Exception as e:
-                logger.warning(f"Failed to load checkpoint {checkpoint_name}: {e}")
+            return data
         return None
     
     # ==================== LLM conversation management ====================
     
     def get_conversation_dir(self, conversation_type: str, *path_parts: str) -> Optional[Path]:
         """
-        Get the conversation history directory.
+        Get the conversation history directory path.
 
         Args:
             conversation_type: Conversation type (e.g., 'source_features', 'basic_info').
@@ -182,10 +197,7 @@ class ProfileStorageManager:
         profile_dir = self._get_profile_dir(*path_parts)
         if not profile_dir:
             return None
-        
-        conversation_dir = profile_dir / "conversations" / conversation_type
-        self._ensure_dir(conversation_dir)
-        return conversation_dir
+        return profile_dir / "conversations" / conversation_type
     
     def save_conversation(
         self, 
@@ -217,12 +229,8 @@ class ProfileStorageManager:
         
         conversation_path = conversation_dir / filename
         
-        try:
-            with open(conversation_path, 'w', encoding='utf-8') as f:
-                json.dump(conversation_data, f, indent=2, ensure_ascii=False)
+        if self._write_json(conversation_path, conversation_data):
             logger.debug(f"Conversation saved: {conversation_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save conversation: {e}")
     
     def load_conversation(self, conversation_type: str, *path_parts: str) -> Optional[Dict[str, Any]]:
         """
@@ -241,7 +249,7 @@ class ProfileStorageManager:
         
         # Find all conversation files of this type (filenames no longer include a timestamp prefix).
         conversation_files = sorted(
-            conversation_dir.glob(f"*.json"),
+            conversation_dir.glob("*.json"),
             key=lambda p: p.stat().st_mtime,
             reverse=True  # Newest first.
         )
@@ -251,23 +259,16 @@ class ProfileStorageManager:
         
         # Load the latest conversation.
         latest_conversation = conversation_files[0]
-        try:
-            with open(latest_conversation, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+        data = self._read_json(latest_conversation)
+        if data is not None:
             logger.info(f"Loaded conversation: {latest_conversation}")
-            return data
-        except Exception as e:
-            logger.warning(f"Failed to load conversation from {latest_conversation}: {e}")
-            return None
+        return data
     
     # ==================== Final result management ====================
     
     def get_result_dir(self, *path_parts: str) -> Optional[Path]:
-        """Get the result directory."""
-        profile_dir = self._get_profile_dir(*path_parts)
-        if profile_dir:
-            self._ensure_dir(profile_dir)
-        return profile_dir
+        """Get the result directory path."""
+        return self._get_profile_dir(*path_parts)
     
     def save_final_result(self, filename: str, content: str, *path_parts: str) -> None:
         """
@@ -283,12 +284,8 @@ class ProfileStorageManager:
             return
         
         result_path = result_dir / filename
-        try:
-            with open(result_path, 'w', encoding='utf-8') as f:
-                f.write(content)
+        if self._write_text(result_path, content):
             logger.info(f"Final result saved: {result_path}")
-        except Exception as e:
-            logger.warning(f"Failed to save final result: {e}")
     
     def load_final_result(self, filename: str, *path_parts: str) -> Optional[str]:
         """
@@ -304,9 +301,5 @@ class ProfileStorageManager:
         
         result_path = result_dir / filename
         if result_path.exists():
-            try:
-                with open(result_path, 'r', encoding='utf-8') as f:
-                    return f.read()
-            except Exception as e:
-                logger.warning(f"Failed to load final result: {e}")
+            return self._read_text(result_path)
         return None

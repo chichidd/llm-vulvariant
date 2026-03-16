@@ -19,6 +19,7 @@ from utils.language import (
     get_codeql_pack,
     get_extensions,
 )
+from utils.llm_utils import extract_function_snippet_based_on_name_with_ast
 from utils.logger import get_logger
 from utils.tree_utils import build_path_tree, format_file_size, render_tree
 from scanner.agent.utils import _to_dict
@@ -796,7 +797,6 @@ dependencies:
             content = full_path.read_text(encoding="utf-8", errors="ignore")
             lines = content.split("\n")
 
-            # Python: use ast for precise extraction
             if full_path.suffix == ".py":
                 tree = ast.parse(content)
                 for node in ast.walk(tree):
@@ -809,36 +809,15 @@ dependencies:
                             return ToolResult(success=True, content="\n".join(numbered))
                 return ToolResult(success=False, content="", error=f"Function/class not found: {function_name}")
 
-            # Non-Python: regex-based extraction (C/C++/Go/Java/JS/Rust/Ruby…)
-            # Look for a line that starts with the function name and capture until a
-            # balanced closing brace (or end-of-indent for Ruby).
-            pattern = re.compile(
-                rf'(?:^|\s)(?:(?:pub(?:\(crate\))?\s+)?(?:static\s+)?(?:async\s+)?'
-                rf'(?:fn|func|def|function|void|int|auto|class|struct)\s+)?'
-                rf'{re.escape(function_name)}\s*[(<]',
-                re.MULTILINE,
+            snippet = extract_function_snippet_based_on_name_with_ast(
+                content,
+                function_name,
+                with_line_numbers=True,
+                line_number_format="standard",
             )
-            match = pattern.search(content)
-            if match:
-                start_idx = content[:match.start()].count("\n")
-                # Heuristic: grab up to 80 lines or until brace-depth returns to 0
-                depth = 0
-                end_idx = start_idx
-                started = False
-                for idx in range(start_idx, min(len(lines), start_idx + 200)):
-                    if '{' in lines[idx]:
-                        depth += lines[idx].count('{') - lines[idx].count('}')
-                        started = True
-                    elif '}' in lines[idx]:
-                        depth += lines[idx].count('{') - lines[idx].count('}')
-                    end_idx = idx + 1
-                    if started and depth <= 0:
-                        break
-                func_lines = lines[start_idx:end_idx]
-                numbered = [f"{start_idx + i + 1}: {line}" for i, line in enumerate(func_lines)]
-                return ToolResult(success=True, content="\n".join(numbered))
-
-            return ToolResult(success=False, content="", error=f"Function/class not found: {function_name}")
+            if not snippet:
+                return ToolResult(success=False, content="", error=f"Function/class not found: {function_name}")
+            return ToolResult(success=True, content=snippet)
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
 
@@ -1048,14 +1027,12 @@ dependencies:
             result[fp] = status
         
         # Add summary
-        completed = sum(1 for s in result.values() if s == "completed")
-        pending = sum(1 for s in result.values() if s == "pending")
-        not_tracked = sum(1 for s in result.values() if s == "not_tracked")
+        summary_text = self._memory_manager.summarize_statuses(result)
         
         return ToolResult(
             success=True,
             content=json.dumps({
-                "summary": f"{completed} completed, {pending} pending, {not_tracked} not tracked",
+                "summary": summary_text,
                 "files": result
             }, indent=2, ensure_ascii=False)
         )

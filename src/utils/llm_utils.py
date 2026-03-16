@@ -1,12 +1,30 @@
-import re
+from __future__ import annotations
+
+import ast
 import json
-from typing import Any, Dict, Optional, Callable, List, Tuple, Type, Union
+import re
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+
 from .logger import get_logger
 
 logger = get_logger(__name__)
 
 
 JsonTypeConstraint = Union[Type[Any], Tuple[Type[Any], ...]]
+
+
+@dataclass(frozen=True)
+class JsonObjectMatch:
+    """Structured JSON object match extracted from model output."""
+
+    start: int
+    end: int
+    payload: Dict[str, Any]
+    raw_text: str
+
+
+JsonMatchFilter = Callable[[JsonObjectMatch, Optional[JsonObjectMatch], str], bool]
 
 def _get_line_number_formatter(line_number_format: str, max_line_number: int) -> Callable[[int, str], str]:
     """
@@ -64,6 +82,37 @@ def extract_message_content(response: Any) -> str:
     return str(response)
 
 
+def extract_json_object_matches(
+    response_str: str,
+    validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
+) -> List[JsonObjectMatch]:
+    """Extract all JSON objects raw-decodable from a response string."""
+    matches: List[JsonObjectMatch] = []
+    decoder = json.JSONDecoder()
+
+    for idx, char in enumerate(response_str):
+        if char != "{":
+            continue
+        try:
+            parsed, end = decoder.raw_decode(response_str[idx:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        if validator is not None and not validator(parsed):
+            continue
+        matches.append(
+            JsonObjectMatch(
+                start=idx,
+                end=idx + end,
+                payload=parsed,
+                raw_text=response_str[idx:idx + end],
+            )
+        )
+
+    return matches
+
+
 def _extract_json_candidates(response_str: str) -> List[str]:
     """Extract likely JSON snippets from model output."""
     candidates: List[str] = []
@@ -83,19 +132,559 @@ def _extract_json_candidates(response_str: str) -> List[str]:
     # 2) Try the entire response directly.
     _add_candidate(response_str)
 
-    # 3) Try raw-decoding JSON objects from any "{" / "[" start.
-    decoder = json.JSONDecoder()
-    for idx, char in enumerate(response_str):
-        if char not in "{[":
-            continue
-        try:
-            obj, end = decoder.raw_decode(response_str[idx:])
-            if isinstance(obj, dict):
-                _add_candidate(response_str[idx:idx + end])
-        except json.JSONDecodeError:
-            continue
+    # 3) Try raw-decoding JSON objects from any "{" start.
+    for match in extract_json_object_matches(response_str):
+        _add_candidate(match.raw_text)
 
     return candidates
+
+
+def extract_json_from_text(
+    response_text: str,
+    required_keys: Optional[List[str]] = None,
+    validator: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    prefer_last: bool = False,
+    match_filter: Optional[JsonMatchFilter] = None,
+) -> Optional[Dict[str, Any]]:
+    """Extract the first JSON object from a model response.
+
+    Args:
+        response_text: Raw response text from an LLM.
+        required_keys: Optional keys that must be present in the returned object.
+        validator: Optional predicate that must accept the parsed object.
+        prefer_last: Whether to return the last matching JSON object instead of the first.
+        match_filter: Optional predicate that can reject object matches using
+            match location and surrounding response text.
+
+    Returns:
+        Parsed JSON object if available; otherwise, ``None``.
+    """
+    required_keys = required_keys or []
+    matches = extract_json_object_matches(response_text)
+    indexed_matches = list(enumerate(matches))
+    if prefer_last:
+        indexed_matches = list(reversed(indexed_matches))
+
+    for index, match in indexed_matches:
+        parsed = match.payload
+        if not all(key in parsed for key in required_keys):
+            continue
+        if validator is not None and not validator(parsed):
+            continue
+        previous_match = matches[index - 1] if index > 0 else None
+        if match_filter is not None and not match_filter(match, previous_match, response_text):
+            continue
+        return parsed
+    return None
+
+
+def _format_snippet(
+    file_content: str,
+    start_line: int,
+    end_line: int,
+    with_line_numbers: bool,
+    line_number_format: str,
+) -> str:
+    """Format a snippet slice with optional line numbers."""
+    lines = file_content.split("\n")
+    snippet_lines = lines[start_line:end_line]
+    if not with_line_numbers:
+        return "\n".join(snippet_lines)
+
+    actual_start_line = start_line + 1
+    format_func = _get_line_number_formatter(line_number_format, end_line)
+    result_lines = []
+    for index, line in enumerate(snippet_lines):
+        line_number = actual_start_line + index
+        result_lines.append(format_func(line_number, line))
+    return "\n".join(result_lines)
+
+
+def _strip_leading_declaration_attributes(prefix: str) -> str:
+    """Drop leading annotations/attributes before declaration checks."""
+    remaining = prefix.lstrip()
+    while remaining:
+        if remaining.startswith("@"):
+            match = re.match(r"@[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*(?:\([^)]*\))?\s*", remaining)
+            if not match:
+                break
+            remaining = remaining[match.end():].lstrip()
+            continue
+        if remaining.startswith("[["):
+            end_idx = remaining.find("]]")
+            if end_idx == -1:
+                break
+            remaining = remaining[end_idx + 2:].lstrip()
+            continue
+        if remaining.startswith("["):
+            match = re.match(r"\[[^\]]*\]\s*", remaining)
+            if not match:
+                break
+            remaining = remaining[match.end():].lstrip()
+            continue
+        break
+    return remaining
+
+
+def _contains_top_level_char(text: str, target: str) -> bool:
+    """Return whether text contains a char outside generic/template brackets."""
+    angle_depth = 0
+    for char in text:
+        if char == "<":
+            angle_depth += 1
+            continue
+        if char == ">" and angle_depth > 0:
+            angle_depth -= 1
+            continue
+        if char == target and angle_depth == 0:
+            return True
+    return False
+
+
+def _looks_like_declaration_prefix(prefix: str) -> bool:
+    """Return whether text before a function name looks like a declaration."""
+    remaining = _strip_leading_declaration_attributes(prefix)
+    stripped = remaining.strip()
+    if not stripped:
+        return True
+    if stripped.startswith("#"):
+        return False
+    if re.search(
+        r"\b(if|for|while|switch|case|return|throw|catch|new|await|yield|sizeof|delete)\b",
+        stripped,
+    ):
+        return False
+    if any(token in stripped for token in ("=>", "=", "->")):
+        return False
+    if _contains_top_level_char(remaining, ","):
+        return False
+    if stripped.endswith("."):
+        return False
+    if stripped.endswith(("(", "[", "{")):
+        return False
+    if re.search(r"(?<!:):(?!:)\s*$", stripped):
+        return False
+    return True
+
+
+def _looks_like_statement_declaration_prefix(prefix: str) -> bool:
+    """Return whether a prefix is strong enough for expression-bodied declarations."""
+    remaining = _strip_leading_declaration_attributes(prefix).strip()
+    if not remaining:
+        return False
+    if re.search(
+        r"\b(fun|public|private|protected|internal|static|virtual|override|sealed|async|partial|"
+        r"final|abstract|suspend|inline|operator|extern|readonly|unsafe|def)\b",
+        remaining,
+    ):
+        return True
+
+    tokens = [token for token in remaining.split() if token]
+    if len(tokens) >= 2:
+        return True
+    if len(tokens) != 1:
+        return False
+
+    token = tokens[0]
+    if token.endswith(("::", ".")):
+        return False
+    if token in {"int", "string", "bool", "double", "float", "long", "short", "byte", "char", "decimal", "void"}:
+        return True
+    return token[0].isupper() or any(char in token for char in ".:<[]>?")
+
+
+def _find_signature_opener(
+    lines: List[str],
+    start_line: int,
+    start_column: int,
+    max_scan_lines: int,
+) -> Optional[Tuple[int, int, str]]:
+    """Return the opener that starts the parameter or generic list."""
+    for line_idx in range(start_line, min(len(lines), start_line + max_scan_lines)):
+        line = lines[line_idx]
+        column = start_column if line_idx == start_line else 0
+        while column < len(line):
+            char = line[column]
+            if char.isspace():
+                column += 1
+                continue
+            if char in "(<":
+                return line_idx, column + 1, char
+            return None
+    return None
+
+
+def _classify_signature_shape(
+    lines: List[str],
+    start_line: int,
+    start_column: int,
+    opener: str,
+    max_scan_lines: int,
+) -> Optional[Tuple[str, int, int]]:
+    """Classify the matched signature as a block or expression-bodied declaration."""
+    paren_depth = 1 if opener == "(" else 0
+    angle_depth = 1 if opener == "<" else 0
+
+    for line_idx in range(start_line, min(len(lines), start_line + max_scan_lines)):
+        line = lines[line_idx]
+        column = start_column if line_idx == start_line else 0
+        while column < len(line):
+            char = line[column]
+            if char == "(":
+                paren_depth += 1
+            elif char == ")" and paren_depth > 0:
+                paren_depth -= 1
+            elif char == "<":
+                angle_depth += 1
+            elif char == ">" and angle_depth > 0:
+                angle_depth -= 1
+            elif char == "{" and paren_depth == 0 and angle_depth == 0:
+                return "block", line_idx, column
+            elif line.startswith("=>", column) and paren_depth == 0 and angle_depth == 0:
+                return "statement", line_idx, column + 2
+            elif char == "=" and paren_depth == 0 and angle_depth == 0:
+                return "statement", line_idx, column + 1
+            elif char == ";" and paren_depth == 0 and angle_depth == 0:
+                return "statement", line_idx, column + 1
+            column += 1
+    return None
+
+
+def _find_statement_declaration_end(
+    lines: List[str],
+    start_line: int,
+    statement_line: int,
+    statement_column: int,
+    max_scan_lines: int,
+) -> int:
+    """Return the exclusive end line for an expression-bodied declaration."""
+    scan_limit = min(len(lines), start_line + max_scan_lines)
+    declaration_indent = len(lines[start_line]) - len(lines[start_line].lstrip())
+    branch_keywords = ("else", "catch", "finally")
+    continuation_prefixes = (
+        ".",
+        "?.",
+        "?:",
+        "&&",
+        "||",
+        "??",
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "|",
+        "&",
+        "^",
+        ",",
+    )
+    continuation_suffixes = (
+        "=>",
+        "=",
+        ".",
+        "?.",
+        "?:",
+        "&&",
+        "||",
+        "??",
+        "+",
+        "-",
+        "*",
+        "/",
+        "%",
+        "|",
+        "&",
+        "^",
+        ",",
+        "(",
+        "[",
+        "{",
+    )
+
+    paren_depth = 0
+    bracket_depth = 0
+    brace_depth = 0
+    saw_body = False
+
+    for line_idx in range(statement_line, scan_limit):
+        line = lines[line_idx]
+        line_indent = len(line) - len(line.lstrip())
+        segment = line[statement_column:] if line_idx == statement_line else line
+        stripped = segment.strip()
+
+        column = statement_column if line_idx == statement_line else 0
+        while column < len(line):
+            if line.startswith("//", column):
+                break
+            char = line[column]
+            if char == "(":
+                paren_depth += 1
+            elif char == ")" and paren_depth > 0:
+                paren_depth -= 1
+            elif char == "[":
+                bracket_depth += 1
+            elif char == "]" and bracket_depth > 0:
+                bracket_depth -= 1
+            elif char == "{":
+                brace_depth += 1
+            elif char == "}" and brace_depth > 0:
+                brace_depth -= 1
+            elif char == ";" and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0:
+                return line_idx + 1
+            column += 1
+
+        if stripped:
+            saw_body = True
+        if not stripped:
+            if saw_body and line_idx > statement_line:
+                return line_idx
+            continue
+        if paren_depth > 0 or bracket_depth > 0 or brace_depth > 0:
+            continue
+        if any(stripped.endswith(token) for token in continuation_suffixes):
+            continue
+
+        next_nonempty_idx: Optional[int] = None
+        for next_idx in range(line_idx + 1, scan_limit):
+            if lines[next_idx].strip():
+                next_nonempty_idx = next_idx
+                break
+        if next_nonempty_idx is None:
+            return line_idx + 1
+
+        next_line = lines[next_nonempty_idx]
+        next_indent = len(next_line) - len(next_line.lstrip())
+        next_stripped = next_line.strip()
+        if next_stripped.startswith(branch_keywords):
+            continue
+        # Keep indented or operator-prefixed continuation lines attached to the declaration.
+        if next_indent > line_indent:
+            continue
+        if next_indent > declaration_indent and next_stripped.startswith(continuation_prefixes):
+            continue
+        if next_stripped.startswith(continuation_prefixes):
+            continue
+        return line_idx + 1
+
+    return scan_limit
+
+
+def _extract_with_regex_fallback(
+    file_content: str,
+    function_name: str,
+    with_line_numbers: bool,
+    line_number_format: str,
+) -> str:
+    """Extract a declaration block via regex-style matching for non-Python files."""
+    lines = file_content.split("\n")
+    name_pattern = re.compile(rf"(?<![\w$]){re.escape(function_name)}(?![\w$])")
+    max_scan_lines = 200
+
+    start_line: Optional[int] = None
+    signature_shape: Optional[str] = None
+    signature_end_line: Optional[int] = None
+    signature_end_column: Optional[int] = None
+    for line_idx, line in enumerate(lines):
+        for match in name_pattern.finditer(line):
+            prefix = line[:match.start()]
+            stripped_prefix = _strip_leading_declaration_attributes(prefix).strip()
+            if re.match(r"^(?:public|private|protected)\s+def\b", stripped_prefix) or re.match(
+                r"^def\b",
+                stripped_prefix,
+            ):
+                continue
+            if not _looks_like_declaration_prefix(prefix):
+                continue
+            signature_opener = _find_signature_opener(
+                lines,
+                line_idx,
+                match.end(),
+                max_scan_lines,
+            )
+            if signature_opener is None:
+                continue
+            signature_info = _classify_signature_shape(
+                lines,
+                signature_opener[0],
+                signature_opener[1],
+                signature_opener[2],
+                max_scan_lines,
+            )
+            if signature_info is None:
+                continue
+            if signature_info[0] == "statement" and not _looks_like_statement_declaration_prefix(prefix):
+                continue
+            start_line = line_idx
+            signature_shape, signature_end_line, signature_end_column = signature_info
+            break
+        if start_line is not None:
+            break
+
+    if start_line is None:
+        return _extract_ruby_method_fallback(
+            file_content=file_content,
+            function_name=function_name,
+            with_line_numbers=with_line_numbers,
+            line_number_format=line_number_format,
+        )
+
+    if signature_shape == "statement":
+        return _format_snippet(
+            file_content=file_content,
+            start_line=start_line,
+            end_line=_find_statement_declaration_end(
+                lines=lines,
+                start_line=start_line,
+                statement_line=signature_end_line if signature_end_line is not None else start_line,
+                statement_column=signature_end_column if signature_end_column is not None else 0,
+                max_scan_lines=max_scan_lines,
+            ),
+            with_line_numbers=with_line_numbers,
+            line_number_format=line_number_format,
+        )
+
+    end_line = start_line
+    depth = 0
+    started = False
+    for line_idx in range(start_line, min(len(lines), start_line + max_scan_lines)):
+        line = lines[line_idx]
+        if "{" in line:
+            started = True
+        depth += line.count("{") - line.count("}")
+        end_line = line_idx + 1
+        if started and depth <= 0:
+            break
+
+    return _format_snippet(
+        file_content=file_content,
+        start_line=start_line,
+        end_line=end_line,
+        with_line_numbers=with_line_numbers,
+        line_number_format=line_number_format,
+    )
+
+
+def _count_ruby_block_openers(line: str) -> int:
+    """Count Ruby block openers that require a matching ``end``."""
+    stripped = re.sub(r"#.*", "", line).strip()
+    if not stripped:
+        return 0
+    if re.match(r"^(?:public|private|protected)\s+def\b", stripped):
+        return 1
+    if re.match(r"^(?:def|class|module|if|unless|case|begin|for|while|until)\b", stripped):
+        return 1
+    if re.search(r"\bdo\b(?:\s*\|[^|]*\|)?\s*$", stripped):
+        return 1
+    return 0
+
+
+def _extract_ruby_method_fallback(
+    file_content: str,
+    function_name: str,
+    with_line_numbers: bool,
+    line_number_format: str,
+) -> str:
+    """Extract a Ruby ``def ... end`` block when brace-based matching does not apply."""
+    lines = file_content.split("\n")
+    max_scan_lines = 200
+    method_pattern = re.compile(
+        rf"^\s*(?:(?:public|private|protected)\s+)?def\s+"
+        rf"(?:(?:self|[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\.)?"
+        rf"{re.escape(function_name)}(?=\s|\(|$)"
+    )
+
+    start_line: Optional[int] = None
+    matched_line: Optional[str] = None
+    matched_method_end: Optional[int] = None
+    for line_idx, line in enumerate(lines):
+        match = method_pattern.search(line)
+        if match:
+            start_line = line_idx
+            matched_line = line
+            matched_method_end = match.end()
+            break
+
+    if start_line is None:
+        return ""
+
+    if (
+        matched_line is not None
+        and matched_method_end is not None
+        and _is_ruby_endless_method_declaration(matched_line, matched_method_end)
+    ):
+        return _format_snippet(
+            file_content=file_content,
+            start_line=start_line,
+            end_line=start_line + 1,
+            with_line_numbers=with_line_numbers,
+            line_number_format=line_number_format,
+        )
+
+    if (
+        matched_line is not None
+        and matched_method_end is not None
+        and _is_ruby_single_line_method_definition(matched_line, matched_method_end)
+    ):
+        return _format_snippet(
+            file_content=file_content,
+            start_line=start_line,
+            end_line=start_line + 1,
+            with_line_numbers=with_line_numbers,
+            line_number_format=line_number_format,
+        )
+
+    depth = 0
+    end_line: Optional[int] = None
+    for line_idx in range(start_line, min(len(lines), start_line + max_scan_lines)):
+        line = lines[line_idx]
+        depth += _count_ruby_block_openers(line)
+        if re.match(r"^\s*end\b", re.sub(r"#.*", "", line)):
+            depth -= 1
+            if depth == 0:
+                end_line = line_idx + 1
+                break
+
+    if end_line is None:
+        return ""
+
+    return _format_snippet(
+        file_content=file_content,
+        start_line=start_line,
+        end_line=end_line,
+        with_line_numbers=with_line_numbers,
+        line_number_format=line_number_format,
+    )
+
+
+def _is_ruby_endless_method_declaration(line: str, method_name_end: int) -> bool:
+    """Return whether one Ruby ``def`` line uses endless-method syntax."""
+    sanitized = re.sub(r"#.*", "", line)
+    paren_depth = 0
+
+    for idx in range(method_name_end, len(sanitized)):
+        char = sanitized[idx]
+        if char == "(":
+            paren_depth += 1
+            continue
+        if char == ")" and paren_depth > 0:
+            paren_depth -= 1
+            continue
+        if char != "=" or paren_depth != 0:
+            continue
+
+        previous_char = sanitized[idx - 1] if idx > 0 else ""
+        next_char = sanitized[idx + 1] if idx + 1 < len(sanitized) else ""
+        if previous_char in ("=", "!", "<", ">") or next_char in ("=", ">"):
+            continue
+        return True
+
+    return False
+
+
+def _is_ruby_single_line_method_definition(line: str, method_name_end: int) -> bool:
+    """Return whether one Ruby ``def`` line closes with ``; ... ; end``."""
+    sanitized = re.sub(r"#.*", "", line)
+    return re.search(r";\s*end\b", sanitized[method_name_end:]) is not None
 
 
 def _validate_json_dict(
@@ -245,10 +834,10 @@ def parse_llm_json(
 
 
 def extract_function_snippet_based_on_name_with_ast(
-    file_content: str, 
+    file_content: str,
     function_name: str,
     with_line_numbers: bool = False,
-    line_number_format: str = "standard"
+    line_number_format: str = "standard",
 ) -> str:
     """
     Extract a code snippet for a given function/class name using AST.
@@ -275,43 +864,33 @@ def extract_function_snippet_based_on_name_with_ast(
         42: def my_function():
         43:     return "hello"
     """
-    import ast
     try:
-        # Parse the file content
         tree = ast.parse(file_content)
-        
-        # Find the function or class with the given name
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                if node.name == function_name:
-                    # Extract the source code for this node
-                    lines = file_content.split('\n')
-                    if hasattr(node, 'lineno') and hasattr(node, 'end_lineno'):
-                        # Get the function/class definition
-                        start_line = node.lineno - 1  # 0-indexed
-                        end_line = node.end_lineno if node.end_lineno else start_line + 1
-                        
-                        # If line numbers are not needed, return the raw snippet.
-                        if not with_line_numbers:
-                            snippet = '\n'.join(lines[start_line:end_line])
-                            return snippet
-                        
-                        # Add line numbers.
-                        snippet_lines = lines[start_line:end_line]
-                        actual_start_line = start_line + 1  # Convert to 1-indexed.
-                        
-                        # Get line number formatter.
-                        format_func = _get_line_number_formatter(line_number_format, end_line)
-                        
-                        # Build a snippet with line numbers.
-                        result_lines = []
-                        for i, line in enumerate(snippet_lines):
-                            line_number = actual_start_line + i
-                            formatted_line = format_func(line_number, line)
-                            result_lines.append(formatted_line)
-                        
-                        return '\n'.join(result_lines)
-        return ""
-    except Exception as e:
-        logger.debug("DEBUG", "ast", function_name, e)
-        return ""
+                if node.name != function_name:
+                    continue
+                if hasattr(node, "lineno") and hasattr(node, "end_lineno"):
+                    start_line = node.lineno - 1
+                    end_line = node.end_lineno if node.end_lineno else start_line + 1
+                    return _format_snippet(
+                        file_content=file_content,
+                        start_line=start_line,
+                        end_line=end_line,
+                        with_line_numbers=with_line_numbers,
+                        line_number_format=line_number_format,
+                    )
+        return _extract_with_regex_fallback(
+            file_content=file_content,
+            function_name=function_name,
+            with_line_numbers=with_line_numbers,
+            line_number_format=line_number_format,
+        )
+    except Exception as exc:
+        logger.debug("AST function extraction failed for %s: %s", function_name, exc)
+        return _extract_with_regex_fallback(
+            file_content=file_content,
+            function_name=function_name,
+            with_line_numbers=with_line_numbers,
+            line_number_format=line_number_format,
+        )

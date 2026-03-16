@@ -25,16 +25,15 @@ def test_force_regenerate_ignores_cached_entry_and_unlinks_stale_profile(monkeyp
     )
 
     class StubProfiler:
-        def __init__(self, llm_client, output_dir):
-            self.llm_client = llm_client
-            self.output_dir = output_dir
-
-        def generate_profile(self, repo_path, force_regenerate, target_version):
+        def __call__(self, *, repo_path, output_dir, llm_client, force_regenerate, target_version):
+            assert repo_path == tmp_path / "repos" / repo_name
+            assert output_dir == repo_profiles_dir
+            assert llm_client is None
             assert force_regenerate is True
             assert target_version == commit_hash
             assert not stale_profile.exists()
 
-    monkeypatch.setattr("cli.batch_scanner.SoftwareProfiler", StubProfiler)
+    monkeypatch.setattr("cli.batch_scanner.run_software_profile_generation", StubProfiler())
 
     cache = {(repo_name, commit_hash): object()}
     profile = _ensure_software_profile(
@@ -63,10 +62,10 @@ def test_force_regenerate_reuses_same_run_cached_profile(monkeypatch, tmp_path):
     regenerated_keys = {(repo_name, commit_hash)}
 
     class StubProfiler:
-        def __init__(self, llm_client, output_dir):
+        def __call__(self, **kwargs):
             raise AssertionError("should not regenerate twice in one batch")
 
-    monkeypatch.setattr("cli.batch_scanner.SoftwareProfiler", StubProfiler)
+    monkeypatch.setattr("cli.batch_scanner.run_software_profile_generation", StubProfiler())
 
     profile = _ensure_software_profile(
         repo_name=repo_name,

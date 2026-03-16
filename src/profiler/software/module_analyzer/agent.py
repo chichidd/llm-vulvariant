@@ -3,7 +3,6 @@
 Uses a native tool-calling pattern and follows the structure of src/scanner/agent.
 """
 
-import sys
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -17,29 +16,9 @@ from profiler.software.prompts import (
     MODULE_ANALYSIS_SYSTEM_PROMPT,
     MODULE_ANALYSIS_INITIAL_MESSAGE,
 )
+from profiler.software.module_analyzer.taxonomy_loader import load_ai_infra_taxonomy
 
 logger = get_logger(__name__)
-
-
-def _load_ai_infra_taxonomy() -> Dict[str, Any]:
-    """Load AI Infra taxonomy from skill scripts."""
-    try:
-        taxonomy_script = _path_config['skill_path']/ "ai-infra-module-modeler" / "scripts" / "ai_infra_taxonomy.py"
-        if not taxonomy_script.exists():
-            logger.warning(f"Taxonomy script not found at {taxonomy_script}")
-            return {}
-        
-        # Import the taxonomy
-        sys.path.insert(0, str(taxonomy_script.parent))
-        try:
-            import ai_infra_taxonomy  # type: ignore
-            return getattr(ai_infra_taxonomy, "AI_INFRA_TAXONOMY", {})
-        finally:
-            if sys.path and sys.path[0] == str(taxonomy_script.parent):
-                sys.path.pop(0)
-    except Exception as e:
-        logger.warning(f"Failed to load AI Infra taxonomy: {e}")
-        return {}
 
 
 class ModuleAnalyzer:
@@ -89,7 +68,7 @@ class ModuleAnalyzer:
         self.toolkit = ModuleAnalyzerToolkit(repo_path, file_list)
         
         # Load AI Infra taxonomy
-        taxonomy = _load_ai_infra_taxonomy()
+        taxonomy = load_ai_infra_taxonomy(_path_config['skill_path'] / "ai-infra-module-modeler")
         taxonomy_str = self._format_taxonomy(taxonomy) if taxonomy else "Not available"
         
         dir_structure = build_directory_structure_tree(file_list, max_depth=2)

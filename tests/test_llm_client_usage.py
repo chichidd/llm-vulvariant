@@ -187,6 +187,14 @@ def test_openai_provider_uses_configured_context_limit():
     assert config.context_limit == 65536
 
 
+def test_openai_provider_fallback_sets_context_limit(monkeypatch):
+    monkeypatch.setattr("llm.client.load_llm_config_from_yaml", lambda config_path=None: {"llm": {"default": {}, "providers": {}}})
+
+    config = LLMConfig(provider="openai", model="")
+
+    assert config.context_limit == 65536
+
+
 def test_create_llm_client_rejects_removed_lab_provider():
     with pytest.raises(ValueError, match="Unknown LLM provider: lab"):
         create_llm_client(LLMConfig(provider="lab", model="custom-lab-model"))

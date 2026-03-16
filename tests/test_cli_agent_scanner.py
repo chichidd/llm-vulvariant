@@ -133,25 +133,21 @@ def test_resolve_scan_languages_returns_empty_for_removed_csharp_support(tmp_pat
 
 
 def test_resolve_soft_profiles_dir_for_scan_prefers_base_plus_dirname(tmp_path):
-    args = Namespace(
+    resolved = agent_scanner._resolve_soft_profiles_dir_for_scan(
         profile_base_path=str(tmp_path / "profiles"),
         software_profile_dirname="soft-nvidia",
-        repo_profiles_dir=tmp_path / "legacy-soft",
     )
-
-    resolved = agent_scanner._resolve_soft_profiles_dir_for_scan(args)
 
     assert resolved == tmp_path / "profiles" / "soft-nvidia"
 
 
-def test_resolve_soft_profiles_dir_for_scan_falls_back_to_repo_profiles_dir(tmp_path):
-    args = Namespace(
-        repo_profiles_dir=tmp_path / "profiles" / "soft-legacy",
+def test_resolve_soft_profiles_dir_for_scan_uses_default_dirname(tmp_path):
+    resolved = agent_scanner._resolve_soft_profiles_dir_for_scan(
+        profile_base_path=str(tmp_path / "profiles"),
+        software_profile_dirname=None,
     )
 
-    resolved = agent_scanner._resolve_soft_profiles_dir_for_scan(args)
-
-    assert resolved == tmp_path / "profiles" / "soft-legacy"
+    assert resolved == tmp_path / "profiles" / agent_scanner.DEFAULT_SOFTWARE_PROFILE_DIRNAME
 
 
 def test_run_single_target_scan_success_restores_original_commit(monkeypatch, tmp_path):
@@ -194,19 +190,17 @@ def test_run_single_target_scan_success_restores_original_commit(monkeypatch, tm
 
     monkeypatch.setattr(agent_scanner, "AgenticVulnFinder", DummyFinder)
 
-    args = Namespace(
-        cve="CVE-2025-0001",
-        output=str(tmp_path / "scan-out"),
-        max_iterations=1,
-        verbose=False,
-    )
     target = agent_scanner.ScanTarget(repo_name="target-repo", commit_hash="targethash1234")
 
-    ok = agent_scanner._run_single_target_scan(
-        args=args,
+    ok = agent_scanner.run_single_target_scan(
+        cve_id="CVE-2025-0001",
+        output_base=tmp_path / "scan-out",
+        repo_base_path=repo_base,
+        max_iterations=1,
         vulnerability_profile=SimpleNamespace(),
         llm_client=object(),
         target=target,
+        verbose=False,
     )
 
     assert ok is True
@@ -227,19 +221,17 @@ def test_run_single_target_scan_fails_when_profile_missing(monkeypatch, tmp_path
     monkeypatch.setattr(agent_scanner, "checkout_commit", lambda *args, **kwargs: True)
     monkeypatch.setattr(agent_scanner, "load_software_profile", lambda *args, **kwargs: None)
 
-    args = Namespace(
-        cve="CVE-2025-0001",
-        output=str(tmp_path / "scan-out"),
-        max_iterations=1,
-        verbose=False,
-    )
     target = agent_scanner.ScanTarget(repo_name="target-repo", commit_hash="targethash1234")
 
-    ok = agent_scanner._run_single_target_scan(
-        args=args,
+    ok = agent_scanner.run_single_target_scan(
+        cve_id="CVE-2025-0001",
+        output_base=tmp_path / "scan-out",
+        repo_base_path=repo_base,
+        max_iterations=1,
         vulnerability_profile=SimpleNamespace(),
         llm_client=object(),
         target=target,
+        verbose=False,
     )
 
     assert ok is False
@@ -282,21 +274,19 @@ def test_run_single_target_scan_passes_critical_stop_flag(monkeypatch, tmp_path)
 
     monkeypatch.setattr(agent_scanner, "AgenticVulnFinder", DummyFinder)
 
-    args = Namespace(
-        cve="CVE-2025-0001",
-        output=str(tmp_path / "scan-out"),
-        max_iterations=2,
-        stop_when_critical_complete=True,
-        critical_stop_mode="min",
-        verbose=False,
-    )
     target = agent_scanner.ScanTarget(repo_name="target-repo", commit_hash="targethash1234")
 
-    ok = agent_scanner._run_single_target_scan(
-        args=args,
+    ok = agent_scanner.run_single_target_scan(
+        cve_id="CVE-2025-0001",
+        output_base=tmp_path / "scan-out",
+        repo_base_path=repo_base,
+        max_iterations=2,
         vulnerability_profile=SimpleNamespace(),
         llm_client=object(),
         target=target,
+        stop_when_critical_complete=True,
+        critical_stop_mode="min",
+        verbose=False,
     )
 
     assert ok is True
