@@ -256,9 +256,16 @@ batch-scanner \
   --scan-output-dir results/full-batch-scan \
   --similarity-threshold 0.70 \
   --fallback-top-n 3 \
+  --max-workers 8 \
+  --scan-workers 4 \
   --max-iterations-cap 10 \
   --llm-provider deepseek
 ```
+
+说明：
+- `--max-workers` 是并发线程池总上限；
+- `--scan-workers` 是 `batch_scanner` target scan 并发 worker 数；未设置时默认继承 `--max-workers`；
+- `batch_scanner` 的相似度筛选与 profile 构建仍是串行阶段。
 
 然后执行可利用性验证与报告生成：
 
@@ -273,9 +280,12 @@ python -m cli.exploitability \
   --submission-prefix exploitable_findings \
   --claude-runtime-root results/claude-runtime \
   --claude-runtime-mode run \
+  --max-workers 4 \
   --run-id run-20260303-001 \
   --timeout 1800
 ```
+
+说明：`exploitability` 当前只在 `folder` runtime 下对 folder 切片并发，`--max-workers` 为并发上限；`run/shared` 目前保持串行。
 
 ### 6.4 一键全流水线脚本
 

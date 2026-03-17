@@ -139,6 +139,8 @@ cmd=(
   --similarity-threshold 0.7
   --fallback-top-n 3
   --max-targets 3
+  --max-workers 8
+  --scan-workers 4
   --max-iterations-cap 10
   --llm-provider "$LLM_PROVIDER"
 )
@@ -164,6 +166,8 @@ python -m cli.batch_scanner \
   --similarity-threshold 0.7 \
   --fallback-top-n 3 \
   --max-targets 3 \
+  --max-workers 8 \
+  --scan-workers 4 \
   --max-iterations-cap 10 \
   --llm-provider "$LLM_PROVIDER" \
   --limit 1
@@ -175,6 +179,10 @@ Useful options:
   When this flag is combined with `--skip-existing-scans`, fresh profile inputs still trigger new scans instead of reusing old findings.
 - `--max-targets`
   This cap still applies when `--similarity-threshold` is set; threshold filtering no longer bypasses the final target limit.
+- `--max-workers`
+  Controls scan worker pool size for batch scanning.
+- `--scan-workers`
+  Overrides worker count for target scan stage; defaults to `--max-workers`.
 - `--include-same-repo`
 
 ## Validate Output
