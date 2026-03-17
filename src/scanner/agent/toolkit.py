@@ -851,9 +851,15 @@ dependencies:
             minimum = schema.get("minimum")
             maximum = schema.get("maximum")
             if minimum is not None and value < minimum:
-                return f"Invalid value for parameter {name}: expected >= {minimum}"
+                return (
+                    f"Invalid value for parameter {name}: minimum is {minimum} "
+                    f"(expected >= {minimum})"
+                )
             if maximum is not None and value > maximum:
-                return f"Invalid value for parameter {name}: expected <= {maximum}"
+                return (
+                    f"Invalid value for parameter {name}: maximum is {maximum} "
+                    f"(expected <= {maximum})"
+                )
 
         if isinstance(value, str):
             min_length = schema.get("minLength")
@@ -1260,6 +1266,15 @@ dependencies:
 
     def _check_file_status(self, file_paths: List[str]) -> ToolResult:
         """Check the scan status of files from memory."""
+        for fp in file_paths:
+            resolved_path = self._resolve_repo_relative_path(fp)
+            if resolved_path is None:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=self._invalid_path_error("file_path", fp),
+                )
+
         if not self._memory_manager:
             return ToolResult(
                 success=True,
@@ -1271,13 +1286,6 @@ dependencies:
         
         result = {}
         for fp in file_paths:
-            resolved_path = self._resolve_repo_relative_path(fp)
-            if resolved_path is None:
-                return ToolResult(
-                    success=False,
-                    content="",
-                    error=self._invalid_path_error("file_path", fp),
-                )
             status = self._memory_manager.memory.file_status.get(fp, "not_tracked")
             result[fp] = status
         
@@ -1302,13 +1310,6 @@ dependencies:
         Returns:
             ToolResult confirming the file was marked
         """
-        if not self._memory_manager:
-            return ToolResult(
-                success=False,
-                content="",
-                error="Memory manager not available. Cannot mark file status."
-            )
-        
         # Verify the file exists and is within repository
         full_path = self._resolve_repo_relative_path(file_path)
         if full_path is None:
@@ -1322,6 +1323,12 @@ dependencies:
                 success=False,
                 content="",
                 error=f"File not found: {file_path}"
+            )
+        if not self._memory_manager:
+            return ToolResult(
+                success=False,
+                content="",
+                error="Memory manager not available. Cannot mark file status."
             )
         
         # Mark as completed in memory
