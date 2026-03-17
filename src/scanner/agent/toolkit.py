@@ -339,6 +339,33 @@ dependencies:
     def _render_tree(node: Dict, prefix: str = "", value_formatter=None) -> List[str]:
         return render_tree(node, prefix, value_formatter)
 
+    def _resolve_repo_relative_path(self, path_text: str) -> Optional[Path]:
+        """Return an absolute path only when the given path is inside the repo root.
+
+        This blocks absolute paths and traversal outside the repository root (e.g. "../secret").
+        """
+        if not path_text:
+            return None
+
+        requested_path = Path(path_text)
+        if requested_path.is_absolute():
+            return None
+
+        repo_root = self.repo_path.resolve()
+        candidate = (self.repo_path / requested_path).resolve()
+        try:
+            candidate.relative_to(repo_root)
+        except ValueError:
+            return None
+        return candidate
+
+    def _invalid_path_error(self, path_name: str, path_text: str) -> str:
+        """Build a consistent error for invalid paths."""
+        return (
+            f"Invalid {path_name}: {path_text}. "
+            f"Only repository-relative paths inside {self.repo_path} are allowed."
+        )
+
     # ---- Multi-language file iteration helpers ----
 
     def _is_source_file(self, path: Path) -> bool:
@@ -849,7 +876,13 @@ dependencies:
         return None
 
     def _read_file(self, file_path: str, start_line: int = None, end_line: int = None) -> ToolResult:
-        full_path = self.repo_path / file_path
+        full_path = self._resolve_repo_relative_path(file_path)
+        if full_path is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error=self._invalid_path_error("file_path", file_path),
+            )
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"File not found: {file_path}")
         try:
@@ -871,7 +904,13 @@ dependencies:
             return ToolResult(success=False, content="", error=str(exc))
 
     def _search_in_file(self, file_path: str, pattern: str, context_lines: int = 2) -> ToolResult:
-        full_path = self.repo_path / file_path
+        full_path = self._resolve_repo_relative_path(file_path)
+        if full_path is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error=self._invalid_path_error("file_path", file_path),
+            )
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"File not found: {file_path}")
         try:
@@ -898,9 +937,21 @@ dependencies:
             return ToolResult(success=False, content="", error=str(exc))
 
     def _search_in_folder(self, folder_path: str, pattern: str, max_results: int = 50) -> ToolResult:
-        full_path = self.repo_path / folder_path
+        full_path = self._resolve_repo_relative_path(folder_path)
+        if full_path is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error=self._invalid_path_error("folder_path", folder_path),
+            )
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"Folder not found: {folder_path}")
+        if not full_path.is_dir():
+            return ToolResult(
+                success=False,
+                content="",
+                error=f"Not a folder: {folder_path}",
+            )
         try:
             regex = re.compile(pattern, re.IGNORECASE)
             file_results: Dict[str, List[Any]] = {}
@@ -936,9 +987,21 @@ dependencies:
             return ToolResult(success=False, content="", error=str(exc))
 
     def _list_files_in_folder(self, folder_path: str, recursive: bool = True) -> ToolResult:
-        full_path = self.repo_path / folder_path
+        full_path = self._resolve_repo_relative_path(folder_path)
+        if full_path is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error=self._invalid_path_error("folder_path", folder_path),
+            )
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"Folder not found: {folder_path}")
+        if not full_path.is_dir():
+            return ToolResult(
+                success=False,
+                content="",
+                error=f"Not a folder: {folder_path}",
+            )
         try:
             file_info: List[Any] = []
             total_size = 0
@@ -957,7 +1020,13 @@ dependencies:
             return ToolResult(success=False, content="", error=str(exc))
 
     def _get_function_code(self, file_path: str, function_name: str) -> ToolResult:
-        full_path = self.repo_path / file_path
+        full_path = self._resolve_repo_relative_path(file_path)
+        if full_path is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error=self._invalid_path_error("file_path", file_path),
+            )
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"File not found: {file_path}")
         try:
@@ -989,7 +1058,13 @@ dependencies:
             return ToolResult(success=False, content="", error=str(exc))
 
     def _get_imports(self, file_path: str) -> ToolResult:
-        full_path = self.repo_path / file_path
+        full_path = self._resolve_repo_relative_path(file_path)
+        if full_path is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error=self._invalid_path_error("file_path", file_path),
+            )
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"File not found: {file_path}")
         try:
@@ -1064,7 +1139,13 @@ dependencies:
         )
 
     def _analyze_data_flow(self, file_path: str, function_name: str) -> ToolResult:
-        full_path = self.repo_path / file_path
+        full_path = self._resolve_repo_relative_path(file_path)
+        if full_path is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error=self._invalid_path_error("file_path", file_path),
+            )
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"File not found: {file_path}")
         try:
@@ -1190,6 +1271,13 @@ dependencies:
         
         result = {}
         for fp in file_paths:
+            resolved_path = self._resolve_repo_relative_path(fp)
+            if resolved_path is None:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=self._invalid_path_error("file_path", fp),
+                )
             status = self._memory_manager.memory.file_status.get(fp, "not_tracked")
             result[fp] = status
         
@@ -1221,8 +1309,14 @@ dependencies:
                 error="Memory manager not available. Cannot mark file status."
             )
         
-        # Verify the file exists
-        full_path = self.repo_path / file_path
+        # Verify the file exists and is within repository
+        full_path = self._resolve_repo_relative_path(file_path)
+        if full_path is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error=self._invalid_path_error("file_path", file_path),
+            )
         if not full_path.exists():
             return ToolResult(
                 success=False,

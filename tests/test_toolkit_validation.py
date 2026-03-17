@@ -75,3 +75,33 @@ def test_execute_tool_rejects_read_codeql_results_negative_offset(tmp_path, monk
     result = toolkit.execute_tool("read_codeql_results", {"query_name": "demo", "offset": -1})
     assert result.success is False
     assert ">= 0" in result.error
+
+
+def test_execute_tool_rejects_path_traversal_for_file_tools(tmp_path, monkeypatch):
+    toolkit = _make_toolkit(tmp_path, monkeypatch)
+
+    tool_params = {
+        "read_file": {"file_path": "../outside.py", "start_line": 1},
+        "search_in_file": {"file_path": "../outside.py", "pattern": "x"},
+        "get_function_code": {"file_path": "../outside.py", "function_name": "foo"},
+        "get_imports": {"file_path": "../outside.py"},
+        "analyze_data_flow": {"file_path": "../outside.py", "function_name": "foo"},
+        "mark_file_completed": {"file_path": "../outside.py"},
+    }
+
+    for tool_name, params in tool_params.items():
+        result = toolkit.execute_tool(tool_name, params)
+        assert result.success is False
+        assert "Only repository-relative paths" in result.error
+
+
+def test_execute_tool_rejects_path_traversal_for_folder_tools(tmp_path, monkeypatch):
+    toolkit = _make_toolkit(tmp_path, monkeypatch)
+
+    result = toolkit.execute_tool("search_in_folder", {"folder_path": "../outside", "pattern": "x"})
+    assert result.success is False
+    assert "Only repository-relative paths" in result.error
+
+    result = toolkit.execute_tool("list_files_in_folder", {"folder_path": "../outside", "recursive": False})
+    assert result.success is False
+    assert "Only repository-relative paths" in result.error

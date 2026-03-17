@@ -940,24 +940,24 @@ def _is_simple_token(value: str) -> bool:
 def _looks_like_template_enumeration(payload_text: str) -> bool:
     """Return True when payload is likely a schema/example placeholder list."""
     if re.search(
-        r'\"[^\"]*\"\\s*:\\s*\"[^\"]*\\b[A-Za-z0-9_\\-]+\\s*\\|\\s*[A-Za-z0-9_\\-]+(?:\\s*\\|\\s*[A-Za-z0-9_\\-]+)+[^\"\\n]*\"',
+        r'"[^"]*"\s*:\s*"[^"]*\b[A-Za-z0-9_\-]+\s*\|\s*[A-Za-z0-9_\-]+(?:\s*\|\s*[A-Za-z0-9_\-]+)+[^"\n]*"',
         payload_text,
     ):
         return True
 
-    if re.search(r"<[^<>]+\\|[^<>]+>", payload_text):
+    if re.search(r"<[^<>]+\|[^<>]+>", payload_text):
         return True
 
-    if re.search(r'\"[^\"\\n]*\\bone of\\b[^\"\\n]*\"', payload_text, re.IGNORECASE):
+    if re.search(r'"[^"\n]*\bone of\b[^"\n]*"', payload_text, re.IGNORECASE):
         return True
 
     enum_block_match = re.search(
-        r'"(?:enum|oneof|one_of|possible_values|allowed_values)"\\s*:\\s*\\[(.*?)\\]',
+        r'"(?:enum|oneof|one_of|possible_values|allowed_values)"\s*:\s*\[(.*?)\]',
         payload_text,
         flags=re.IGNORECASE | re.DOTALL,
     )
     if enum_block_match:
-        values = re.findall(r'"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"', enum_block_match.group(1))
+        values = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', enum_block_match.group(1))
         if len(values) >= 2 and all(_is_simple_token(value) for value in values):
             return True
 
