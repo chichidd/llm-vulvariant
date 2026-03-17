@@ -105,3 +105,11 @@ def test_execute_tool_rejects_path_traversal_for_folder_tools(tmp_path, monkeypa
     result = toolkit.execute_tool("list_files_in_folder", {"folder_path": "../outside", "recursive": False})
     assert result.success is False
     assert "Only repository-relative paths" in result.error
+
+
+def test_execute_tool_rejects_path_traversal_in_check_file_status(tmp_path, monkeypatch):
+    toolkit = _make_toolkit(tmp_path, monkeypatch)
+
+    result = toolkit.execute_tool("check_file_status", {"file_paths": ["../outside.py"]})
+    assert result.success is False
+    assert "Only repository-relative paths" in result.error
