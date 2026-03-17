@@ -374,13 +374,16 @@ dependencies:
                             "file_path": {
                                 "type": "string",
                                 "description": "File path relative to the repository root.",
+                                "minLength": 1,
                             },
                             "start_line": {
                                 "type": "integer",
+                                "minimum": 1,
                                 "description": "Optional start line number (1-indexed). If omitted, read from the beginning.",
                             },
                             "end_line": {
                                 "type": "integer",
+                                "minimum": 1,
                                 "description": "Optional end line number (1-indexed). If omitted, read to end of file.",
                             },
                         },
@@ -396,10 +399,19 @@ dependencies:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "Relative file path."},
-                            "pattern": {"type": "string", "description": "Search pattern (regex supported)."},
+                            "file_path": {
+                                "type": "string",
+                                "description": "Relative file path.",
+                                "minLength": 1,
+                            },
+                            "pattern": {
+                                "type": "string",
+                                "description": "Search pattern (regex supported).",
+                                "minLength": 1,
+                            },
                             "context_lines": {
                                 "type": "integer",
+                                "minimum": 0,
                                 "description": "Number of context lines before/after each match (default: 2).",
                             },
                         },
@@ -415,10 +427,15 @@ dependencies:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "folder_path": {"type": "string", "description": "Relative folder path."},
-                            "pattern": {"type": "string", "description": "Search pattern (regex supported)."},
+                            "folder_path": {"type": "string", "description": "Relative folder path.", "minLength": 1},
+                            "pattern": {
+                                "type": "string",
+                                "description": "Search pattern (regex supported).",
+                                "minLength": 1,
+                            },
                             "max_results": {
                                 "type": "integer",
+                                "minimum": 1,
                                 "description": "Maximum number of results to return (default: 50).",
                             },
                         },
@@ -434,7 +451,11 @@ dependencies:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "folder_path": {"type": "string", "description": "Relative folder path."},
+                            "folder_path": {
+                                "type": "string",
+                                "description": "Relative folder path.",
+                                "minLength": 1,
+                            },
                             "recursive": {
                                 "type": "boolean",
                                 "description": "Whether to search recursively (default: True).",
@@ -452,8 +473,12 @@ dependencies:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "Relative file path."},
-                            "function_name": {"type": "string", "description": "Function or class name to extract."},
+                            "file_path": {"type": "string", "description": "Relative file path.", "minLength": 1},
+                            "function_name": {
+                                "type": "string",
+                                "description": "Function or class name to extract.",
+                                "minLength": 1,
+                            },
                         },
                         "required": ["file_path", "function_name"],
                     },
@@ -467,7 +492,7 @@ dependencies:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "Relative file path."}
+                            "file_path": {"type": "string", "description": "Relative file path.", "minLength": 1}
                         },
                         "required": ["file_path"],
                     },
@@ -481,8 +506,12 @@ dependencies:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "Relative file path."},
-                            "function_name": {"type": "string", "description": "Function name to analyze."},
+                            "file_path": {"type": "string", "description": "Relative file path.", "minLength": 1},
+                            "function_name": {
+                                "type": "string",
+                                "description": "Function name to analyze.",
+                                "minLength": 1,
+                            },
                         },
                         "required": ["file_path", "function_name"],
                     },
@@ -496,15 +525,23 @@ dependencies:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "file_path": {"type": "string", "description": "File path where the vulnerability exists."},
-                            "function_name": {"type": "string", "description": "Function or method name that contains the vulnerability."},
-                            "line_number": {"type": "integer", "description": "Approximate line number of the vulnerability."},
-                            "vulnerability_type": {"type": "string", "description": "Vulnerability type."},
-                            "description": {"type": "string", "description": "Detailed vulnerability description."},
-                            "evidence": {"type": "string", "description": "Code snippet or evidence proving the vulnerability exists."},
-                            "similarity_to_known": {"type": "string", "description": "Why this is similar to the known vulnerability."},
-                            "confidence": {"type": "string", "description": "Confidence: high / medium / low"},
-                            "attack_scenario": {"type": "string", "description": "Attack scenario / exploit narrative."},
+                            "file_path": {"type": "string", "description": "File path where the vulnerability exists.", "minLength": 1},
+                            "function_name": {"type": "string", "description": "Function or method name that contains the vulnerability.", "minLength": 1},
+                            "line_number": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Approximate line number of the vulnerability.",
+                            },
+                            "vulnerability_type": {"type": "string", "description": "Vulnerability type.", "minLength": 1},
+                            "description": {"type": "string", "description": "Detailed vulnerability description.", "minLength": 1},
+                            "evidence": {"type": "string", "description": "Code snippet or evidence proving the vulnerability exists.", "minLength": 1},
+                            "similarity_to_known": {"type": "string", "description": "Why this is similar to the known vulnerability.", "minLength": 1},
+                            "confidence": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                                "description": "Confidence: high / medium / low",
+                            },
+                            "attack_scenario": {"type": "string", "description": "Attack scenario / exploit narrative.", "minLength": 1},
                         },
                         "required": [
                             "file_path",
@@ -528,6 +565,7 @@ dependencies:
                             "file_paths": {
                                 "type": "array",
                                 "items": {"type": "string"},
+                                "minLength": 1,
                                 "description": "List of file paths to check status for.",
                             },
                         },
@@ -546,10 +584,12 @@ dependencies:
                             "file_path": {
                                 "type": "string",
                                 "description": "File path to get call relationships for. The tool will find which module contains this file.",
+                                "minLength": 1,
                             },
                             "module_name": {
                                 "type": "string",
                                 "description": "Optional: directly specify the module name instead of file path.",
+                                "minLength": 1,
                             },
                         },
                         "required": [],
@@ -567,6 +607,7 @@ dependencies:
                             "file_path": {
                                 "type": "string",
                                 "description": "File path to find related files for.",
+                                "minLength": 1,
                             },
                             "query_type": {
                                 "type": "string",
@@ -588,10 +629,12 @@ dependencies:
                         "properties": {
                             "query": {
                                 "type": "string",
+                                "minLength": 1,
                                 "description": "The CodeQL query code as a QL string.",
                             },
                             "query_name": {
                                 "type": "string",
+                                "minLength": 1,
                                 "description": "A descriptive name for this query (e.g., 'injection_check', 'taint_analysis'). Used for naming the result file.",
                             },
                         },
@@ -609,14 +652,18 @@ dependencies:
                         "properties": {
                             "query_name": {
                                 "type": "string",
+                                "minLength": 1,
                                 "description": "The query name used when running the query.",
                             },
                             "offset": {
                                 "type": "integer",
+                                "minimum": 0,
                                 "description": "Start index for pagination (default: 0).",
                             },
                             "limit": {
                                 "type": "integer",
+                                "minimum": 1,
+                                "maximum": 1000,
                                 "description": "Maximum number of findings to return (default: 50).",
                             },
                         },
@@ -635,9 +682,11 @@ dependencies:
                             "file_path": {
                                 "type": "string",
                                 "description": "File path to mark as completed.",
+                                "minLength": 1,
                             },
                             "reason": {
                                 "type": "string",
+                                "minLength": 1,
                                 "description": "Brief explanation of why the file is considered complete (e.g., 'No dangerous patterns found', 'All sinks properly sanitized').",
                             },
                         },
@@ -648,6 +697,20 @@ dependencies:
         ]
 
     def execute_tool(self, tool_name: str, parameters: Dict[str, Any]) -> ToolResult:
+        if not isinstance(parameters, dict):
+            return ToolResult(
+                success=False,
+                content="",
+                error="Tool arguments must be a JSON object.",
+            )
+
+        validation_error = self._validate_tool_parameters(tool_name, parameters)
+        if validation_error:
+            return ToolResult(
+                success=False,
+                content="",
+                error=validation_error,
+            )
         try:
             if tool_name == "read_file":
                 return self._read_file(**parameters)
@@ -680,6 +743,110 @@ dependencies:
             return ToolResult(success=False, content="", error=f"Unknown tool: {tool_name}")
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
+
+    @staticmethod
+    def _normalize_tool_type(value: Any, expected_type: str) -> bool:
+        if expected_type == "string":
+            return isinstance(value, str)
+        if expected_type == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected_type == "boolean":
+            return isinstance(value, bool)
+        if expected_type == "array":
+            return isinstance(value, list)
+        if expected_type == "object":
+            return isinstance(value, dict)
+        return True
+
+    def _get_tool_spec(self, tool_name: str) -> Dict[str, Any]:
+        for tool in self.get_available_tools():
+            fn = tool.get("function", {})
+            if fn.get("name") == tool_name:
+                return fn
+        return {}
+
+    def _validate_tool_parameters(self, tool_name: str, parameters: Dict[str, Any]) -> Optional[str]:
+        spec = self._get_tool_spec(tool_name)
+        if not spec:
+            return None
+
+        parameters_schema = spec.get("parameters", {})
+        properties = parameters_schema.get("properties", {})
+        required = set(parameters_schema.get("required", []))
+
+        for required_field in required:
+            if required_field not in parameters:
+                return f"Missing required parameter: {required_field}"
+
+        for key, value in parameters.items():
+            if key not in properties:
+                return f"Unknown parameter: {key}"
+
+            prop_schema = properties.get(key, {})
+            value_error = self._validate_schema_constraints(key, value, prop_schema)
+            if value_error is not None:
+                return value_error
+
+            expected_type = prop_schema.get("type")
+            if expected_type and not self._normalize_tool_type(value, expected_type):
+                return f"Invalid type for parameter {key}: expected {expected_type}"
+
+            if expected_type == "array":
+                item_schema = prop_schema.get("items") or {}
+                item_type = item_schema.get("type")
+                if item_type:
+                    for item in value:
+                        if not self._normalize_tool_type(item, item_type):
+                            return f"Invalid item type in parameter {key}: expected {item_type}"
+
+        if "start_line" in parameters or "end_line" in parameters:
+            start_line = parameters.get("start_line")
+            end_line = parameters.get("end_line")
+            if (
+                isinstance(start_line, int)
+                and isinstance(end_line, int)
+                and end_line < start_line
+            ):
+                return "Invalid range for read_file: end_line must be greater than or equal to start_line"
+
+        return None
+
+    def _validate_schema_constraints(self, name: str, value: Any, schema: Dict[str, Any]) -> Optional[str]:
+        if "enum" in schema:
+            allowed_values = schema.get("enum") or []
+            if value not in allowed_values:
+                return (
+                    f"Invalid value for parameter {name}: expected one of "
+                    f"{', '.join(str(v) for v in allowed_values)}"
+                )
+
+        if isinstance(value, (int, float)):
+            minimum = schema.get("minimum")
+            maximum = schema.get("maximum")
+            if minimum is not None and value < minimum:
+                return f"Invalid value for parameter {name}: expected >= {minimum}"
+            if maximum is not None and value > maximum:
+                return f"Invalid value for parameter {name}: expected <= {maximum}"
+
+        if isinstance(value, str):
+            min_length = schema.get("minLength")
+            max_length = schema.get("maxLength")
+            value_length = len(value)
+            if min_length is not None and value_length < min_length:
+                return f"Invalid value for parameter {name}: expected minimum length {min_length}"
+            if max_length is not None and value_length > max_length:
+                return f"Invalid value for parameter {name}: expected maximum length {max_length}"
+
+        if isinstance(value, (list, tuple)):
+            min_length = schema.get("minLength")
+            max_length = schema.get("maxLength")
+            value_length = len(value)
+            if min_length is not None and value_length < min_length:
+                return f"Invalid value for parameter {name}: expected minimum length {min_length}"
+            if max_length is not None and value_length > max_length:
+                return f"Invalid value for parameter {name}: expected maximum length {max_length}"
+
+        return None
 
     def _read_file(self, file_path: str, start_line: int = None, end_line: int = None) -> ToolResult:
         full_path = self.repo_path / file_path
