@@ -280,9 +280,10 @@ def _validate_args(args: argparse.Namespace) -> bool:
 
 def _resolve_scan_workers(args: argparse.Namespace) -> int:
     """Resolve scan worker count with default inheritance from --max-workers."""
-    scan_workers = to_int(getattr(args, "scan_workers", None))
+    raw_scan_workers = getattr(args, "scan_workers", None)
+    scan_workers = to_int(raw_scan_workers)
     max_workers = to_int(getattr(args, "max_workers", 1))
-    if scan_workers is None:
+    if raw_scan_workers is None:
         return max(1, max_workers)
     return max(1, scan_workers)
 
