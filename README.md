@@ -221,10 +221,10 @@ python -m cli.exploitability \
   --run-id demo-001
 ```
 
-上述命令会写出 `results/exploitability/exploitable_findings_demo-001.json`、
-`results/exploitability/exploitable_findings_demo-001.csv`、
-`results/exploitability/exploitable_findings_demo-001_submission_index.json` 和
-`results/exploitability/exploitable_findings_demo-001_exploitable_security_report.md`。
+上述命令会写出 `results/exploitability/exploitable_findings_demo-001_strict.json`、
+`results/exploitability/exploitable_findings_demo-001_strict.csv`、
+`results/exploitability/exploitable_findings_demo-001_strict_submission_index.json` 和
+`results/exploitability/exploitable_findings_demo-001_strict_exploitable_security_report.md`。
 
 ### 6.2 自动目标选择扫描
 
@@ -279,7 +279,7 @@ python -m cli.exploitability \
   --submission-output-dir results/full-batch-exploitability \
   --submission-prefix exploitable_findings \
   --claude-runtime-root results/claude-runtime \
-  --claude-runtime-mode run \
+  --claude-runtime-mode folder \
   --max-workers 4 \
   --run-id run-20260303-001 \
   --timeout 1800
@@ -377,10 +377,10 @@ Agent 特性：
 
 | 路径 | 说明 |
 |------|------|
-| `<prefix>_<run-id>.json` | 所有可利用发现的聚合 JSON |
-| `<prefix>_<run-id>.csv` | 聚合 CSV（表格化） |
-| `<prefix>_<run-id>_submission_index.json` | 按 CVE 分组的提交索引 |
-| `<prefix>_<run-id>_exploitable_security_report.md` | 聚合提交报告 |
+| `<prefix>_<run-id>[_strict].json` | `--report-only-exploitable` 时附加 `_strict` |
+| `<prefix>_<run-id>[_strict].csv` | `--report-only-exploitable` 时附加 `_strict` |
+| `<prefix>_<run-id>[_strict]_submission_index.json` | `--report-only-exploitable` 时附加 `_strict` |
+| `<prefix>_<run-id>[_strict]_exploitable_security_report.md` | `--report-only-exploitable` 时附加 `_strict` |
 
 ---
 

@@ -189,7 +189,7 @@ python -m cli.exploitability \
   --submission-output-dir "$EXP_OUTPUT_DIR" \
   --submission-prefix exploitable_findings \
   --claude-runtime-root "$RUNTIME_ROOT" \
-  --claude-runtime-mode run \
+  --claude-runtime-mode folder \
   --run-id "$RUN_ID" \
   --timeout 1800 \
   > "$EXP_LOG" 2>&1
