@@ -352,6 +352,13 @@ Agent 特性：
 | `run` | `<root>/<run-id>/` | 单次批量运行 |
 | `folder` | `<root>/<run-id>/<cve>/<target>/` | 并行批处理（推荐） |
 
+### 7.5 `check-exploitability` 输出规范（防幻觉约束）
+
+- `exploitability` 仅在 stdout 能解析到合法 JSON 对象时才会直接采用结果。
+- 如果 stdout 不是有效的 `verdict/confidence` 结构化结果，系统会降级到读取 `evidence/analysis_output.json`，若仍失败则判为 `ERROR`。
+- `check-exploitability` 的提示词要求只输出一个 JSON 对象，无额外文本；缺证据时用保守判断并给低置信度。
+- 该约束用于减少模型幻觉对最终 verdict 的影响。
+
 ---
 
 ## 8. 输出产物

@@ -475,6 +475,9 @@ class OpenAIClient(BaseLLMClient):
             "stream": False,
             "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
         }
+        response_format = kwargs.get("response_format")
+        if response_format is not None:
+            request_params["response_format"] = response_format
         
         # Add tools parameters
         if tools is not None:
@@ -546,6 +549,9 @@ class DeepSeekClient(BaseLLMClient):
             "stream": False,
             "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
         }
+        response_format = kwargs.get("response_format")
+        if response_format is not None:
+            request_params["response_format"] = response_format
         
         request_params["extra_body"] = self._process_extra_body(kwargs)
 

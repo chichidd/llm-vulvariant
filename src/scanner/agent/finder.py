@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from llm import BaseLLMClient
 from utils.logger import get_logger
 from utils.number_utils import to_int
+from utils.llm_utils import extract_json_from_text
 from scanner.agent.utils import (
     clear_reasoning_content,
     compress_iteration_conversation,
@@ -206,16 +207,26 @@ class AgenticVulnFinder:
                     logger.info(f"- {tool_calls[0].function.name=}\n- {tool_calls[0].function.arguments=}\n")
 
             if not tool_calls:
+                if self._is_completion_signal(content):
+                    logger.debug("LLM signaled completion.")
                 self._commit_messages(messages)
                 return sub_turn
             
             for tool in tool_calls:
                 tool_name = tool.function.name
                 try:
-                    parameters = json.loads(tool.function.arguments)
+                    if not tool.function.arguments:
+                        parameters = {}
+                    else:
+                        parameters = json.loads(tool.function.arguments)
+                    if not isinstance(parameters, dict):
+                        raise TypeError("tool arguments must be a JSON object")
                 except json.JSONDecodeError:
                     parameters = {}
-                    logger.error("Failed to parse tool arguments")
+                    logger.error("Failed to parse tool arguments for %s", tool_name)
+                except TypeError as exc:
+                    logger.error("Invalid tool argument type for %s: %s", tool_name, exc)
+                    parameters = {}
                 if self.verbose:
                     logger.debug(
                         f"  [TOOL] {tool_name}: {json.dumps(parameters, ensure_ascii=False)[:500]}..."
@@ -264,6 +275,21 @@ class AgenticVulnFinder:
                 self._commit_messages(messages)
                 return sub_turn
             sub_turn += 1
+
+    def _is_completion_signal(self, content: Optional[str]) -> bool:
+        """Check whether assistant response is an explicit completion signal."""
+        if not content:
+            return False
+        normalized = content.lower()
+        if "analysis complete" in normalized:
+            return True
+        parsed = extract_json_from_text(
+            response_text=content,
+            required_keys=["analysis_complete", "summary"],
+            validator=lambda payload: isinstance(payload.get("analysis_complete"), bool),
+            prefer_last=True,
+        )
+        return bool(parsed and parsed.get("analysis_complete"))
 
     def _extract_complementary_summary(self, summarized: Dict[str, Any]) -> str:
         """Extract only information complementary to _get_user_message.
@@ -418,9 +444,13 @@ class AgenticVulnFinder:
             prev_conv_length = len(self.conversation_history)
             _ = self._run_turn(iteration)
             response = self.conversation_history[-1].content if hasattr(self.conversation_history[-1], "content") else self.conversation_history[-1].get("content")
-            completion_keywords = ["analysis complete"]  # currently only "analysis complete" as stop words
+            completion_keywords = ["analysis complete"]  # legacy stop token
             should_stop = bool(
-                response and any(keyword in response.lower() for keyword in completion_keywords)
+                response
+                and (
+                    any(keyword in response.lower() for keyword in completion_keywords)
+                    or self._is_completion_signal(str(response))
+                )
             )
             critical_complete = self.memory.is_critical_complete() if self.memory else True
             if should_stop and self.verbose:

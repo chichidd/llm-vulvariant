@@ -178,6 +178,24 @@ def extract_json_from_text(
     return None
 
 
+def _looks_like_example_candidate(response_text: str, match: JsonObjectMatch) -> bool:
+    """Heuristic for skipping example/schema style JSON snippets."""
+    window_size = 120
+    prefix = response_text[max(0, match.start - window_size) : match.start].lower()
+    suffix = response_text[match.end : match.end + window_size].lower()
+    if not _looks_like_example_context(prefix):
+        return False
+    # If the payload contains pipe-separated placeholder values, it is very likely
+    # an enum/example snippet (e.g. "...|..."), which should be skipped.
+    payload_text = response_text[match.start : match.end]
+    if not _looks_like_template_enumeration(payload_text):
+        return False
+    # If the model explicitly indicates this is the final output, keep it.
+    if _looks_like_final_output_marker(suffix):
+        return False
+    return True
+
+
 def _format_snippet(
     file_content: str,
     start_line: int,
@@ -789,28 +807,29 @@ def parse_llm_json(
     latest_text = response_str
     attempts = 0
     max_attempts = max(0, max_repair_attempts)
+    default_match_filter = lambda match, previous_match, text: not _looks_like_example_candidate(text, match)
 
     while True:
         last_error = "JSON parsing failed"
-        for candidate in _extract_json_candidates(latest_text):
-            try:
-                parsed = json.loads(candidate)
-            except json.JSONDecodeError as exc:
-                last_error = f"JSON decode error: {exc}"
-                continue
-
-            if not isinstance(parsed, dict):
-                last_error = f"Top-level JSON is {type(parsed).__name__}, expected object"
-                continue
-
-            is_valid, error_msg = _validate_json_dict(
-                parsed,
+        parsed = extract_json_from_text(
+            response_text=latest_text,
+            required_keys=required_keys,
+            prefer_last=False,
+            match_filter=default_match_filter,
+            validator=lambda payload: _validate_json_dict(
+                payload,
                 required_keys=required_keys,
                 expected_types=expected_types,
-            )
-            if is_valid:
-                return parsed
-            last_error = error_msg
+            )[0],
+        )
+        if parsed is not None:
+            return parsed
+
+        # Keep last error message when schema validation fails.
+        if _extract_json_candidates(latest_text):
+            last_error = "Schema validation failed for all candidate JSON objects"
+        else:
+            last_error = "No valid JSON objects found"
 
         if not llm_client or attempts >= max_attempts:
             if (required_keys or expected_types) and last_error:
@@ -894,3 +913,59 @@ def extract_function_snippet_based_on_name_with_ast(
             with_line_numbers=with_line_numbers,
             line_number_format=line_number_format,
         )
+
+def _looks_like_example_context(context: str) -> bool:
+    """Return True when nearby context likely contains schema/example markers."""
+    context_markers = (
+        "example",
+        "schema",
+        "format",
+        "valid values",
+        "valid example",
+        "should be",
+        "one of",
+        "possible values",
+        "allowed values",
+    )
+    lower_context = context.lower()
+    return any(marker in lower_context for marker in context_markers)
+
+
+def _is_simple_token(value: str) -> bool:
+    """Return True when token is compact and enum-like."""
+    token = value.strip()
+    return bool(re.fullmatch(r"[A-Za-z0-9_\\-]+", token))
+
+
+def _looks_like_template_enumeration(payload_text: str) -> bool:
+    """Return True when payload is likely a schema/example placeholder list."""
+    if re.search(
+        r'"[^"]*"\s*:\s*"[^"]*\b[A-Za-z0-9_\-]+\s*\|\s*[A-Za-z0-9_\-]+(?:\s*\|\s*[A-Za-z0-9_\-]+)+[^"\n]*"',
+        payload_text,
+    ):
+        return True
+
+    if re.search(r"<[^<>]+\|[^<>]+>", payload_text):
+        return True
+
+    if re.search(r'"[^"\n]*\bone of\b[^"\n]*"', payload_text, re.IGNORECASE):
+        return True
+
+    enum_block_match = re.search(
+        r'"(?:enum|oneof|one_of|possible_values|allowed_values)"\s*:\s*\[(.*?)\]',
+        payload_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if enum_block_match:
+        values = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', enum_block_match.group(1))
+        if len(values) >= 2 and all(_is_simple_token(value) for value in values):
+            return True
+
+    return False
+
+
+def _looks_like_final_output_marker(context: str) -> bool:
+    """Return True when nearby text marks an actual final output block."""
+    keep_markers = ("final", "answer", "result", "output")
+    lower_context = context.lower()
+    return any(marker in lower_context for marker in keep_markers)

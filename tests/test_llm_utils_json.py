@@ -172,3 +172,90 @@ def test_parse_llm_json_finds_nested_payload_inside_wrapper():
         "target_application": [],
         "target_user": [],
     }
+
+
+def test_parse_llm_json_skips_schema_snippet_with_enumeration_placeholders():
+    response = (
+        'Schema: {"verdict":"EXPLOITABLE|CONDITIONALLY_EXPLOITABLE|LIBRARY_RISK|NOT_EXPLOITABLE",'
+        '"confidence":"high|medium|low"}\n'
+        '{"verdict":"NOT_EXPLOITABLE","confidence":"medium"}'
+    )
+
+    parsed = parse_llm_json(
+        response,
+        required_keys=["verdict", "confidence"],
+    )
+
+    assert parsed == {"verdict": "NOT_EXPLOITABLE", "confidence": "medium"}
+
+
+def test_parse_llm_json_keeps_schema_prefix_with_real_values():
+    response = (
+        'Schema: {"status":"ok","evidence": ["tmp"]}\n'
+        '{"status":"ok","evidence":["real"]}'
+    )
+
+    parsed = parse_llm_json(
+        response,
+        required_keys=["status", "evidence"],
+        expected_types={"status": str, "evidence": list},
+    )
+
+    assert parsed == {"status": "ok", "evidence": ["real"]}
+
+
+def test_parse_llm_json_skips_schema_snippet_with_enum_array():
+    response = (
+        'Schema: {"status": "enabled|disabled", "mode": "readonly|readwrite"}\n'
+        '{"status":"enabled","mode":"readwrite"}'
+    )
+
+    parsed = parse_llm_json(
+        response,
+        required_keys=["status", "mode"],
+    )
+
+    assert parsed == {"status": "enabled", "mode": "readwrite"}
+
+
+def test_parse_llm_json_skips_schema_snippet_with_enum_key():
+    response = (
+        'Schema block: {"status": {"enum": ["OPEN", "CLOSED", "PENDING"]}}\n'
+        '{"status": "OPEN"}'
+    )
+
+    parsed = parse_llm_json(
+        response,
+        required_keys=["status"],
+    )
+
+    assert parsed == {"status": "OPEN"}
+
+
+def test_parse_llm_json_keeps_schema_with_real_status_array():
+    response = (
+        'Schema: {"status":"ok","tags":["alpha","beta","gamma"]}\n'
+        '{"status":"ok","tags":["alpha","beta"]}'
+    )
+
+    parsed = parse_llm_json(
+        response,
+        required_keys=["status", "tags"],
+        expected_types={"status": str, "tags": list},
+    )
+
+    assert parsed == {"status": "ok", "tags": ["alpha", "beta"]}
+
+
+def test_parse_llm_json_skips_schema_snippet_with_one_of_text():
+    response = (
+        'Example format: {"mode":"one of \"read\", \"write\", \"admin\""}\n'
+        '{"mode":"read"}'
+    )
+
+    parsed = parse_llm_json(
+        response,
+        required_keys=["mode"],
+    )
+
+    assert parsed == {"mode": "read"}

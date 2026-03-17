@@ -46,7 +46,7 @@ def test_parse_claude_result_from_markdown_json_block():
     assert parsed["confidence"] == "high"
 
 
-def test_parse_claude_result_fallback_to_inferred_verdict_and_confidence():
+def test_parse_claude_result_rejects_free_text_without_json():
     checker = _checker()
     output = {
         "result": "Analysis: CONDITIONALLY_EXPLOITABLE with medium confidence. JSON omitted."
@@ -54,9 +54,7 @@ def test_parse_claude_result_fallback_to_inferred_verdict_and_confidence():
 
     parsed = checker._parse_claude_result(output)
 
-    assert parsed is not None
-    assert parsed["verdict"] == "CONDITIONALLY_EXPLOITABLE"
-    assert parsed["confidence"] == "medium"
+    assert parsed is None
 
 
 def test_parse_claude_result_treats_schema_only_output_as_parse_failure():
@@ -138,9 +136,18 @@ def test_parse_claude_result_ignores_non_analysis_json_prefix():
 
     parsed = checker._parse_claude_result(output)
 
-    assert parsed is not None
-    assert parsed["verdict"] == "EXPLOITABLE"
-    assert parsed["confidence"] == "high"
+    assert parsed is None
+
+
+def test_parse_claude_result_rejects_invalid_confidence_values():
+    checker = _checker()
+    output = {
+        "result": '{"verdict":"EXPLOITABLE","confidence":"very_high"}'
+    }
+
+    parsed = checker._parse_claude_result(output)
+
+    assert parsed is None
 
 
 def test_parse_claude_result_skips_schema_echo_before_actual_analysis():
@@ -188,9 +195,7 @@ def test_parse_claude_result_skips_inline_example_json_before_text_verdict():
 
     parsed = checker._parse_claude_result(output)
 
-    assert parsed is not None
-    assert parsed["verdict"] == "NOT_EXPLOITABLE"
-    assert parsed["confidence"] == "medium"
+    assert parsed is None
 
 
 def test_parse_claude_result_keeps_final_json_with_format_prefix():
