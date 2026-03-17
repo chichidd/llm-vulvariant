@@ -119,6 +119,7 @@ done < "$TARGET_REPO_LIST"
 ## Phase 1: Batch Scan
 
 Add `--max-targets N` when you need a hard upper bound on threshold-selected targets; the cap is enforced even when `--similarity-threshold` is used.
+Use `--max-workers` for total worker budget and `--scan-workers` for concurrent target scans in `batch_scanner` (when unset, `--scan-workers` inherits `--max-workers`).
 
 ```bash
 SCAN_LOG="$ROOT/output-batch-scan-$(date +%Y%m%d-%H%M%S).log"
@@ -137,6 +138,8 @@ cmd=(
   --similarity-threshold 0.7
   --fallback-top-n 3
   --max-targets 3
+  --max-workers 8
+  --scan-workers 4
   --max-iterations-cap 10
   --llm-provider "$LLM_PROVIDER"
 )
@@ -162,6 +165,8 @@ python -m cli.batch_scanner \
   --similarity-threshold 0.7 \
   --fallback-top-n 3 \
   --max-targets 3 \
+  --max-workers 8 \
+  --scan-workers 4 \
   --max-iterations-cap 10 \
   --llm-provider "$LLM_PROVIDER" \
   --limit 1
@@ -178,12 +183,13 @@ python -m cli.exploitability \
   --scan-results-dir "$SCAN_OUTPUT_DIR" \
   --soft-profile-dir "$TARGET_SOFT_PROFILES_DIR" \
   --repo-base-path "$TARGET_REPOS_ROOT" \
+  --max-workers 4 \
   --generate-report \
   --report-only-exploitable \
   --submission-output-dir "$EXP_OUTPUT_DIR" \
   --submission-prefix exploitable_findings \
   --claude-runtime-root "$RUNTIME_ROOT" \
-  --claude-runtime-mode run \
+  --claude-runtime-mode folder \
   --run-id "$RUN_ID" \
   --timeout 1800 \
   > "$EXP_LOG" 2>&1
@@ -209,4 +215,6 @@ Expected artifacts:
 - Batch scan commands must pass explicit source/target roots and software-profile dirs.
 - `--force-regenerate-profiles` now implies fresh scans even if `--skip-existing-scans` is also enabled, so regenerated profile inputs are not paired with stale findings.
 - `--max-targets` still caps threshold-selected repos; `--fallback-top-n` only applies when no repo clears the threshold.
+- Add `--scan-workers` to tune batch scan parallelism in `batch_scanner`; default inherits `--max-workers`.
+- `cli.exploitability` 并行化目前主要覆盖 `folder` runtime（依赖 `--max-workers`），`run/shared` 保持串行策略。
 - To scan only an allowlist, `TARGET_REPOS_ROOT` itself must contain only the allowed repos.
