@@ -236,21 +236,29 @@ class BaseLLMClient(ABC):
             provider=self.config.provider,
         )
 
+    def _ensure_usage_lock(self) -> threading.RLock:
+        """Return the usage lock, creating it lazily for test doubles."""
+        lock = getattr(self, "_usage_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._usage_lock = lock
+        return lock
+
     def _record_usage_summary(self, usage_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         summary = self._normalize_usage_summary(usage_summary)
-        with self._usage_lock:
+        with self._ensure_usage_lock():
             self._last_usage_summary = copy.deepcopy(summary)
             self._usage_history.append(copy.deepcopy(summary))
             return copy.deepcopy(summary)
 
     def _set_last_usage_summary(self, usage_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         summary = self._normalize_usage_summary(usage_summary)
-        with self._usage_lock:
+        with self._ensure_usage_lock():
             self._last_usage_summary = copy.deepcopy(summary)
             return copy.deepcopy(summary)
 
     def get_last_usage_summary(self) -> Dict[str, Any]:
-        with self._usage_lock:
+        with self._ensure_usage_lock():
             return copy.deepcopy(self._last_usage_summary)
 
     def get_last_request_input_tokens(self) -> int:
@@ -284,16 +292,16 @@ class BaseLLMClient(ABC):
         return max(0, to_int(getattr(self, "context_limit", 0)))
 
     def usage_history_snapshot(self) -> int:
-        with self._usage_lock:
+        with self._ensure_usage_lock():
             return len(self._usage_history)
 
     def get_usage_history_since(self, snapshot: int) -> List[Dict[str, Any]]:
         start = max(0, int(snapshot))
-        with self._usage_lock:
+        with self._ensure_usage_lock():
             return [copy.deepcopy(item) for item in self._usage_history[start:]]
 
     def aggregate_usage_since(self, snapshot: int) -> Dict[str, Any]:
-        with self._usage_lock:
+        with self._ensure_usage_lock():
             summary = aggregate_usage_summaries(
                 self.get_usage_history_since(snapshot),
                 selected_model=self.config.model,
@@ -392,15 +400,15 @@ class BaseLLMClient(ABC):
             LLMRetryExhaustedError: When retries are exhausted.
         """
         last_exception = None
-        
+
         for attempt in range(self.max_retries):
-            with self._usage_lock:
+            with self._ensure_usage_lock():
                 usage_history_start = len(self._usage_history)
             try:
                 return func(*args, **kwargs)
             except Exception as e:
                 last_exception = e
-                with self._usage_lock:
+                with self._ensure_usage_lock():
                     usage_history_len = len(self._usage_history)
                 if usage_history_len == usage_history_start:
                     error_summary = build_empty_llm_usage_summary(

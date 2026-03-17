@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from utils.codeql_native import CodeQLAnalyzer
 
@@ -112,3 +113,54 @@ def test_create_database_rejects_removed_csharp_language(tmp_path):
     assert ok is False
     assert message == "Unsupported language: csharp"
     assert calls == []
+
+
+def test_run_codeql_defaults_to_inherit_caller_cwd(tmp_path, monkeypatch):
+    analyzer = CodeQLAnalyzer.__new__(CodeQLAnalyzer)
+    analyzer.config = {
+        "database_dir": str(tmp_path / "dbs"),
+        "threads": 0,
+        "timeout": 30,
+    }
+    captured = {}
+
+    def fake_run(cmd, capture_output=None, text=None, timeout=None, **kwargs):
+        captured.update(kwargs)
+        fake_result = MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = ""
+        fake_result.stderr = ""
+        return fake_result
+
+    monkeypatch.setattr("utils.codeql_native.subprocess.run", fake_run)
+    success, _, _ = analyzer._run_codeql(["version", "--format=json"], timeout=10)
+
+    assert success is True
+    assert "cwd" not in captured
+
+
+def test_run_codeql_uses_configured_working_dir(tmp_path, monkeypatch):
+    working_dir = tmp_path / "custom"
+    working_dir.mkdir()
+    analyzer = CodeQLAnalyzer.__new__(CodeQLAnalyzer)
+    analyzer.config = {
+        "database_dir": str(tmp_path / "dbs"),
+        "threads": 0,
+        "timeout": 30,
+        "working_dir": str(working_dir),
+    }
+    captured = {}
+
+    def fake_run(cmd, capture_output=None, text=None, timeout=None, **kwargs):
+        captured.update(kwargs)
+        fake_result = MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = ""
+        fake_result.stderr = ""
+        return fake_result
+
+    monkeypatch.setattr("utils.codeql_native.subprocess.run", fake_run)
+    success, _, _ = analyzer._run_codeql(["version", "--format=json"], timeout=10)
+
+    assert success is True
+    assert captured["cwd"] == str(working_dir)

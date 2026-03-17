@@ -78,11 +78,11 @@ Important notes:
 - When you find a vulnerability, you must use the report_vulnerability tool and provide complete evidence
 - When you are confident no more vulnerabilities remain in the current scope, do not emit speculative prose. Return a JSON completion signal as the assistant message:
 ```json
-{
+{{
   "analysis_complete": true,
   "summary": "Coverage summary in one paragraph",
   "next_steps": ["optional_next_actions"]
-}
+  }}
 ```
 - For compatibility, a plain phrase containing `analysis complete` is acceptable, but structured JSON is preferred.
 - Use tools to analyze code deeply; do not rely on speculation alone
