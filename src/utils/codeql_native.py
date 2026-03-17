@@ -176,12 +176,16 @@ class CodeQLAnalyzer:
     
     # Supported languages and their aliases
     SUPPORTED_LANGUAGES = {
+        "actions": ["actions", "github-actions", "github_actions"],
         "python": ["python", "py"],
         "javascript": ["javascript", "js", "typescript", "ts"],
-        "java": ["java"],
-        "cpp": ["cpp", "c++", "c"],
+        "java": ["java", "kotlin", "kt"],
+        "cpp": ["cpp", "c++", "c", "c-cpp", "c_cpp"],
+        "csharp": ["csharp", "c#", "cs"],
         "go": ["go", "golang"],
         "ruby": ["ruby", "rb"],
+        "rust": ["rust", "rs"],
+        "swift": ["swift"],
     }
     
     # Predefined query suites
@@ -256,12 +260,14 @@ class CodeQLAnalyzer:
     def _run_codeql(self, args: List[str], timeout: Optional[int] = None) -> Tuple[bool, str, str]:
         """Run a CodeQL command."""
         cmd = [self._codeql_cmd] + args
+        working_dir = self.config.get('working_dir') or tempfile.gettempdir()
         
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
+                cwd=working_dir,
                 timeout=timeout or self.config.get('timeout', 600)
             )
             return result.returncode == 0, result.stdout, result.stderr
@@ -383,6 +389,8 @@ class CodeQLAnalyzer:
             ]
             if self.config.get('threads', 0) > 0:
                 args.append(f"--threads={self.config['threads']}")
+            if self.config.get('memory', 0) > 0:
+                args.append(f"--ram={self.config['memory']}")
             if extra_args:
                 args.extend(extra_args)
             return self._run_codeql(args, timeout=1800)  # 30-minute timeout
@@ -494,6 +502,8 @@ class CodeQLAnalyzer:
             
             if self.config.get('threads', 0) > 0:
                 args.append(f"--threads={self.config['threads']}")
+            if self.config.get('memory', 0) > 0:
+                args.append(f"--ram={self.config['memory']}")
             
             success, stdout, stderr = self._run_codeql(args)
             
