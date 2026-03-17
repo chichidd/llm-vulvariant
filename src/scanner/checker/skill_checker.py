@@ -42,6 +42,7 @@ VALID_EXPLOITABILITY_VERDICTS = {
     "LIBRARY_RISK",
     "NOT_EXPLOITABLE",
 }
+VALID_CONFIDENCE_VALUES = {"high", "medium", "low"}
 RETRYABLE_RESULT_VERDICTS = {"ERROR", "UNKNOWN"}
 STRUCTURED_EXPLOITABILITY_VERDICTS = VALID_EXPLOITABILITY_VERDICTS | RETRYABLE_RESULT_VERDICTS
 EXPLOITABILITY_OUTPUT_STATE_MISSING = "missing"
@@ -263,9 +264,13 @@ class SkillExploitabilityChecker:
     def _is_analysis_payload(payload: Dict[str, Any]) -> bool:
         """Return whether the parsed JSON looks like a concrete analysis payload."""
         verdict = normalize_exploitability_verdict(payload.get("verdict"))
+        confidence = str(payload.get("confidence", "")).strip().lower()
+
         # Reject schema echoes like "EXPLOITABLE|...|NOT_EXPLOITABLE" and
         # only accept concrete verdicts produced by the skill, including
         # structured retryable states that resume logic persists on disk.
+        if confidence not in VALID_CONFIDENCE_VALUES:
+            return False
         return verdict in STRUCTURED_EXPLOITABILITY_VERDICTS
 
     @staticmethod
@@ -604,8 +609,14 @@ class SkillExploitabilityChecker:
             f"Description: {description}",
             "",
             f"Repository: {repo_path.resolve()}",
-            "",
-            "Verify the code path exists. Return JSON on stdout:",
+            "", 
+            "Verify the code path exists and return strictly ONE JSON object on stdout.",
+            "Do not emit markdown, code fences, or prose.",
+            "If any required evidence is missing, use the most conservative verdict ",
+            "and set confidence to low, with explicit unknown gaps.",
+            "Never invent sink/source details or verdicts not supported by code evidence.",
+            "Do not emit prose; return one single JSON object only.",
+            "Do not add explanatory text outside the JSON object.",
             '{"verdict":"EXPLOITABLE|CONDITIONALLY_EXPLOITABLE|LIBRARY_RISK|NOT_EXPLOITABLE",',
             '"confidence":"high|medium|low",',
             '"sink_analysis":{"confirmed":true/false,"sink_type":"...","protection_status":"none|partial|full"},',
@@ -764,21 +775,7 @@ class SkillExploitabilityChecker:
 
         logger.warning("Failed to parse analysis JSON: no concrete analysis payload found")
         logger.debug(f"JSON text: {str(result_text)[:500]}")
-
-        # Ignore inline JSON examples/schemas here so malformed objects do not
-        # get reinterpreted as concrete verdicts by the free-text fallback.
-        prose_text = self._strip_inline_json_objects(result_text)
-        inferred_verdict = self._infer_verdict_from_text(prose_text)
-        inferred_confidence = self._infer_confidence_from_text(prose_text)
-        if inferred_verdict is None:
-            return None
-
-        # Try to create a minimal result from the text
-        return {
-            "verdict": inferred_verdict,
-            "confidence": inferred_confidence or "low",
-            "raw_result": result_text[:2000],
-        }
+        return None
 
     def _infer_verdict_from_text(self, text: str) -> Optional[str]:
         """Infer verdict from free-form Claude text."""
@@ -846,13 +843,6 @@ class SkillExploitabilityChecker:
             if analysis["docker_verification"].get("exploit_confirmed"):
                 analysis["verdict"] = "EXPLOITABLE"
                 analysis["confidence"] = analysis.get("confidence") or "high"
-            else:
-                inferred = self._infer_verdict_from_text(str(analysis.get("raw_result", "")))
-                if inferred:
-                    analysis["verdict"] = inferred
-                    analysis["confidence"] = analysis.get("confidence") or (
-                        self._infer_confidence_from_text(str(analysis.get("raw_result", ""))) or "low"
-                    )
 
         return analysis
 
