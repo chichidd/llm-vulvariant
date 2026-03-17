@@ -1117,3 +1117,189 @@ def test_main_rejects_missing_source_root_when_cached_vulnerability_profile_is_m
     exit_code = batch_scanner.main()
 
     assert exit_code == 1
+
+
+def test_parse_args_accepts_max_workers_and_scan_workers(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch-scanner",
+            "--max-workers",
+            "4",
+            "--scan-workers",
+            "2",
+        ],
+    )
+
+    args = batch_scanner.parse_args()
+
+    assert args.max_workers == 4
+    assert args.scan_workers == 2
+
+
+def test_resolve_scan_workers_inherits_max_workers_when_not_set():
+    args = Namespace(max_workers=4, scan_workers=None)
+    assert batch_scanner._resolve_scan_workers(args) == 4
+
+
+def test_resolve_scan_workers_uses_explicit_scan_workers():
+    args = Namespace(max_workers=4, scan_workers=2)
+    assert batch_scanner._resolve_scan_workers(args) == 2
+
+
+def test_resolve_scan_workers_guarantees_at_least_one():
+    args = Namespace(max_workers=0, scan_workers=0)
+    assert batch_scanner._resolve_scan_workers(args) == 1
+
+
+def test_build_scan_tasks_deduplicates_duplicate_target_candidates():
+    target = ProfileRef(
+        repo_name="target-repo",
+        commit_hash="b" * 40,
+        profile=_mk_profile("target"),
+    )
+    candidate = SimilarProfileCandidate(
+        profile_ref=target,
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+
+    tasks = batch_scanner._build_scan_tasks(
+        cve_id="CVE-2026-0001",
+        similar_targets=[candidate, candidate],
+        vulnerability_profile=object(),
+    )
+
+    assert len(tasks) == 1
+    assert tasks[0]["cve_id"] == "CVE-2026-0001"
+    assert tasks[0]["target"].profile_ref.repo_name == "target-repo"
+
+
+def test_run_target_scan_task_creates_independent_llm_client_per_worker(monkeypatch, tmp_path):
+    task = {
+        "task_id": "CVE-2026-0001:target-repo:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cve_id": "CVE-2026-0001",
+        "vulnerability_profile": object(),
+        "target": SimilarProfileCandidate(
+            profile_ref=ProfileRef(
+                repo_name="target-repo",
+                commit_hash="b" * 40,
+                profile=_mk_profile("target"),
+            ),
+            metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+        ),
+    }
+    batch_args = Namespace(
+        llm_provider="deepseek",
+        llm_name=None,
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+    )
+    created_clients = []
+
+    def fake_create_llm_client(config):
+        client = object()
+        created_clients.append(client)
+        return client
+
+    used_clients = []
+
+    def fake_run_target_scan(**kwargs):
+        used_clients.append(kwargs["llm_client"])
+        return "ok"
+
+    monkeypatch.setattr(batch_scanner, "create_llm_client", fake_create_llm_client)
+    monkeypatch.setattr(batch_scanner, "_run_target_scan", fake_run_target_scan)
+
+    manager = batch_scanner.RepoPathLockManager()
+    first = batch_scanner._run_target_scan_task(
+        task=task,
+        batch_args=batch_args,
+        target_repos_root=tmp_path,
+        repo_lock_manager=manager,
+    )
+    second = batch_scanner._run_target_scan_task(
+        task=task,
+        batch_args=batch_args,
+        target_repos_root=tmp_path,
+        repo_lock_manager=manager,
+    )
+
+    assert created_clients[0] is used_clients[0]
+    assert created_clients[1] is used_clients[1]
+    assert len(created_clients) == 2
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+
+
+def test_main_summary_counts_are_aggregated_after_scan_task_dedup(monkeypatch, tmp_path):
+    vuln_json = tmp_path / "vuln.json"
+    vuln_json.write_text(
+        json.dumps([{"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"}]),
+        encoding="utf-8",
+    )
+    target_repos_root = tmp_path / "targets"
+    target_repos_root.mkdir()
+    profile_base_path = tmp_path / "profiles"
+    args = Namespace(
+        vuln_json=str(vuln_json),
+        source_repos_root=str(tmp_path / "sources"),
+        target_repos_root=str(target_repos_root),
+        profile_base_path=str(profile_base_path),
+        source_soft_profiles_dir="soft",
+        target_soft_profiles_dir="soft-nvidia",
+        vuln_profiles_dir="vuln",
+        scan_output_dir=str(tmp_path / "scan-out"),
+        similarity_threshold=0.7,
+        max_targets=5,
+        fallback_top_n=5,
+        include_same_repo=False,
+        similarity_model_name="stub-model",
+        similarity_device="cpu",
+        llm_provider="deepseek",
+        llm_name=None,
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        force_regenerate_profiles=False,
+        skip_existing_scans=True,
+        limit=None,
+        verbose=False,
+        max_workers=3,
+        scan_workers=None,
+    )
+    duplicated_target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "b" * 40, _mk_profile("target")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+
+    monkeypatch.setitem(batch_scanner._path_config, "repo_root", tmp_path)
+    monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
+    monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+    monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
+    monkeypatch.setattr(batch_scanner, "_load_vuln_entries", lambda vuln_json, limit=None: [(0, {"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"})])
+    monkeypatch.setattr(batch_scanner, "_ensure_source_inputs_available", lambda **kwargs: True)
+    monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: _mk_profile("source"))
+    monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
+    monkeypatch.setattr(batch_scanner, "_discover_latest_repo_refs", lambda **kwargs: {"target-repo": duplicated_target.profile_ref})
+    monkeypatch.setattr(
+        batch_scanner,
+        "_select_similar_targets",
+        lambda **kwargs: ([duplicated_target, duplicated_target], False),
+    )
+    monkeypatch.setattr(batch_scanner, "_run_target_scan", lambda **kwargs: "ok")
+
+    exit_code = batch_scanner.main()
+    assert exit_code == 0
+
+    summary_files = sorted((tmp_path / "scan-out").glob("batch-summary-*.json"))
+    assert len(summary_files) == 1
+    summary = json.loads(summary_files[0].read_text(encoding="utf-8"))
+
+    assert summary["total_scans"] == 1
+    assert summary["successful_scans"] == 1
+    assert summary["failed_scans"] == 0
+    assert summary["entries"][0]["scan_results"][0]["status"] == "ok"

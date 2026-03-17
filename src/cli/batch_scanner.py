@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Sequence, Set, Tuple
 
 from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config
 from llm import LLMConfig, create_llm_client
@@ -20,6 +20,8 @@ from scanner.similarity import (
     compute_profile_similarity,
 )
 from utils.git_utils import get_git_commit
+from utils.concurrency import RepoPathLockManager, run_thread_pool_tasks, ThreadPoolTaskResult
+from utils.number_utils import to_int
 from utils.logger import get_logger
 from utils.vuln_utils import normalize_cve_id, read_vuln_data
 
@@ -211,6 +213,21 @@ def parse_args() -> argparse.Namespace:
         help="Regenerate software/vulnerability profiles even when cached profile files exist",
     )
     parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Maximum worker count for scan stage (default: 1)",
+    )
+    parser.add_argument(
+        "--scan-workers",
+        type=int,
+        default=None,
+        help=(
+            "Worker count for target scan stage; if omitted, inherits --max-workers "
+            "(default: inherit)"
+        ),
+    )
+    parser.add_argument(
         "--skip-existing-scans",
         action="store_true",
         help="Skip target scan when output file agentic_vuln_findings.json already exists",
@@ -226,11 +243,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def _validate_args(args: argparse.Namespace) -> bool:
+    max_workers = getattr(args, "max_workers", 1)
+    scan_workers = getattr(args, "scan_workers", None)
     if not (0.0 <= args.similarity_threshold <= 1.0):
         logger.error("--similarity-threshold must be between 0 and 1")
         return False
     if args.max_targets is not None and args.max_targets <= 0:
         logger.error("--max-targets must be >= 1 when provided")
+        return False
+    if max_workers <= 0:
+        logger.error("--max-workers must be >= 1")
+        return False
+    if scan_workers is not None and scan_workers <= 0:
+        logger.error("--scan-workers must be >= 1")
         return False
     if args.fallback_top_n <= 0:
         logger.error("--fallback-top-n must be >= 1")
@@ -251,6 +276,16 @@ def _validate_args(args: argparse.Namespace) -> bool:
         logger.error("--vuln-profiles-dir must not be empty")
         return False
     return True
+
+
+def _resolve_scan_workers(args: argparse.Namespace) -> int:
+    """Resolve scan worker count with default inheritance from --max-workers."""
+    raw_scan_workers = getattr(args, "scan_workers", None)
+    scan_workers = to_int(raw_scan_workers)
+    max_workers = to_int(getattr(args, "max_workers", 1))
+    if raw_scan_workers is None:
+        return max(1, max_workers)
+    return max(1, scan_workers)
 
 
 def _resolve_source_software_profile_dir_from_args(args: argparse.Namespace) -> Path:
@@ -386,6 +421,47 @@ def _build_batch_summary(args: argparse.Namespace, paths: BatchScanPaths) -> Dic
         "llm_provider": args.llm_provider,
         "llm_name": args.llm_name,
         "entries": [],
+    }
+
+
+def _build_scan_task_id(cve_id: str, candidate: SimilarProfileCandidate) -> str:
+    """Build stable task id for one scan target."""
+    return f"{cve_id}:{candidate.profile_ref.repo_name}:{candidate.profile_ref.commit_hash}"
+
+
+def _run_target_scan_task(
+    task: Dict[str, Any],
+    *,
+    batch_args: argparse.Namespace,
+    target_repos_root: Path,
+    repo_lock_manager: RepoPathLockManager,
+) -> Dict[str, Any]:
+    """Run one scan task in a worker with private llm client and repo lock."""
+    target = task["target"]
+    task_id = str(task["task_id"])
+    cve_id = str(task["cve_id"])
+    vulnerability_profile = task["vulnerability_profile"]
+    target_repo_path = target_repos_root / target.profile_ref.repo_name
+    lock = repo_lock_manager.get_lock(target_repo_path)
+
+    scan_client = create_llm_client(
+        LLMConfig(provider=batch_args.llm_provider, model=batch_args.llm_name)
+    )
+    with lock:
+        scan_status = _run_target_scan(
+            batch_args=batch_args,
+            cve_id=cve_id,
+            vulnerability_profile=vulnerability_profile,
+            llm_client=scan_client,
+            target=target,
+        )
+
+    return {
+        "task_id": task_id,
+        "repo_name": target.profile_ref.repo_name,
+        "commit_hash": target.profile_ref.commit_hash,
+        "overall_similarity": target.metrics.overall_sim,
+        "status": scan_status,
     }
 
 
@@ -705,6 +781,30 @@ def _run_target_scan(
     )
 
 
+def _build_scan_tasks(
+    cve_id: str,
+    similar_targets: Sequence[SimilarProfileCandidate],
+    vulnerability_profile: object,
+) -> List[Dict[str, Any]]:
+    """Build deduplicated scan tasks for one vulnerability entry."""
+    tasks: List[Dict[str, Any]] = []
+    seen_task_ids: Set[str] = set()
+    for candidate in similar_targets:
+        task_id = _build_scan_task_id(cve_id, candidate)
+        if task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(task_id)
+        tasks.append(
+            {
+                "task_id": task_id,
+                "cve_id": cve_id,
+                "vulnerability_profile": vulnerability_profile,
+                "target": candidate,
+            }
+        )
+    return tasks
+
+
 def main() -> int:
     args = parse_args()
     setup_logging(args.verbose)
@@ -726,7 +826,6 @@ def main() -> int:
 
     logger.info(f"Loaded {len(entries)} vulnerabilities from {paths.vuln_json}")
     profile_llm = create_llm_client(LLMConfig(provider=args.llm_provider, model=args.llm_name))
-    scan_llm = create_llm_client(LLMConfig(provider=args.llm_provider, model=args.llm_name))
     text_retriever = build_text_retriever(
         model_name=args.similarity_model_name,
         device=args.similarity_device,
@@ -744,6 +843,8 @@ def main() -> int:
         regenerated_software_keys=caches.regenerated_target_software_keys,
     )
     logger.info(f"Candidate repositories with latest profiles: {len(latest_repo_refs)}")
+    scan_workers = _resolve_scan_workers(args)
+    scan_task_lock_manager = RepoPathLockManager()
 
     summary = _build_batch_summary(args, paths)
 
@@ -866,14 +967,34 @@ def main() -> int:
             "scan_results": [],
         }
 
-        for candidate in similar_targets:
-            total_scans += 1
-            scan_status = _run_target_scan(
+        scan_tasks = _build_scan_tasks(
+            cve_id=cve_id,
+            similar_targets=similar_targets,
+            vulnerability_profile=vulnerability_profile,
+        )
+        total_scans += len(scan_tasks)
+        scan_results = run_thread_pool_tasks(
+            tasks=scan_tasks,
+            worker_fn=lambda task: _run_target_scan_task(
+                task=task,
                 batch_args=args,
-                cve_id=cve_id,
-                vulnerability_profile=vulnerability_profile,
-                llm_client=scan_llm,
-                target=candidate,
+                target_repos_root=paths.target_repos_root,
+                repo_lock_manager=scan_task_lock_manager,
+            ),
+            max_workers=scan_workers,
+        )
+        for scan_result in scan_results:
+            payload = scan_result.payload or {}
+            if scan_result.status == "error":
+                logger.error(
+                    "Scan task failed: %s (%s)",
+                    payload.get("task_id", "unknown"),
+                    scan_result.error_message,
+                )
+            scan_status = (
+                str(payload.get("status", "failed"))
+                if scan_result.status == "success"
+                else "failed"
             )
             if scan_status == "ok":
                 success_scans += 1
@@ -881,11 +1002,12 @@ def main() -> int:
                 skipped_scans += 1
             else:
                 failed_scans += 1
+
             vuln_record["scan_results"].append(
                 {
-                    "repo_name": candidate.profile_ref.repo_name,
-                    "commit_hash": candidate.profile_ref.commit_hash,
-                    "overall_similarity": candidate.metrics.overall_sim,
+                    "repo_name": payload.get("repo_name", ""),
+                    "commit_hash": payload.get("commit_hash", ""),
+                    "overall_similarity": payload.get("overall_similarity", 0.0),
                     "status": scan_status,
                 }
             )
