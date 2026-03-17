@@ -260,16 +260,18 @@ class CodeQLAnalyzer:
     def _run_codeql(self, args: List[str], timeout: Optional[int] = None) -> Tuple[bool, str, str]:
         """Run a CodeQL command."""
         cmd = [self._codeql_cmd] + args
-        working_dir = self.config.get('working_dir') or tempfile.gettempdir()
+        working_dir = self.config.get("working_dir")
         
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=working_dir,
-                timeout=timeout or self.config.get('timeout', 600)
-            )
+            run_kwargs = {
+                "capture_output": True,
+                "text": True,
+                "timeout": timeout or self.config.get("timeout", 600),
+            }
+            if working_dir:
+                run_kwargs["cwd"] = working_dir
+
+            result = subprocess.run(cmd, **run_kwargs)
             return result.returncode == 0, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
             return False, "", "Command timed out"
