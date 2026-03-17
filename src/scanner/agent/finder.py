@@ -287,6 +287,7 @@ class AgenticVulnFinder:
             response_text=content,
             required_keys=["analysis_complete", "summary"],
             validator=lambda payload: isinstance(payload.get("analysis_complete"), bool),
+            prefer_last=True,
         )
         return bool(parsed and parsed.get("analysis_complete"))
 

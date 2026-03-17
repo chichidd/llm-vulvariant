@@ -162,6 +162,29 @@ def test_run_stops_when_assistant_says_analysis_complete(monkeypatch):
     assert result["vulnerabilities"] == []
 
 
+def test_run_stops_when_assistant_emits_completion_json(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+
+    def fake_run_turn(iteration):
+        finder.conversation_history.append(
+            {
+                "role": "assistant",
+                "content": (
+                    "{\"analysis_complete\": false, \"summary\": \"partial\"}\n"
+                    "{\"analysis_complete\": true, \"summary\": \"scope done\"}"
+                ),
+            }
+        )
+        return 1
+
+    monkeypatch.setattr(finder, "_run_turn", fake_run_turn)
+
+    result = finder.run()
+
+    assert result["iterations"] == 1
+    assert result["vulnerabilities"] == []
+
+
 def test_run_hits_max_iterations_without_stop(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
     finder.max_iterations = 2
