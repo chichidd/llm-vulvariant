@@ -113,6 +113,8 @@ class LLMConfig:
     model: str = ""
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    fallback_provider: Optional[str] = None
+    fallback_on_retry_exhausted: bool = False
     temperature: float = 1.0
     top_p: float = 0.9
     max_tokens: int = 0
@@ -167,6 +169,10 @@ class LLMConfig:
                 self.base_url = provider_config['base_url']
             if not self.model and 'model' in provider_config:
                 self.model = provider_config['model']
+            if not self.fallback_provider and 'fallback_provider' in provider_config:
+                self.fallback_provider = provider_config['fallback_provider']
+            if 'fallback_on_retry_exhausted' in provider_config:
+                self.fallback_on_retry_exhausted = provider_config['fallback_on_retry_exhausted']
             if self.max_tokens == 0 and 'max_tokens' in provider_config:
                 self.max_tokens = provider_config['max_tokens']
             if self.context_limit == 0 and 'context_limit' in provider_config:
