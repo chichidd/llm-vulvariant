@@ -190,15 +190,26 @@ def test_openai_provider_uses_configured_context_limit():
     assert config.context_limit == 65536
 
 
-def test_lab_provider_loads_fallback_provider_from_yaml(monkeypatch):
+def test_lab_provider_loads_fallback_provider_from_yaml():
     config = LLMConfig(provider="lab")
     assert config.fallback_provider == "deepseek"
     assert config.fallback_on_retry_exhausted is True
 
 
-def test_non_lab_provider_has_no_fallback_by_default(monkeypatch):
+def test_non_lab_provider_has_no_fallback_by_default():
     config = LLMConfig(provider="deepseek")
     assert config.fallback_provider in (None, "")
+    assert config.fallback_on_retry_exhausted is False
+
+
+def test_lab_provider_preserves_explicit_fallback_override():
+    config = LLMConfig(
+        provider="lab",
+        fallback_provider="x",
+        fallback_on_retry_exhausted=False,
+    )
+
+    assert config.fallback_provider == "x"
     assert config.fallback_on_retry_exhausted is False
 
 

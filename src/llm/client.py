@@ -114,7 +114,7 @@ class LLMConfig:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     fallback_provider: Optional[str] = None
-    fallback_on_retry_exhausted: bool = False
+    fallback_on_retry_exhausted: Optional[bool] = None
     temperature: float = 1.0
     top_p: float = 0.9
     max_tokens: int = 0
@@ -171,12 +171,17 @@ class LLMConfig:
                 self.model = provider_config['model']
             if not self.fallback_provider and 'fallback_provider' in provider_config:
                 self.fallback_provider = provider_config['fallback_provider']
-            if 'fallback_on_retry_exhausted' in provider_config:
+            if self.fallback_on_retry_exhausted is None and 'fallback_on_retry_exhausted' in provider_config:
                 self.fallback_on_retry_exhausted = provider_config['fallback_on_retry_exhausted']
             if self.max_tokens == 0 and 'max_tokens' in provider_config:
                 self.max_tokens = provider_config['max_tokens']
             if self.context_limit == 0 and 'context_limit' in provider_config:
                 self.context_limit = provider_config['context_limit']
+
+        if self.fallback_on_retry_exhausted is None:
+            self.fallback_on_retry_exhausted = False
+        else:
+            self.fallback_on_retry_exhausted = bool(self.fallback_on_retry_exhausted)
         
         # Backward compatibility: if YAML has no config, use hardcoded defaults
         if self.provider and not self.base_url:
