@@ -84,13 +84,22 @@ When fallback is triggered:
 
 1. Build a new `LLMConfig(provider="deepseek")`.
 2. Construct a new client through `create_llm_client(...)`.
-3. Re-run the same logical request once using the same `func`, `args`, and `kwargs`.
-4. Do not recursively allow fallback from the fallback client.
+3. Reconstruct the same logical request against the fallback client.
+4. Do not reuse the original bound method from the `lab` client.
+5. Do not recursively allow fallback from the fallback client.
 
 The fallback path must be single-hop only:
 
 - `lab -> deepseek` is allowed
 - `deepseek -> anything else` is not allowed
+
+Implementation note:
+
+- The retry helper cannot invoke the original `func` object directly because it is bound to the original client instance.
+- The implementation must either:
+  - refactor the retry path so it knows which high-level operation is being retried and can call the corresponding method on the fallback client, or
+  - pass an explicit request descriptor that can be replayed on the fallback client.
+- The plan should assume the fallback request is replayed as an equivalent client operation, not as a raw re-call of the original bound method.
 
 ### Usage And Metadata
 
@@ -103,6 +112,13 @@ Add these fields to the last usage summary when fallback succeeds:
 - `fallback_to_provider: "deepseek"`
 
 The existing usage totals should reflect the request that actually succeeded, while the metadata should make it clear that the original provider was `lab`.
+
+Fallback metadata must be visible in both places:
+
+- the raw result of `get_last_usage_summary()`
+- aggregated summaries produced from the client usage history during the same run
+
+This means aggregation must preserve the fallback markers at least at summary level. It is acceptable for aggregation to expose one consolidated fallback marker set for the successful request rather than attempt to merge multiple fallback records across many calls.
 
 ### Logging
 
