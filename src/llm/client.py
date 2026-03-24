@@ -395,12 +395,43 @@ class BaseLLMClient(ABC):
         delay = delay + jitter
         return min(delay, self.max_delay)
     
-    def _execute_with_retry(self, func, *args, **kwargs) -> Any:
+    def _should_use_provider_fallback(self, exception: Exception) -> bool:
+        fallback_provider = (self.config.fallback_provider or "").strip().lower()
+        return (
+            self.config.provider == "lab"
+            and bool(self.config.fallback_on_retry_exhausted)
+            and fallback_provider == "deepseek"
+            and self._should_retry(exception)
+        )
+
+    def _execute_with_provider_fallback(self, request_name: str, *args: Any, **kwargs: Any) -> Any:
+        fallback_config = LLMConfig(
+            provider=self.config.fallback_provider or "",
+            temperature=self.config.temperature,
+            top_p=self.config.top_p,
+            max_tokens=self.config.max_tokens,
+            timeout=self.config.timeout,
+            max_retries=self.max_retries,
+            initial_delay=self.initial_delay,
+            max_delay=self.max_delay,
+            backoff_factor=self.backoff_factor,
+            enable_thinking=self.config.enable_thinking,
+            fallback_on_retry_exhausted=False,
+        )
+        fallback_client = create_llm_client(fallback_config)
+        fallback_request = getattr(fallback_client, request_name, None)
+        if not callable(fallback_request):
+            raise AttributeError(
+                f"Fallback provider '{fallback_config.provider}' does not support request '{request_name}'"
+            )
+        return fallback_request(*args, **kwargs)
+
+    def _execute_with_retry(self, request_name_or_func: Any, *args: Any, **kwargs: Any) -> Any:
         """
         Execute a function with retry logic.
 
         Args:
-            func: Function to execute.
+            request_name_or_func: Request name plus function, or function alone.
             *args: Positional args.
             **kwargs: Keyword args.
 
@@ -410,13 +441,29 @@ class BaseLLMClient(ABC):
         Raises:
             LLMRetryExhaustedError: When retries are exhausted.
         """
+        request_name = None
+        if isinstance(request_name_or_func, str):
+            if not args:
+                raise TypeError("Function is required when request_name is provided")
+            request_name = request_name_or_func
+            func = args[0]
+            func_args = args[1:]
+        else:
+            func = request_name_or_func
+            func_args = args
+            func_name = getattr(func, "__name__", "")
+            if func_name == "_make_chat_request":
+                request_name = "chat"
+            elif func_name in {"_make_complete_request", "_make_completion_request"}:
+                request_name = "complete"
+
         last_exception = None
 
         for attempt in range(self.max_retries):
             with self._ensure_usage_lock():
                 usage_history_start = len(self._usage_history)
             try:
-                return func(*args, **kwargs)
+                return func(*func_args, **kwargs)
             except Exception as e:
                 last_exception = e
                 with self._ensure_usage_lock():
@@ -450,6 +497,8 @@ class BaseLLMClient(ABC):
                         f"LLM API error (attempt {attempt + 1}/{self.max_retries}): "
                         f"{type(e).__name__}: {e}. No more retries."
                     )
+                    if request_name and self._should_use_provider_fallback(e):
+                        return self._execute_with_provider_fallback(request_name, *func_args, **kwargs)
         
         raise LLMRetryExhaustedError(
             f"Failed after {self.max_retries} attempts. Last error: {last_exception}",
@@ -515,10 +564,13 @@ class OpenAIClient(BaseLLMClient):
     
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
         """Send a chat request (with retry logic)."""
-        return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
+        return self._execute_with_retry("chat", self._make_chat_request, messages, tools=tools, **kwargs)
     
+    def _make_complete_request(self, prompt: str, **kwargs: Any) -> str:
+        return self._make_chat_request([{"role": "user", "content": prompt}], **kwargs)
+
     def complete(self, prompt: str, **kwargs) -> str:
-        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+        return self._execute_with_retry("complete", self._make_complete_request, prompt, **kwargs)
 
 
 
@@ -607,11 +659,14 @@ class DeepSeekClient(BaseLLMClient):
             - No tool_calls and separate_reasoning=True: {"reasoning": str, "content": str}
             - Otherwise: str (merged content)
         """
-        return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
+        return self._execute_with_retry("chat", self._make_chat_request, messages, tools=tools, **kwargs)
     
+    def _make_complete_request(self, prompt: str, **kwargs: Any) -> str:
+        return self._make_chat_request([{"role": "user", "content": prompt}], **kwargs)
+
     def complete(self, prompt: str, **kwargs) -> str:
         """Send a completion request (translated into chat format)."""
-        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+        return self._execute_with_retry("complete", self._make_complete_request, prompt, **kwargs)
     
 
 

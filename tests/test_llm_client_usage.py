@@ -6,6 +6,7 @@ import pytest
 from llm.client import (
     BaseLLMClient,
     LLMConfig,
+    LLMRetryExhaustedError,
     OpenAIClient,
     build_empty_llm_usage_summary,
     create_llm_client,
@@ -57,6 +58,38 @@ class _DummyClient(BaseLLMClient):
 
     def chat(self, messages, tools=None, **kwargs):
         raise NotImplementedError
+
+    def complete(self, prompt, **kwargs):
+        raise NotImplementedError
+
+
+class _FakeOpenAI:
+    def __init__(self, api_key=None, base_url=None):
+        self.api_key = api_key
+        self.base_url = base_url
+
+
+class _ScriptedClient(BaseLLMClient):
+    def __init__(self, config, chat_script):
+        super().__init__(config)
+        self.chat_script = list(chat_script)
+        self.chat_calls = []
+
+    def _make_chat_request(self, messages, tools=None, **kwargs):
+        self.chat_calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "kwargs": kwargs,
+            }
+        )
+        outcome = self.chat_script.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def chat(self, messages, tools=None, **kwargs):
+        return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
 
     def complete(self, prompt, **kwargs):
         raise NotImplementedError
@@ -219,6 +252,175 @@ def test_openai_provider_fallback_sets_context_limit(monkeypatch):
     config = LLMConfig(provider="openai", model="")
 
     assert config.context_limit == 65536
+
+
+def test_lab_success_path_does_not_trigger_fallback(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=["primary-ok"],
+    )
+    fallback_factory_calls = []
+    monkeypatch.setattr(
+        "llm.client.create_llm_client",
+        lambda config: fallback_factory_calls.append(config.provider) or None,
+    )
+
+    assert client.chat([{"role": "user", "content": "ping"}]) == "primary-ok"
+    assert fallback_factory_calls == []
+    assert len(client.chat_calls) == 1
+
+
+def test_lab_retry_exhaustion_uses_deepseek_fallback(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    fallback_client = _ScriptedClient(
+        LLMConfig(
+            provider="deepseek",
+            model="deepseek-chat",
+            max_retries=1,
+            initial_delay=0.0,
+            max_delay=0.0,
+        ),
+        chat_script=["fallback-ok"],
+    )
+    factory_calls = []
+    monkeypatch.setattr(
+        "llm.client.create_llm_client",
+        lambda config: factory_calls.append(config.provider) or fallback_client,
+    )
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=[TimeoutError("primary timeout 1"), TimeoutError("primary timeout 2")],
+    )
+
+    assert client.chat([{"role": "user", "content": "ping"}]) == "fallback-ok"
+    assert factory_calls == ["deepseek"]
+    assert len(client.chat_calls) == 2
+    assert len(fallback_client.chat_calls) == 1
+
+
+def test_lab_non_retriable_error_does_not_use_fallback(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    factory_calls = []
+    monkeypatch.setattr(
+        "llm.client.create_llm_client",
+        lambda config: factory_calls.append(config.provider) or None,
+    )
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=[ValueError("bad request")],
+    )
+
+    with pytest.raises(ValueError, match="bad request"):
+        client.chat([{"role": "user", "content": "ping"}])
+
+    assert factory_calls == []
+    assert len(client.chat_calls) == 1
+
+
+def test_non_lab_retry_exhaustion_does_not_use_fallback(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    factory_calls = []
+    monkeypatch.setattr(
+        "llm.client.create_llm_client",
+        lambda config: factory_calls.append(config.provider) or None,
+    )
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="deepseek",
+            model="deepseek-chat",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=[TimeoutError("timeout 1"), TimeoutError("timeout 2")],
+    )
+
+    with pytest.raises(LLMRetryExhaustedError):
+        client.chat([{"role": "user", "content": "ping"}])
+
+    assert factory_calls == []
+    assert len(client.chat_calls) == 2
+
+
+def test_fallback_runs_once_without_recursing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    fallback_client = _ScriptedClient(
+        LLMConfig(
+            provider="deepseek",
+            model="deepseek-chat",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=[TimeoutError("fallback timeout 1"), TimeoutError("fallback timeout 2")],
+    )
+    factory_calls = []
+    monkeypatch.setattr(
+        "llm.client.create_llm_client",
+        lambda config: factory_calls.append(config.provider) or fallback_client,
+    )
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=[TimeoutError("primary timeout 1"), TimeoutError("primary timeout 2")],
+    )
+
+    with pytest.raises(LLMRetryExhaustedError):
+        client.chat([{"role": "user", "content": "ping"}])
+
+    assert factory_calls == ["deepseek"]
+    assert len(client.chat_calls) == 2
+    assert len(fallback_client.chat_calls) == 2
 
 
 def test_load_llm_config_from_yaml_falls_back_for_empty_file(tmp_path):
