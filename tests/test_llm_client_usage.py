@@ -504,26 +504,33 @@ def test_fallback_logs_start_success_and_failure_paths(caplog, monkeypatch):
         )
 
         assert success_client.chat([{"role": "user", "content": "ping"}]) == "fallback-ok"
-        assert sum(
-            "provider fallback starting" in record.getMessage() for record in caplog.records
-        ) == 1
-        assert sum(
-            "provider fallback succeeded" in record.getMessage() for record in caplog.records
-        ) == 1
+        start_records = [
+            record for record in caplog.records
+            if "provider fallback starting" in record.getMessage()
+        ]
+        success_records = [
+            record for record in caplog.records
+            if "provider fallback succeeded" in record.getMessage()
+        ]
+
+        assert len(start_records) == 1
+        assert start_records[0].levelno == logging.WARNING
+        assert start_records[0].getMessage() == (
+            "LLM provider fallback starting: lab -> deepseek for chat "
+            "after retry exhaustion (retries=2, final_error=TimeoutError)."
+        )
+        assert len(success_records) == 1
+        assert success_records[0].levelno == logging.INFO
+        assert success_records[0].getMessage() == (
+            "LLM provider fallback succeeded: lab -> deepseek for chat."
+        )
 
         caplog.clear()
 
-        fallback_failure_client = _ScriptedClient(
-            LLMConfig(
-                provider="deepseek",
-                model="deepseek-chat",
-                max_retries=1,
-                initial_delay=0.0,
-                max_delay=0.0,
-            ),
-            chat_script=[TimeoutError("fallback timeout")],
+        monkeypatch.setattr(
+            "llm.client.create_llm_client",
+            lambda config: (_ for _ in ()).throw(RuntimeError("fallback setup failed")),
         )
-        monkeypatch.setattr("llm.client.create_llm_client", lambda config: fallback_failure_client)
 
         failure_client = _ScriptedClient(
             LLMConfig(
@@ -538,15 +545,30 @@ def test_fallback_logs_start_success_and_failure_paths(caplog, monkeypatch):
             chat_script=[TimeoutError("primary timeout 1"), TimeoutError("primary timeout 2")],
         )
 
-        with pytest.raises(LLMRetryExhaustedError):
+        with pytest.raises(RuntimeError, match="fallback setup failed"):
             failure_client.chat([{"role": "user", "content": "ping"}])
 
-        assert sum(
-            "provider fallback starting" in record.getMessage() for record in caplog.records
-        ) == 1
-        assert sum(
-            "provider fallback failed" in record.getMessage() for record in caplog.records
-        ) == 1
+        failure_start_records = [
+            record for record in caplog.records
+            if "provider fallback starting" in record.getMessage()
+        ]
+        failure_error_records = [
+            record for record in caplog.records
+            if "provider fallback failed" in record.getMessage()
+        ]
+
+        assert len(failure_start_records) == 1
+        assert failure_start_records[0].levelno == logging.WARNING
+        assert failure_start_records[0].getMessage() == (
+            "LLM provider fallback starting: lab -> deepseek for chat "
+            "after retry exhaustion (retries=2, final_error=TimeoutError)."
+        )
+        assert len(failure_error_records) == 1
+        assert failure_error_records[0].levelno == logging.ERROR
+        assert failure_error_records[0].getMessage() == (
+            "LLM provider fallback failed: lab -> deepseek for chat: "
+            "RuntimeError: fallback setup failed"
+        )
     finally:
         client_logger.removeHandler(caplog.handler)
 
