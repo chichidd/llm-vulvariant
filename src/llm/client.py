@@ -408,6 +408,12 @@ class BaseLLMClient(ABC):
 
     def _execute_with_provider_fallback(self, request_name: str, *args: Any, **kwargs: Any) -> Any:
         fallback_provider = self._get_normalized_fallback_provider()
+        logger.warning(
+            "LLM provider fallback starting: %s -> %s for %s after retry exhaustion.",
+            self.config.provider,
+            fallback_provider,
+            request_name,
+        )
         fallback_config = LLMConfig(
             provider=fallback_provider,
             temperature=self.config.temperature,
@@ -428,14 +434,35 @@ class BaseLLMClient(ABC):
                 f"Fallback provider '{fallback_config.provider}' does not support request '{request_name}'"
             )
         usage_history_snapshot = capture_llm_usage_snapshot(fallback_client)
-        result = fallback_request(*args, **kwargs)
+        try:
+            result = fallback_request(*args, **kwargs)
+        except Exception as exc:
+            logger.error(
+                "LLM provider fallback failed: %s -> %s for %s: %s: %s",
+                self.config.provider,
+                fallback_config.provider,
+                request_name,
+                type(exc).__name__,
+                exc,
+            )
+            raise
         fallback_usage_history: List[Dict[str, Any]] = []
         get_usage_history_since = getattr(fallback_client, "get_usage_history_since", None)
         if usage_history_snapshot is not None and callable(get_usage_history_since):
             fallback_usage_history = get_usage_history_since(usage_history_snapshot)
 
+        fallback_metadata = {
+            "fallback_used": True,
+            "fallback_from_provider": self.config.provider,
+            "fallback_to_provider": fallback_config.provider,
+        }
         if fallback_usage_history:
             for usage_summary in fallback_usage_history:
+                if not isinstance(usage_summary, dict):
+                    continue
+                usage_summary = copy.deepcopy(usage_summary)
+                if not usage_summary.get("is_error"):
+                    usage_summary.update(fallback_metadata)
                 self._record_usage_summary(usage_summary)
         else:
             fallback_summary = None
@@ -448,7 +475,14 @@ class BaseLLMClient(ABC):
                     provider=fallback_config.provider,
                 )
             fallback_summary["is_error"] = False
+            fallback_summary.update(fallback_metadata)
             self._record_usage_summary(fallback_summary)
+        logger.info(
+            "LLM provider fallback succeeded: %s -> %s for %s.",
+            self.config.provider,
+            fallback_config.provider,
+            request_name,
+        )
         return result
 
     def _execute_with_retry(self, request_name_or_func: Any, *args: Any, **kwargs: Any) -> Any:

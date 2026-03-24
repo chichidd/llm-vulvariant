@@ -1,3 +1,4 @@
+import logging
 import sys
 from types import SimpleNamespace
 
@@ -387,6 +388,167 @@ def test_lab_fallback_replays_request_and_updates_primary_usage_state(monkeypatc
     assert client.get_last_usage_summary()["provider"] == "deepseek"
     assert client.get_last_usage_summary()["selected_model"] == "deepseek-chat"
     assert client.get_usage_history_since(0) == [client.get_last_usage_summary()]
+
+
+def test_fallback_success_marks_last_usage_summary(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    fallback_client = _ScriptedClient(
+        LLMConfig(
+            provider="deepseek",
+            model="deepseek-chat",
+            max_retries=1,
+            initial_delay=0.0,
+            max_delay=0.0,
+        ),
+        chat_script=["fallback-ok"],
+        record_success_usage=True,
+    )
+    monkeypatch.setattr("llm.client.create_llm_client", lambda config: fallback_client)
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=[TimeoutError("primary timeout 1"), TimeoutError("primary timeout 2")],
+    )
+
+    assert client.chat([{"role": "user", "content": "ping"}]) == "fallback-ok"
+
+    summary = client.get_last_usage_summary()
+
+    assert summary["fallback_used"] is True
+    assert summary["fallback_from_provider"] == "lab"
+    assert summary["fallback_to_provider"] == "deepseek"
+
+
+def test_aggregate_usage_since_preserves_fallback_metadata(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    fallback_client = _ScriptedClient(
+        LLMConfig(
+            provider="deepseek",
+            model="deepseek-chat",
+            max_retries=1,
+            initial_delay=0.0,
+            max_delay=0.0,
+        ),
+        chat_script=["fallback-ok"],
+        record_success_usage=True,
+    )
+    monkeypatch.setattr("llm.client.create_llm_client", lambda config: fallback_client)
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=[TimeoutError("primary timeout 1"), TimeoutError("primary timeout 2")],
+    )
+    snapshot = client.usage_history_snapshot()
+
+    assert client.chat([{"role": "user", "content": "ping"}]) == "fallback-ok"
+
+    aggregate = client.aggregate_usage_since(snapshot)
+
+    assert aggregate["fallback_used"] is True
+    assert aggregate["fallback_from_provider"] == "lab"
+    assert aggregate["fallback_to_provider"] == "deepseek"
+
+
+def test_fallback_logs_start_success_and_failure_paths(caplog, monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+    client_logger = logging.getLogger("llm.client")
+    client_logger.addHandler(caplog.handler)
+    caplog.set_level(logging.INFO, logger="llm.client")
+
+    try:
+        fallback_success_client = _ScriptedClient(
+            LLMConfig(
+                provider="deepseek",
+                model="deepseek-chat",
+                max_retries=1,
+                initial_delay=0.0,
+                max_delay=0.0,
+            ),
+            chat_script=["fallback-ok"],
+            record_success_usage=True,
+        )
+        monkeypatch.setattr("llm.client.create_llm_client", lambda config: fallback_success_client)
+
+        success_client = _ScriptedClient(
+            LLMConfig(
+                provider="lab",
+                model="lab-model",
+                max_retries=2,
+                initial_delay=0.0,
+                max_delay=0.0,
+                fallback_provider="deepseek",
+                fallback_on_retry_exhausted=True,
+            ),
+            chat_script=[TimeoutError("primary timeout 1"), TimeoutError("primary timeout 2")],
+        )
+
+        assert success_client.chat([{"role": "user", "content": "ping"}]) == "fallback-ok"
+        assert sum(
+            "provider fallback starting" in record.getMessage() for record in caplog.records
+        ) == 1
+        assert sum(
+            "provider fallback succeeded" in record.getMessage() for record in caplog.records
+        ) == 1
+
+        caplog.clear()
+
+        fallback_failure_client = _ScriptedClient(
+            LLMConfig(
+                provider="deepseek",
+                model="deepseek-chat",
+                max_retries=1,
+                initial_delay=0.0,
+                max_delay=0.0,
+            ),
+            chat_script=[TimeoutError("fallback timeout")],
+        )
+        monkeypatch.setattr("llm.client.create_llm_client", lambda config: fallback_failure_client)
+
+        failure_client = _ScriptedClient(
+            LLMConfig(
+                provider="lab",
+                model="lab-model",
+                max_retries=2,
+                initial_delay=0.0,
+                max_delay=0.0,
+                fallback_provider="deepseek",
+                fallback_on_retry_exhausted=True,
+            ),
+            chat_script=[TimeoutError("primary timeout 1"), TimeoutError("primary timeout 2")],
+        )
+
+        with pytest.raises(LLMRetryExhaustedError):
+            failure_client.chat([{"role": "user", "content": "ping"}])
+
+        assert sum(
+            "provider fallback starting" in record.getMessage() for record in caplog.records
+        ) == 1
+        assert sum(
+            "provider fallback failed" in record.getMessage() for record in caplog.records
+        ) == 1
+    finally:
+        client_logger.removeHandler(caplog.handler)
 
 
 def test_lab_non_retriable_error_does_not_use_fallback(monkeypatch):

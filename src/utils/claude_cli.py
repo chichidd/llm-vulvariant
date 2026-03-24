@@ -474,6 +474,9 @@ def aggregate_usage_summaries(
         "requested_model": selected_model,
         "selected_model": None,
         "selected_models": [],
+        "fallback_used": False,
+        "fallback_from_provider": None,
+        "fallback_to_provider": None,
         "sessions_total": 0,
         "turns_total": 0,
         "calls_total": 0,
@@ -502,6 +505,10 @@ def aggregate_usage_summaries(
         _collect_string_field(providers_seen, item.get("provider"))
         if selected_model is None:
             _collect_string_field(requested_models_seen, item.get("requested_model"))
+        if item.get("fallback_used") and not item.get("is_error"):
+            aggregate["fallback_used"] = True
+            aggregate["fallback_from_provider"] = item.get("fallback_from_provider")
+            aggregate["fallback_to_provider"] = item.get("fallback_to_provider")
 
         item_sessions = _session_count_from_usage_summary(item)
         aggregate["sessions_total"] += item_sessions
