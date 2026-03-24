@@ -6,6 +6,7 @@ import pytest
 
 from llm.client import (
     BaseLLMClient,
+    DeepSeekClient,
     LLMConfig,
     LLMRetryExhaustedError,
     OpenAIClient,
@@ -633,6 +634,39 @@ def test_non_lab_retry_exhaustion_does_not_use_fallback(monkeypatch):
     assert len(client.chat_calls) == 2
 
 
+def test_lab_schema_timeout_parse_error_does_not_use_fallback(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    factory_calls = []
+    monkeypatch.setattr(
+        "llm.client.create_llm_client",
+        lambda config: factory_calls.append(config.provider) or None,
+    )
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_retries=1,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        ),
+        chat_script=[ValueError("schema timeout while parsing")],
+    )
+
+    assert client._should_retry(ValueError("schema timeout while parsing")) is True
+
+    with pytest.raises(LLMRetryExhaustedError) as exc_info:
+        client.chat([{"role": "user", "content": "ping"}])
+
+    assert isinstance(exc_info.value.last_error, ValueError)
+    assert factory_calls == []
+    assert len(client.chat_calls) == 1
+
+
 def test_fallback_runs_once_without_recursing(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
     monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
@@ -737,6 +771,90 @@ def test_openai_client_clamps_zero_max_retries_to_single_attempt(monkeypatch):
     assert client.max_retries == 1
 
 
-def test_create_llm_client_rejects_removed_lab_provider():
-    with pytest.raises(ValueError, match="Unknown LLM provider: lab"):
-        create_llm_client(LLMConfig(provider="lab", model="custom-lab-model"))
+def test_create_llm_client_supports_lab_provider(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+
+    client = create_llm_client(LLMConfig(provider="lab", model="custom-lab-model"))
+
+    assert isinstance(client, OpenAIClient)
+    assert client.config.provider == "lab"
+    assert client.config.model == "custom-lab-model"
+
+
+def test_create_llm_client_lab_fallback_reaches_deepseek(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    scripted_outcomes = {
+        "lab": [
+            TimeoutError("primary timeout 1"),
+            TimeoutError("primary timeout 2"),
+        ],
+        "deepseek": ["fallback-ok"],
+    }
+    chat_calls = []
+
+    def _fake_make_chat_request(self, messages, tools=None, **kwargs):
+        chat_calls.append(
+            {
+                "provider": self.config.provider,
+                "messages": messages,
+                "tools": tools,
+                "kwargs": kwargs,
+            }
+        )
+        outcome = scripted_outcomes[self.config.provider].pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        usage_summary = build_empty_llm_usage_summary(
+            requested_model=self.config.model,
+            provider=self.config.provider,
+        )
+        usage_summary["selected_model"] = self.config.model
+        usage_summary["selected_model_reason"] = "configured_model"
+        usage_summary["selected_model_usage"] = {
+            "model": self.config.model,
+            "input_tokens": 11,
+            "output_tokens": 5,
+            "context_window": self.context_limit,
+        }
+        usage_summary["calls_total"] = 1
+        self._record_usage_summary(usage_summary)
+        return outcome
+
+    monkeypatch.setattr(OpenAIClient, "_make_chat_request", _fake_make_chat_request)
+    monkeypatch.setattr(DeepSeekClient, "_make_chat_request", _fake_make_chat_request)
+
+    client = create_llm_client(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+            fallback_provider="deepseek",
+            fallback_on_retry_exhausted=True,
+        )
+    )
+    messages = [{"role": "user", "content": "ping"}]
+    tools = [{"type": "function", "function": {"name": "lookup", "parameters": {}}}]
+
+    assert client.chat(messages, tools=tools, temperature=0.25, tool_choice="required") == "fallback-ok"
+    assert [call["provider"] for call in chat_calls] == ["lab", "lab", "deepseek"]
+    assert chat_calls[-1] == {
+        "provider": "deepseek",
+        "messages": messages,
+        "tools": tools,
+        "kwargs": {
+            "temperature": 0.25,
+            "tool_choice": "required",
+        },
+    }
+
+    summary = client.get_last_usage_summary()
+
+    assert summary["provider"] == "deepseek"
+    assert summary["selected_model"] == "deepseek-chat"
+    assert summary["fallback_used"] is True
+    assert summary["fallback_from_provider"] == "lab"
+    assert summary["fallback_to_provider"] == "deepseek"

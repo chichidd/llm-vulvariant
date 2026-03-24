@@ -604,6 +604,9 @@ def merge_aggregated_usage_summaries(
         "requested_model": None,
         "selected_model": None,
         "selected_models": [],
+        "fallback_used": False,
+        "fallback_from_provider": None,
+        "fallback_to_provider": None,
         "sessions_total": 0,
         "turns_total": 0,
         "calls_total": 0,
@@ -627,6 +630,8 @@ def merge_aggregated_usage_summaries(
     requested_models_seen = set()
     requested_model_is_mixed = False
     selected_models_seen = set()
+    fallback_from_providers_seen = set()
+    fallback_to_providers_seen = set()
     selected_usage_summary = _new_usage_totals()
 
     for summary in summaries:
@@ -634,6 +639,16 @@ def merge_aggregated_usage_summaries(
             continue
 
         normalized_summary = coerce_aggregated_usage_summary(summary)
+        if normalized_summary.get("fallback_used"):
+            merged["fallback_used"] = True
+            _collect_string_field(
+                fallback_from_providers_seen,
+                normalized_summary.get("fallback_from_provider"),
+            )
+            _collect_string_field(
+                fallback_to_providers_seen,
+                normalized_summary.get("fallback_to_provider"),
+            )
 
         if aggregated_usage_summary_has_calls(normalized_summary):
             _collect_string_field(sources_seen, normalized_summary.get("source"))
@@ -704,6 +719,17 @@ def merge_aggregated_usage_summaries(
         merged["requested_model"] = "mixed"
     else:
         _set_common_or_mixed_field(merged, "requested_model", requested_models_seen)
+    if merged["fallback_used"]:
+        _set_common_or_mixed_field(
+            merged,
+            "fallback_from_provider",
+            fallback_from_providers_seen,
+        )
+        _set_common_or_mixed_field(
+            merged,
+            "fallback_to_provider",
+            fallback_to_providers_seen,
+        )
 
     return merged
 
@@ -718,6 +744,10 @@ def coerce_aggregated_usage_summary(usage: Optional[Dict[str, Any]]) -> Dict[str
         provider = usage.get("provider")
         if provider:
             summary["provider"] = provider
+        summary["fallback_used"] = bool(usage.get("fallback_used"))
+        if summary["fallback_used"]:
+            summary["fallback_from_provider"] = usage.get("fallback_from_provider")
+            summary["fallback_to_provider"] = usage.get("fallback_to_provider")
 
         requested_model = usage.get("requested_model")
         if requested_model not in (None, ""):

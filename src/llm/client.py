@@ -397,13 +397,41 @@ class BaseLLMClient(ABC):
 
     def _get_normalized_fallback_provider(self) -> str:
         return (self.config.fallback_provider or "").strip().lower()
+
+    def _is_fallback_eligible_exception(self, exception: Exception) -> bool:
+        try:
+            from openai import (
+                APIConnectionError,
+                APITimeoutError,
+                APIStatusError,
+                InternalServerError,
+                RateLimitError,
+            )
+
+            if isinstance(
+                exception,
+                (
+                    APIConnectionError,
+                    APITimeoutError,
+                    InternalServerError,
+                    RateLimitError,
+                ),
+            ):
+                return True
+            if isinstance(exception, APIStatusError):
+                return exception.status_code >= 500 or exception.status_code == 429
+        except ImportError:
+            pass
+
+        import socket
+        return isinstance(exception, (ConnectionError, TimeoutError, socket.timeout))
     
     def _should_use_provider_fallback(self, exception: Exception) -> bool:
         return (
             self.config.provider == "lab"
             and bool(self.config.fallback_on_retry_exhausted)
             and self._get_normalized_fallback_provider() == "deepseek"
-            and self._should_retry(exception)
+            and self._is_fallback_eligible_exception(exception)
         )
 
     def _execute_with_provider_fallback(
@@ -749,6 +777,7 @@ class DeepSeekClient(BaseLLMClient):
 def create_llm_client(config: LLMConfig) -> BaseLLMClient:
     """Create an LLM client."""
     providers = {
+        "lab": OpenAIClient,
         "openai": OpenAIClient,
         "deepseek": DeepSeekClient,
     }

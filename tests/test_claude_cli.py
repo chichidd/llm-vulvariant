@@ -661,6 +661,41 @@ def test_merge_aggregated_usage_summaries_preserves_mixed_requested_model():
     assert merged["selected_model"] == "mixed"
 
 
+def test_merge_aggregated_usage_summaries_preserves_fallback_provenance():
+    merged = merge_aggregated_usage_summaries(
+        [
+            {
+                "source": "llm_client",
+                "provider": "lab",
+                "requested_model": "DeepSeek-V3.2",
+                "selected_model": "deepseek-chat",
+                "selected_models": ["deepseek-chat"],
+                "fallback_used": True,
+                "fallback_from_provider": "lab",
+                "fallback_to_provider": "deepseek",
+                "calls_total": 1,
+                "sessions_total": 1,
+            },
+            {
+                "source": "llm_client",
+                "provider": "lab",
+                "requested_model": "DeepSeek-V3.2",
+                "selected_model": "deepseek-chat",
+                "selected_models": ["deepseek-chat"],
+                "fallback_used": True,
+                "fallback_from_provider": "lab",
+                "fallback_to_provider": "deepseek",
+                "calls_total": 2,
+                "sessions_total": 2,
+            },
+        ]
+    )
+
+    assert merged["fallback_used"] is True
+    assert merged["fallback_from_provider"] == "lab"
+    assert merged["fallback_to_provider"] == "deepseek"
+
+
 def test_coerce_aggregated_usage_summary_preserves_zero_call_raw_usage():
     summary = coerce_aggregated_usage_summary(
         {
@@ -826,6 +861,9 @@ def test_coerce_aggregated_usage_summary_preserves_explicit_top_level_fallback_p
             "source": "claude_cli",
             "sessions_total": 2,
             "calls_total": 2,
+            "fallback_used": True,
+            "fallback_from_provider": "lab",
+            "fallback_to_provider": "deepseek",
             "calls_with_session_usage": 0,
             "calls_with_top_level_usage_fallback": 2,
             "calls_missing_usage": 0,
@@ -847,6 +885,9 @@ def test_coerce_aggregated_usage_summary_preserves_explicit_top_level_fallback_p
     )
 
     assert summary["calls_total"] == 2
+    assert summary["fallback_used"] is True
+    assert summary["fallback_from_provider"] == "lab"
+    assert summary["fallback_to_provider"] == "deepseek"
     assert summary["calls_with_session_usage"] == 0
     assert summary["calls_with_top_level_usage_fallback"] == 2
     assert summary["calls_with_selected_model_usage_session_fallback"] == 0
