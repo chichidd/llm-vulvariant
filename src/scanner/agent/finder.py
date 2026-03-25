@@ -2,9 +2,10 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from llm import BaseLLMClient
+from llm.tool_arguments import normalize_tool_arguments
 from utils.logger import get_logger
 from utils.number_utils import to_int
 from utils.llm_utils import extract_json_from_text
@@ -44,8 +45,9 @@ class AgenticVulnFinder:
         vulnerability_profile,
         max_iterations: int = 300,
         stop_when_critical_complete: bool = False,
-        critical_stop_mode: str = "min",
-        temperature: float = 1.0,
+        critical_stop_mode: str = "max",
+        critical_stop_max_priority: int = 2,
+        temperature: Optional[float] = None,
         max_tokens: int = 65536,
         verbose: bool = True,
         output_dir: Optional[Path] = None,
@@ -58,17 +60,27 @@ class AgenticVulnFinder:
         self.vulnerability_profile = vulnerability_profile
         self.max_iterations = max_iterations
         self.stop_when_critical_complete = stop_when_critical_complete
-        normalized_stop_mode = (critical_stop_mode or "min").lower()
+        normalized_stop_mode = (critical_stop_mode or "max").lower()
         if normalized_stop_mode not in {"min", "max"}:
             logger.warning(
-                f"Invalid critical_stop_mode={critical_stop_mode!r}; fallback to 'min'"
+                f"Invalid critical_stop_mode={critical_stop_mode!r}; fallback to 'max'"
             )
-            normalized_stop_mode = "min"
+            normalized_stop_mode = "max"
         self.critical_stop_mode = normalized_stop_mode
-        self.temperature = temperature
+        if critical_stop_max_priority not in {1, 2}:
+            logger.warning(
+                "Invalid critical_stop_max_priority=%r; fallback to 2",
+                critical_stop_max_priority,
+            )
+        self.critical_stop_max_priority = 1 if critical_stop_max_priority == 1 else 2
+        llm_config = getattr(self.llm_client, "config", None)
+        default_temperature = getattr(llm_config, "temperature", 0.0) if llm_config is not None else 0.0
+        self.temperature = default_temperature if temperature is None else temperature
         self.max_tokens = max_tokens
         self.verbose = verbose
         self.output_dir = output_dir
+        self.scan_languages = list(languages or [])
+        self.codeql_database_names = dict(codeql_database_names or {})
         self.toolkit = AgenticToolkit(
             repo_path,
             languages=languages,
@@ -117,6 +129,8 @@ class AgenticVulnFinder:
             cve_id=cve_id,
             module_priorities=self.module_priorities,
             file_to_module=self.file_to_module,
+            critical_stop_max_priority=self.critical_stop_max_priority,
+            scan_signature=self._build_scan_signature(),
         )
         
         # Connect memory to toolkit for status checking
@@ -126,6 +140,66 @@ class AgenticVulnFinder:
         
         if resumed:
             logger.info(f"Resumed scan with {len(self.memory.get_pending_files())} pending files")
+
+    def _build_scan_signature(self) -> Dict[str, Any]:
+        """Build the scan-shaping signature used for resume compatibility checks."""
+        llm_config = getattr(self.llm_client, "config", None)
+        languages = self.scan_languages
+        if not languages and hasattr(self.toolkit, "_languages"):
+            toolkit_languages = getattr(self.toolkit, "_languages", [])
+            if isinstance(toolkit_languages, list):
+                languages = toolkit_languages
+        codeql_database_names = self.codeql_database_names
+        if not codeql_database_names and hasattr(self.toolkit, "_codeql_database_names"):
+            toolkit_codeql_database_names = getattr(self.toolkit, "_codeql_database_names", {})
+            if isinstance(toolkit_codeql_database_names, dict):
+                codeql_database_names = toolkit_codeql_database_names
+        normalized_codeql_database_names = {}
+        for language, db_name in codeql_database_names.items():
+            language_key = str(language).strip().lower()
+            db_name_value = str(db_name).strip()
+            if language_key and db_name_value:
+                normalized_codeql_database_names[language_key] = db_name_value
+
+        return {
+            "llm": {
+                "provider": getattr(llm_config, "provider", ""),
+                "model": getattr(llm_config, "model", ""),
+                "base_url": getattr(llm_config, "base_url", ""),
+                "temperature": getattr(llm_config, "temperature", None),
+                "top_p": getattr(llm_config, "top_p", None),
+                "max_tokens": getattr(llm_config, "max_tokens", None),
+                "enable_thinking": getattr(llm_config, "enable_thinking", None),
+            },
+            "scan_config": {
+                "max_iterations": int(self.max_iterations),
+                "stop_when_critical_complete": bool(self.stop_when_critical_complete),
+                "critical_stop_mode": self.critical_stop_mode,
+                "critical_stop_max_priority": self.critical_stop_max_priority,
+                "scan_languages": sorted({
+                    str(lang).strip().lower()
+                    for lang in languages
+                    if str(lang).strip()
+                }),
+                "codeql_database_names": normalized_codeql_database_names,
+            },
+        }
+
+    def _critical_scope_label(self) -> str:
+        """Return the human-readable label for the configured critical scope."""
+        return "priority-1" if self.critical_stop_max_priority == 1 else "priority-1/2"
+
+    def _is_critical_complete(self) -> bool:
+        """Query critical-scope completion with compatibility for older memory doubles."""
+        if not self.memory:
+            return True
+        check_fn = getattr(self.memory, "is_critical_complete", None)
+        if not callable(check_fn):
+            return True
+        try:
+            return bool(check_fn(max_priority=self.critical_stop_max_priority))
+        except TypeError:
+            return bool(check_fn())
 
     def _clear_reasoning_content(self) -> List[Dict[str, Any]]:
         return clear_reasoning_content(self.conversation_history)
@@ -161,11 +235,30 @@ class AgenticVulnFinder:
         message = str(exc).lower()
         return any(pattern in message for pattern in _CONTEXT_LIMIT_ERROR_PATTERNS)
 
+    @staticmethod
+    def _parse_tool_arguments(
+        raw_arguments: Any,
+        parameter_schema: Optional[Dict[str, Any]] = None,
+        provider: Optional[str] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Normalize one tool-call argument payload into a JSON object."""
+        return normalize_tool_arguments(
+            raw_arguments,
+            parameters_schema=parameter_schema,
+            provider=provider,
+        )
+
     def _run_turn(self, iteration: int) -> int:
         sub_turn = 1
         messages = self._clear_reasoning_content()
         while True:
             tools = self.toolkit.get_available_tools()
+            tool_parameter_schemas = {
+                tool_definition.get("function", {}).get("name"): tool_definition.get("function", {}).get("parameters")
+                for tool_definition in tools
+                if isinstance(tool_definition, dict) and isinstance(tool_definition.get("function"), dict)
+            }
+            llm_provider = getattr(getattr(self.llm_client, "config", None), "provider", None)
             try:
                 message = self.llm_client.chat(
                     messages,
@@ -188,7 +281,8 @@ class AgenticVulnFinder:
             tool_calls = getattr(message, "tool_calls", None)
             if content is None and tool_calls is None:
                 logger.error("LLM returned no content and no tool calls.")
-                continue
+                self._commit_messages(messages)
+                return sub_turn
             messages.append(message)
             request_input_tokens = self._get_last_request_input_tokens()
             request_output_tokens = self._get_last_request_output_tokens()
@@ -214,19 +308,18 @@ class AgenticVulnFinder:
             
             for tool in tool_calls:
                 tool_name = tool.function.name
-                try:
-                    if not tool.function.arguments:
-                        parameters = {}
-                    else:
-                        parameters = json.loads(tool.function.arguments)
-                    if not isinstance(parameters, dict):
-                        raise TypeError("tool arguments must be a JSON object")
-                except json.JSONDecodeError:
-                    parameters = {}
-                    logger.error("Failed to parse tool arguments for %s", tool_name)
-                except TypeError as exc:
-                    logger.error("Invalid tool argument type for %s: %s", tool_name, exc)
-                    parameters = {}
+                parameters, argument_error = self._parse_tool_arguments(
+                    tool.function.arguments,
+                    parameter_schema=tool_parameter_schemas.get(tool_name),
+                    provider=llm_provider,
+                )
+                if argument_error:
+                    logger.error(argument_error)
+                    tool_result_content = f"Error: {argument_error}"
+                    if len(tool_result_content) > 10000:
+                        tool_result_content = tool_result_content[:10000] + "\n... [truncated]"
+                    messages.append({"role": "tool", "tool_call_id": tool.id, "content": tool_result_content})
+                    continue
                 if self.verbose:
                     logger.debug(
                         f"  [TOOL] {tool_name}: {json.dumps(parameters, ensure_ascii=False)[:500]}..."
@@ -248,7 +341,7 @@ class AgenticVulnFinder:
                                 f"  [DUPLICATE] Skipping already reported: {vuln_report.get('file_path', 'unknown')} - {vuln_report.get('vulnerability_type', 'unknown')}"
                             )
                         # Modify result to indicate duplicate
-                        tool_result_content = f"Note: This vulnerability was already reported. Do not report duplicates."
+                        tool_result_content = "Note: This vulnerability was already reported. Do not report duplicates."
                     else:
                         self.found_vulnerabilities.append(vuln_report)
                         if self.verbose:
@@ -368,7 +461,7 @@ class AgenticVulnFinder:
             return build_initial_user_message(
                 self.software_profile,
                 self.module_priorities,
-                # self.file_to_module,
+                critical_stop_max_priority=self.critical_stop_max_priority,
             )
         # Include progress info and already-scanned context for subsequent iterations
         progress_info = ""
@@ -376,8 +469,16 @@ class AgenticVulnFinder:
         findings = []
         
         if self.memory:
-            pending = self.memory.get_pending_files(max_priority=2)
+            pending = self.memory.get_pending_files(
+                max_priority=self.critical_stop_max_priority
+            )
             progress_info = self.memory.format_progress_info()
+            if self.critical_stop_max_priority == 1:
+                progress_info = (
+                    "Critical scope: priority-1 (AFFECTED) only. "
+                    "Do not spend turns on RELATED modules until all priority-1 files are complete.\n"
+                    f"{progress_info}"
+                )
             if pending:
                 progress_info += f" Pending: {pending[:50]}"
                 progress_info += "\nUse 'check_file_status' tool to get the status of specific files."
@@ -389,7 +490,16 @@ class AgenticVulnFinder:
             scanned_files=scanned_files,
             findings=findings,
             progress_info=progress_info,
+            critical_stop_max_priority=self.critical_stop_max_priority,
         )
+
+    def _finalize_iteration_progress(self, iteration: int) -> None:
+        """Clear per-iteration read tracking without changing coverage state."""
+        _ = iteration
+        consume_tracked_files = getattr(self.toolkit, "consume_tracked_files", None)
+        if not callable(consume_tracked_files):
+            return
+        consume_tracked_files()
 
     def run(self) -> Dict[str, Any]:
         if self.verbose:
@@ -400,7 +510,7 @@ class AgenticVulnFinder:
         iteration = 0  # iteration index
 
         while True:
-            critical_complete = self.memory.is_critical_complete() if self.memory else True
+            critical_complete = self._is_critical_complete()
             base_iteration_reached = iteration >= self.max_iterations
             if not self.stop_when_critical_complete:
                 if base_iteration_reached:
@@ -409,7 +519,8 @@ class AgenticVulnFinder:
                 if base_iteration_reached and critical_complete:
                     if self.verbose:
                         logger.info(
-                            "Reached stop condition: iterations >= baseline and priority-1 scope complete"
+                            "Reached stop condition: iterations >= baseline and %s scope complete",
+                            self._critical_scope_label(),
                         )
                     break
             else:
@@ -421,7 +532,10 @@ class AgenticVulnFinder:
                     break
                 if critical_complete and iteration > 0:
                     if self.verbose:
-                        logger.info("- Priority-1 scan scope is complete; stopping (critical-stop-mode=min)")
+                        logger.info(
+                            "- %s scan scope is complete; stopping (critical-stop-mode=min)",
+                            self._critical_scope_label(),
+                        )
                     break
 
             if self.verbose:
@@ -429,22 +543,39 @@ class AgenticVulnFinder:
                     logger.info(
                         f"\n[ITERATION {iteration + 1}] "
                         f"(baseline={self.max_iterations}, "
-                        "stop when baseline reached AND priority-1 complete)"
+                        f"stop when baseline reached AND {self._critical_scope_label()} complete)"
                     )
                 elif self.stop_when_critical_complete and self.critical_stop_mode == "min":
                     logger.info(
                         f"\n[ITERATION {iteration + 1}/{self.max_iterations}] "
-                        "(stop when baseline reached OR priority-1 complete)"
+                        f"(stop when baseline reached OR {self._critical_scope_label()} complete)"
                     )
                 else:
                     logger.info(f"\n[ITERATION {iteration + 1}/{self.max_iterations}]")
+            start_iteration_tracking = getattr(self.toolkit, "start_iteration_tracking", None)
+            if callable(start_iteration_tracking):
+                start_iteration_tracking()
             self.conversation_history.append(
                 {"role": "user", "content": self._get_user_message(iteration)}
             )
             prev_conv_length = len(self.conversation_history)
             _ = self._run_turn(iteration)
-            response = self.conversation_history[-1].content if hasattr(self.conversation_history[-1], "content") else self.conversation_history[-1].get("content")
-            completion_keywords = ["analysis complete"]  # legacy stop token
+            self._finalize_iteration_progress(iteration)
+            response = ""
+            # Only inspect assistant messages produced in the current turn.
+            for message in reversed(self.conversation_history[prev_conv_length:]):
+                role = getattr(message, "role", None)
+                if role is None and isinstance(message, dict):
+                    role = message.get("role")
+                if role != "assistant":
+                    continue
+                response = (
+                    message.content
+                    if hasattr(message, "content")
+                    else message.get("content", "")
+                )
+                break
+            completion_keywords = ["analysis complete"]  # currently only "analysis complete" as stop words
             should_stop = bool(
                 response
                 and (
@@ -452,11 +583,11 @@ class AgenticVulnFinder:
                     or self._is_completion_signal(str(response))
                 )
             )
-            critical_complete = self.memory.is_critical_complete() if self.memory else True
+            critical_complete = self._is_critical_complete()
             if should_stop and self.verbose:
                 logger.info("- LLM indicates analysis is complete")
             if self.stop_when_critical_complete and critical_complete and self.verbose:
-                logger.info("- Priority-1 scan scope is complete")
+                logger.info("- %s scan scope is complete", self._critical_scope_label())
 
             if self.output_dir:
                 conversations_dir = self.output_dir / "conversations"
@@ -472,20 +603,29 @@ class AgenticVulnFinder:
                 with open(summary_file, "w", encoding="utf-8") as handle:
                     json.dump(summarized, handle, indent=2, ensure_ascii=False)
                 self.conversation_history = self.conversation_history[:prev_conv_length]
-                
-                # Extract only complementary information (not duplicated in _get_user_message)
+
+                # Keep history bounded even if compression returns a failure stub.
                 assistant_summary = self._extract_complementary_summary(summarized)
-                self.conversation_history.append(
-                    {"role": "assistant", "content": assistant_summary}
-                )
+                if assistant_summary:
+                    self.conversation_history.append(
+                        {"role": "assistant", "content": assistant_summary}
+                    )
             
             iteration += 1
-            if should_stop and (not self.stop_when_critical_complete or self.critical_stop_mode == "min"):
-                break
+            if should_stop:
+                if not self.stop_when_critical_complete:
+                    break
+                if critical_complete and self.critical_stop_mode == "min":
+                    break
+                if self.verbose:
+                    logger.info(
+                        "- Ignore 'analysis complete' because %s scope is still incomplete",
+                        self._critical_scope_label(),
+                    )
             if should_stop and self.stop_when_critical_complete and self.critical_stop_mode == "max" and self.verbose:
                 logger.info(
                     "- Continue scanning until both conditions are met: "
-                    f"iterations >= {self.max_iterations} and priority-1 scope complete"
+                    f"iterations >= {self.max_iterations} and {self._critical_scope_label()} scope complete"
                 )
 
         if (
@@ -508,23 +648,37 @@ class AgenticVulnFinder:
         """Generate summary and save final memory state."""
         if not self.memory:
             return
-        
+
         # Generate LLM summary
         if self.llm_client:
             logger.info("Generating scan summary...")
-            self.memory.generate_summary()
-        
+            generate_summary_fn = getattr(self.memory, "generate_summary", None)
+            if callable(generate_summary_fn):
+                generate_summary_fn()
+
         # Save markdown report
-        self.memory.save_markdown()
+        save_markdown_fn = getattr(self.memory, "save_markdown", None)
+        if callable(save_markdown_fn):
+            save_markdown_fn()
         
         # Log completion status
         progress = self.memory.get_progress()
-        if self.memory.is_critical_complete():
-            logger.info("✅ All priority-1 (affected) files have been scanned")
+        priority_1 = progress.get("priority_1", {})
+        priority_2 = progress.get("priority_2", {})
+        critical_scope_total = int(priority_1.get("total", 0))
+        critical_scope_completed = int(priority_1.get("completed", 0))
+        if self.critical_stop_max_priority >= 2:
+            critical_scope_total += int(priority_2.get("total", 0))
+            critical_scope_completed += int(priority_2.get("completed", 0))
+
+        if self._is_critical_complete():
+            logger.info("✅ All %s files have been scanned", self._critical_scope_label())
         else:
             logger.warning(
-                f"⚠️ Some priority-1 files not scanned: "
-                f"{progress['priority_1']['completed']}/{progress['priority_1']['total']}"
+                "⚠️ Some %s files not scanned: %s/%s",
+                self._critical_scope_label(),
+                critical_scope_completed,
+                critical_scope_total,
             )
         
         logger.info(

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +36,7 @@ class DummyMemory:
     def __init__(self):
         self.summary_called = False
         self.markdown_called = False
+        self.completed = []
 
     def generate_summary(self):
         self.summary_called = True
@@ -63,6 +65,34 @@ class DummyMemory:
     def is_critical_complete(self):
         return True
 
+    def mark_file_completed(self, file_path: str, reason: str = ""):
+        self.completed.append((file_path, reason))
+
+
+class _CaptureScanSignatureMemory:
+    def __init__(self, output_dir, llm_client=None):
+        self.output_dir = output_dir
+        self.llm_client = llm_client
+        self.initialize_kwargs = None
+        self.memory = SimpleNamespace(file_status={})
+
+    def initialize(self, **kwargs):
+        self.initialize_kwargs = dict(kwargs)
+        return False
+
+
+class _LLMWithFullConfig:
+    def __init__(self):
+        self.config = SimpleNamespace(
+            provider="provider-x",
+            model="model-x",
+            base_url="https://api.example.com",
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=1536,
+            enable_thinking=True,
+        )
+
 
 
 def _make_finder(monkeypatch, tmp_path=None):
@@ -79,6 +109,47 @@ def _make_finder(monkeypatch, tmp_path=None):
         verbose=False,
         output_dir=tmp_path,
     )
+
+
+def test_init_memory_tracks_scan_signature(monkeypatch, tmp_path):
+    monkeypatch.setattr(finder_module, "AgenticToolkit", DummyToolkit)
+    monkeypatch.setattr(finder_module, "AgentMemoryManager", _CaptureScanSignatureMemory)
+
+    finder = finder_module.AgenticVulnFinder(
+        llm_client=_LLMWithFullConfig(),
+        repo_path=Path("/tmp/demo"),
+        software_profile=SimpleNamespace(version="target123", modules=[]),
+        vulnerability_profile=SimpleNamespace(
+            cve_id="CVE-2025-0001",
+            to_dict=lambda: {"cve_id": "CVE-2025-0001"},
+        ),
+        max_iterations=12,
+        stop_when_critical_complete=True,
+        critical_stop_mode="min",
+        critical_stop_max_priority=1,
+        verbose=False,
+        output_dir=tmp_path,
+        languages=["python", "java"],
+        codeql_database_names={"python": "db-py", "java": "db-java"},
+    )
+
+    signature = finder.memory.initialize_kwargs["scan_signature"]
+    scan_config = signature["scan_config"]
+    llm_config = signature["llm"]
+
+    assert scan_config["max_iterations"] == 12
+    assert scan_config["stop_when_critical_complete"] is True
+    assert scan_config["critical_stop_mode"] == "min"
+    assert scan_config["critical_stop_max_priority"] == 1
+    assert set(scan_config["scan_languages"]) == {"python", "java"}
+    assert scan_config["codeql_database_names"] == {
+        "python": "db-py",
+        "java": "db-java",
+    }
+    assert llm_config["provider"] == "provider-x"
+    assert llm_config["model"] == "model-x"
+    assert llm_config["base_url"] == "https://api.example.com"
+    assert llm_config["temperature"] == 0.2
 
 
 def test_extract_complementary_summary_structured(monkeypatch):
@@ -111,13 +182,25 @@ def test_extract_complementary_summary_non_dict_fallback(monkeypatch):
 
 def test_get_user_message_iteration_uses_progress_context(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.critical_stop_max_priority = 1
 
     captured = {}
+    pending_priorities = []
 
-    def fake_build_intermediate_user_message(scanned_files, findings, progress_info):
+    def fake_get_pending_files(max_priority=2):
+        pending_priorities.append(max_priority)
+        return ["a.py", "b.py"]
+
+    def fake_build_intermediate_user_message(
+        scanned_files,
+        findings,
+        progress_info,
+        critical_stop_max_priority=2,
+    ):
         captured["scanned_files"] = scanned_files
         captured["findings"] = findings
         captured["progress_info"] = progress_info
+        captured["critical_stop_max_priority"] = critical_stop_max_priority
         return "intermediate"
 
     finder.memory = SimpleNamespace(
@@ -132,7 +215,7 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
             "3/10 files scanned, 1 findings. "
             "Priority-1: 1/2, Priority-2: 1/3."
         ),
-        get_pending_files=lambda max_priority=2: ["a.py", "b.py"],
+        get_pending_files=fake_get_pending_files,
         get_scanned_files=lambda: ["done.py"],
         get_findings_summary=lambda: [{"file": "x.py", "type": "cmd", "confidence": "high"}],
     )
@@ -144,7 +227,35 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
     assert msg == "intermediate"
     assert captured["scanned_files"] == ["done.py"]
     assert captured["findings"][0]["type"] == "cmd"
+    assert captured["critical_stop_max_priority"] == 1
     assert "3/10 files scanned" in captured["progress_info"]
+    assert "Critical scope: priority-1 (AFFECTED) only." in captured["progress_info"]
+    assert pending_priorities == [1]
+
+
+def test_get_user_message_initial_passes_critical_stop_priority(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.critical_stop_max_priority = 1
+    captured = {}
+
+    def fake_build_initial_user_message(
+        software_profile,
+        module_priorities,
+        critical_stop_max_priority=2,
+    ):
+        captured["software_profile"] = software_profile
+        captured["module_priorities"] = module_priorities
+        captured["critical_stop_max_priority"] = critical_stop_max_priority
+        return "initial"
+
+    monkeypatch.setattr(finder_module, "build_initial_user_message", fake_build_initial_user_message)
+
+    msg = finder._get_user_message(iteration=0)
+
+    assert msg == "initial"
+    assert captured["software_profile"] is finder.software_profile
+    assert captured["module_priorities"] == finder.module_priorities
+    assert captured["critical_stop_max_priority"] == 1
 
 
 def test_run_stops_when_assistant_says_analysis_complete(monkeypatch):
@@ -162,27 +273,68 @@ def test_run_stops_when_assistant_says_analysis_complete(monkeypatch):
     assert result["vulnerabilities"] == []
 
 
-def test_run_stops_when_assistant_emits_completion_json(monkeypatch):
-    finder = _make_finder(monkeypatch, tmp_path=None)
+def test_run_ignores_previous_turn_completion_when_current_turn_has_no_assistant(
+    monkeypatch,
+    tmp_path,
+):
+    finder = _make_finder(monkeypatch, tmp_path=tmp_path)
+    finder.max_iterations = 3
+    finder.stop_when_critical_complete = False
 
     def fake_run_turn(iteration):
-        finder.conversation_history.append(
-            {
-                "role": "assistant",
-                "content": (
-                    "{\"analysis_complete\": false, \"summary\": \"partial\"}\n"
-                    "{\"analysis_complete\": true, \"summary\": \"scope done\"}"
-                ),
-            }
+        if iteration == 0:
+            finder.conversation_history.append({"role": "assistant", "content": "keep going"})
+        return 1
+
+    def fake_compress(*args, **kwargs):
+        _ = args
+        _ = kwargs
+        return {"content": {"summary": "analysis complete"}}
+
+    monkeypatch.setattr(finder, "_run_turn", fake_run_turn)
+    monkeypatch.setattr(finder_module, "compress_iteration_conversation", fake_compress)
+
+    result = finder.run()
+
+    assert result["iterations"] == 3
+
+
+def test_run_trims_iteration_history_when_compression_fails(monkeypatch, tmp_path):
+    finder = _make_finder(monkeypatch, tmp_path=tmp_path)
+    finder.max_iterations = 1
+    finder.stop_when_critical_complete = False
+
+    def fake_run_turn(iteration):
+        _ = iteration
+        finder.conversation_history.extend(
+            [
+                {"role": "assistant", "content": "investigating"},
+                {"role": "tool", "content": "tool output"},
+            ]
         )
         return 1
 
+    def fake_compress(*args, **kwargs):
+        _ = args
+        _ = kwargs
+        return {
+            "iteration_number": 0,
+            "error": "boom",
+            "summary": "Compression failed",
+            "raw_message_count": 2,
+        }
+
     monkeypatch.setattr(finder, "_run_turn", fake_run_turn)
+    monkeypatch.setattr(finder_module, "compress_iteration_conversation", fake_compress)
 
     result = finder.run()
 
     assert result["iterations"] == 1
-    assert result["vulnerabilities"] == []
+    assert all(message.get("role") != "tool" for message in finder.conversation_history)
+    assert finder.conversation_history[-1] == {
+        "role": "assistant",
+        "content": "**Summary**: Compression failed",
+    }
 
 
 def test_run_hits_max_iterations_without_stop(monkeypatch):
@@ -220,7 +372,7 @@ class _ToolAwareToolkit:
 
     def execute_tool(self, tool_name, parameters):
         self.executed.append((tool_name, parameters))
-        return SimpleNamespace(success=True, content='{"status":"ok"}', error=None)
+        return SimpleNamespace(success=True, content=json.dumps(parameters), error=None)
 
 
 class _UsageDrivenLLM:
@@ -268,11 +420,136 @@ class _UsageDrivenLLM:
         return usage.get("context_window", 0)
 
 
+class _SequencedLLM:
+    def __init__(self, responses, *, context_limit=4096, max_tokens=256):
+        self._responses = list(responses)
+        self._response_index = 0
+        self.chat_calls = 0
+        self.config = SimpleNamespace(max_tokens=max_tokens)
+        self.context_limit = context_limit
+
+    def chat(self, messages, tools=None, **kwargs):
+        _ = messages
+        _ = tools
+        _ = kwargs
+        self.chat_calls += 1
+        response = self._responses[self._response_index]
+        if self._response_index < len(self._responses) - 1:
+            self._response_index += 1
+        return response
+
+    def get_last_usage_summary(self):
+        return {}
+
+    def get_last_request_input_tokens(self) -> int:
+        return 0
+
+    def get_last_request_output_tokens(self) -> int:
+        return 0
+
+    def get_last_request_context_limit(self) -> int:
+        return self.context_limit
+
+
+def test_run_turn_stops_on_invalid_model_message(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    bad_llm = _SequencedLLM(
+        [
+            SimpleNamespace(content=None, tool_calls=None, reasoning_content=None),
+            SimpleNamespace(content="done", tool_calls=None, reasoning_content=None),
+        ]
+    )
+    finder.llm_client = bad_llm
+
+    result = finder._run_turn(iteration=0)
+
+    assert result == 1
+    assert bad_llm.chat_calls == 1
+
+
 def _tool_call(name="mock_tool", arguments="{}"):
     return SimpleNamespace(
         id="tool_1",
         function=SimpleNamespace(name=name, arguments=arguments),
     )
+
+
+def test_run_turn_rejects_malformed_tool_arguments_without_executing_tool(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.max_tokens = 256
+    toolkit = _ToolAwareToolkit()
+    finder.toolkit = toolkit
+    finder.llm_client = _UsageDrivenLLM(
+        responses=[
+            SimpleNamespace(
+                content="reporting",
+                reasoning_content=None,
+                tool_calls=[
+                    _tool_call(
+                        name="report_vulnerability",
+                        arguments='{"file_path":',
+                    )
+                ],
+            )
+        ],
+        input_tokens=[3500],
+        context_limit=4096,
+        max_tokens=256,
+    )
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 1
+    assert toolkit.executed == []
+    assert finder.found_vulnerabilities == []
+    assert finder.conversation_history[-1]["role"] == "tool"
+    assert "Failed to parse tool arguments" in finder.conversation_history[-1]["content"]
+
+
+def test_run_turn_accepts_dict_tool_arguments(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.max_tokens = 256
+    toolkit = _ToolAwareToolkit()
+    finder.toolkit = toolkit
+    finder.llm_client = _UsageDrivenLLM(
+        responses=[
+            SimpleNamespace(
+                content="reporting",
+                reasoning_content=None,
+                tool_calls=[
+                    _tool_call(
+                        name="report_vulnerability",
+                        arguments={
+                            "file_path": "app.py",
+                            "vulnerability_type": "cmd-injection",
+                            "description": "desc",
+                            "evidence": "evidence",
+                            "similarity_to_known": "same sink",
+                            "confidence": "high",
+                        },
+                    )
+                ],
+            )
+        ],
+        input_tokens=[3500],
+        context_limit=4096,
+        max_tokens=256,
+    )
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 1
+    assert toolkit.executed and toolkit.executed[0][0] == "report_vulnerability"
+    assert finder.found_vulnerabilities[0]["file_path"] == "app.py"
+    assert finder.conversation_history[-1]["role"] == "tool"
 
 
 def test_run_turn_uses_api_usage_to_stop_before_next_request(monkeypatch):
@@ -392,7 +669,7 @@ def test_run_turn_treats_empty_tool_calls_as_completed_turn(monkeypatch):
     assert finder.conversation_history[-1].content == "Analysis complete"
 
 
-def test_run_invalid_critical_stop_mode_falls_back_to_min(monkeypatch):
+def test_run_invalid_critical_stop_mode_falls_back_to_max(monkeypatch):
     monkeypatch.setattr(finder_module, "AgenticToolkit", DummyToolkit)
     finder = finder_module.AgenticVulnFinder(
         llm_client=DummyLLM(),
@@ -402,7 +679,7 @@ def test_run_invalid_critical_stop_mode_falls_back_to_min(monkeypatch):
             cve_id="CVE-2025-0001",
             to_dict=lambda: {"cve_id": "CVE-2025-0001"},
         ),
-        max_iterations=5,
+        max_iterations=1,
         stop_when_critical_complete=True,
         critical_stop_mode="unexpected",
         verbose=False,
@@ -418,5 +695,96 @@ def test_run_invalid_critical_stop_mode_falls_back_to_min(monkeypatch):
 
     result = finder.run()
 
-    assert finder.critical_stop_mode == "min"
+    assert finder.critical_stop_mode == "max"
     assert result["iterations"] == 1
+
+
+def test_run_ignores_analysis_complete_until_critical_scope_finishes(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.stop_when_critical_complete = True
+    finder.critical_stop_mode = "min"
+
+    class ToggleMemory:
+        def __init__(self):
+            self.complete = False
+
+        def is_critical_complete(self):
+            return self.complete
+
+        def get_pending_files(self, max_priority=2):
+            return ["a.py"] if not self.complete else []
+
+        def format_progress_info(self):
+            return "pending critical scope"
+
+        def get_scanned_files(self):
+            return []
+
+        def get_findings_summary(self):
+            return []
+
+        def get_progress(self):
+            return {
+                "completed": 1 if self.complete else 0,
+                "total_files": 1,
+                "findings": 0,
+                "priority_1": {"completed": 1 if self.complete else 0, "total": 1},
+                "priority_2": {"completed": 0, "total": 0},
+            }
+
+    memory = ToggleMemory()
+    finder.memory = memory
+    turn_count = {"value": 0}
+
+    def fake_run_turn(iteration):
+        turn_count["value"] += 1
+        finder.conversation_history.append({"role": "assistant", "content": "Analysis complete"})
+        if turn_count["value"] >= 2:
+            memory.complete = True
+        return 1
+
+    monkeypatch.setattr(finder, "_run_turn", fake_run_turn)
+
+    result = finder.run()
+
+    assert result["iterations"] == 2
+
+
+def test_finalize_iteration_progress_does_not_auto_complete_whole_file_reads(monkeypatch):
+    class TrackingToolkit(DummyToolkit):
+        def __init__(self, repo_path, **kwargs):
+            super().__init__(repo_path, **kwargs)
+            self._touched = []
+
+        def consume_tracked_files(self):
+            touched = list(self._touched)
+            self._touched = []
+            return touched
+
+    monkeypatch.setattr(finder_module, "AgenticToolkit", TrackingToolkit)
+    finder = finder_module.AgenticVulnFinder(
+        llm_client=DummyLLM(),
+        repo_path=Path("/tmp/demo"),
+        software_profile=SimpleNamespace(version="target123", modules=[]),
+        vulnerability_profile=SimpleNamespace(
+            cve_id="CVE-2025-0001",
+            to_dict=lambda: {"cve_id": "CVE-2025-0001"},
+        ),
+        max_iterations=1,
+        verbose=False,
+        output_dir=None,
+    )
+
+    class MemoryWithStatus(DummyMemory):
+        def __init__(self):
+            super().__init__()
+            self.memory = SimpleNamespace(file_status={"a.py": "pending", "b.py": "completed"})
+
+    memory = MemoryWithStatus()
+    finder.memory = memory
+    finder.toolkit._touched = ["a.py", "b.py"]
+
+    finder._finalize_iteration_progress(0)
+
+    assert memory.completed == []
+    assert finder.toolkit.consume_tracked_files() == []

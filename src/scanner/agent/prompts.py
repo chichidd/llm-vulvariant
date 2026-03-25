@@ -76,15 +76,8 @@ You have a set of tools (functions) available. When you need code information or
 
 Important notes:
 - When you find a vulnerability, you must use the report_vulnerability tool and provide complete evidence
-- When you are confident no more vulnerabilities remain in the current scope, do not emit speculative prose. Return a JSON completion signal as the assistant message:
-```json
-{{
-  "analysis_complete": true,
-  "summary": "Coverage summary in one paragraph",
-  "next_steps": ["optional_next_actions"]
-  }}
-```
-- For compatibility, a plain phrase containing `analysis complete` is acceptable, but structured JSON is preferred.
+- When you finish analyzing a file, use mark_file_completed for that file even if you did not find a vulnerability
+- When you are confident no more vulnerabilities remain, clearly state "analysis complete" and summarize your findings; no special formatting is required
 - Use tools to analyze code deeply; do not rely on speculation alone
 """
 
@@ -92,9 +85,11 @@ Important notes:
 def build_initial_user_message(
     software_profile: Any,
     module_priorities: Dict[str, int] = None,
+    critical_stop_max_priority: int = 2,
 ) -> str:
     software_dict = _to_dict(software_profile)
     module_priorities = module_priorities or {}
+    normalized_max_priority = 1 if critical_stop_max_priority == 1 else 2
     
     # Build prioritized module list
     modules = software_dict.get("modules", [])
@@ -129,12 +124,24 @@ def build_initial_user_message(
     # Count priority stats
     p1_count = sum(1 for p, _ in prioritized_modules if p == 1)
     p2_count = sum(1 for p, _ in prioritized_modules if p == 2)
+    related_scope_line = (
+        "- 🟡 RELATED "
+        f"({p2_count} modules): Follow-up scope only after all AFFECTED files are complete"
+        if normalized_max_priority == 1
+        else f"- 🟡 RELATED ({p2_count} modules): Calls or is called by affected modules - scan next"
+    )
+    analysis_scope_line = (
+        "This run's critical scope is 🔴 AFFECTED modules only. "
+        "Do not spend analysis turns on 🟡 RELATED modules while any 🔴 file is still pending."
+        if normalized_max_priority == 1
+        else "Do not skip any AFFECTED or RELATED modules."
+    )
 
     return f"""Based on the project architecture and the known vulnerability pattern, search for similar vulnerabilities in the codebase.
 
 ## Module Priority Guide
 - 🔴 AFFECTED ({p1_count} modules): Same category as the known vulnerability - **MUST SCAN FIRST**
-- 🟡 RELATED ({p2_count} modules): Calls or is called by affected modules - scan next
+{related_scope_line}
 - ⚪ OTHER: Lower priority
 
 ## Project Architecture
@@ -145,12 +152,14 @@ def build_initial_user_message(
 2. Understand the vulnerability pattern (SOURCE → FLOW → SINK)
 3. Use tools to deeply analyze code in priority order
 4. Report each finding with the report_vulnerability tool
+5. Mark each fully analyzed file with mark_file_completed, including files with no findings
 
 ## Analysis Strategy
 - For each AFFECTED module, scan ALL files for the vulnerability pattern
 - Look for alternative APIs that perform similar dangerous operations
 - Trace data flow from user input/config to dangerous sinks
-- Do not skip any AFFECTED or RELATED modules
+- {analysis_scope_line}
+- Keep scan progress accurate by calling mark_file_completed as soon as a file is fully analyzed
 
 Begin analysis now. Start with the 🔴 AFFECTED modules."""
 
@@ -159,12 +168,22 @@ def build_intermediate_user_message(
     scanned_files: List[str] = None,
     findings: List[Dict[str, str]] = None,
     progress_info: str = "",
+    critical_stop_max_priority: int = 2,
 ) -> str:
     """Build intermediate prompt with context about what's already been scanned."""
-    msg = """Continue your vulnerability analysis:
+    normalized_max_priority = 1 if critical_stop_max_priority == 1 else 2
+    if normalized_max_priority == 1:
+        msg = """Continue your vulnerability analysis:
+1. Have you scanned ALL files in AFFECTED (🔴) modules?
+2. Do not spend turns on RELATED (🟡) modules while any AFFECTED file remains pending
+3. Mark each fully analyzed file with mark_file_completed, even when it has no finding
+4. Do NOT repeat previous analysis - see scanned files and findings below."""
+    else:
+        msg = """Continue your vulnerability analysis:
 1. Have you scanned ALL files in AFFECTED (🔴) modules?
 2. Have you checked RELATED (🟡) modules?
-3. Do NOT repeat previous analysis - see scanned files and findings below."""
+3. Mark each fully analyzed file with mark_file_completed, even when it has no finding
+4. Do NOT repeat previous analysis - see scanned files and findings below."""
     
     if progress_info:
         msg += f"\n\n**Progress**: {progress_info}"

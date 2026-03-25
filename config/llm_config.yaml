@@ -16,15 +16,6 @@ llm:
   
   # Provider 特定配置
   providers:
-    lab:
-      base_url: "https://hkucvm.dynv6.net/v1"
-      model: "DeepSeek-V3.2"
-      api_key_env: "LAB_LLM_API_KEY"
-      max_tokens: 65536
-      context_limit: 65536
-      fallback_provider: "deepseek"
-      fallback_on_retry_exhausted: true
-
     deepseek:
       base_url: "https://api.deepseek.com/v1"
       model: "deepseek-chat"
@@ -37,4 +28,13 @@ llm:
       api_key_env: "NY_API_KEY"
       max_tokens: 65536
       context_limit: 65536
+
+    lab:
+      base_url: "https://hkucvm.dynv6.net/v1"
+      model: "DeepSeek-V3.2"
+      api_key_env: "LAB_LLM_API_KEY"
+      max_tokens: 65536
+      context_limit: 65536
+      fallback_provider: "deepseek"
+      fallback_on_retry_exhausted: true
     

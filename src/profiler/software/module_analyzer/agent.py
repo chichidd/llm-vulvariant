@@ -112,20 +112,23 @@ class ModuleAnalyzer:
             if is_complete:
                 return {
                     "modules": result.get("modules", []),
-                    "llm_calls": llm_calls
+                    "llm_calls": llm_calls,
+                    "analysis_completed": True,
                 }
             else:
                 logger.warning(f"Module analysis did not complete after {llm_calls} LLM calls")
                 return {
                     "modules": [],
-                    "llm_calls": llm_calls
+                    "llm_calls": llm_calls,
+                    "analysis_completed": False,
                 }
                 
         except Exception as e:
             logger.error(f"Error during module analysis: {e}")
             return {
                 "modules": [],
-                "llm_calls": 0
+                "llm_calls": 0,
+                "analysis_completed": False,
             }
     
     def _format_taxonomy(self, taxonomy: Dict[str, Any]) -> str:

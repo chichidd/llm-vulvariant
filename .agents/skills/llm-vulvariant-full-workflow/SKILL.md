@@ -2,7 +2,7 @@
 name: llm-vulvariant-full-workflow
 description: Execute the complete llm-vulvariant workflow from profile construction to scanning and exploitability/report generation. Use when given a vulnerability list (vuln.json-compatible) plus affected-version repositories and an optional explicit target repository subset materialized as a curated target root, and you need one reproducible run plan that outputs scan results and exploitable submission artifacts (`exploitable_findings_<run-id>[_strict].*`).
 ---
-
+[text](../llm-vulvariant-scan-pipeline)
 # LLM-VulVariant Full Workflow
 
 ## Overview
@@ -165,8 +165,7 @@ python -m cli.batch_scanner \
   --similarity-threshold 0.7 \
   --fallback-top-n 3 \
   --max-targets 3 \
-  --max-workers 8 \
-  --scan-workers 4 \
+  --jobs 4 \
   --max-iterations-cap 10 \
   --llm-provider "$LLM_PROVIDER" \
   --limit 1
@@ -183,7 +182,7 @@ python -m cli.exploitability \
   --scan-results-dir "$SCAN_OUTPUT_DIR" \
   --soft-profile-dir "$TARGET_SOFT_PROFILES_DIR" \
   --repo-base-path "$TARGET_REPOS_ROOT" \
-  --max-workers 4 \
+  --jobs 4 \
   --generate-report \
   --report-only-exploitable \
   --submission-output-dir "$EXP_OUTPUT_DIR" \
@@ -215,6 +214,5 @@ Expected artifacts:
 - Batch scan commands must pass explicit source/target roots and software-profile dirs.
 - `--force-regenerate-profiles` now implies fresh scans even if `--skip-existing-scans` is also enabled, so regenerated profile inputs are not paired with stale findings.
 - `--max-targets` still caps threshold-selected repos; `--fallback-top-n` only applies when no repo clears the threshold.
-- Add `--scan-workers` to tune batch scan parallelism in `batch_scanner`; default inherits `--max-workers`.
-- `cli.exploitability` 并行化目前主要覆盖 `folder` runtime（依赖 `--max-workers`），`run/shared` 保持串行策略。
+- `cli.exploitability --jobs > 1` requires `--claude-runtime-mode folder`; shared/run runtime layouts are only valid for serial execution.
 - To scan only an allowlist, `TARGET_REPOS_ROOT` itself must contain only the allowed repos.

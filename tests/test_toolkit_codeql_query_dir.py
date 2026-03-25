@@ -9,13 +9,13 @@ Verifies that:
 - _run_codeql_query writes the .ql file under output_dir/codeql-queries/<lang>/.
 """
 
-import json
-import shutil
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from profiler.fingerprint import stable_data_hash
 
 # ---------------------------------------------------------------------------
 # Helpers / Fakes
@@ -101,6 +101,30 @@ def _make_toolkit(
         )
 
     return tk, repo_path, output_dir, template_base
+
+
+def _write_codeql_database_metadata(
+    db_dir: Path,
+    *,
+    source_repo_path: Path,
+    sha: str,
+    primary_language: str = "python",
+) -> None:
+    """Write the minimal CodeQL DB identity metadata used by relocation fallback."""
+    db_dir.mkdir(parents=True, exist_ok=True)
+    (db_dir / "codeql-database.yml").write_text(
+        "\n".join(
+            [
+                "---",
+                f"sourceLocationPrefix: {source_repo_path.resolve()}",
+                f"primaryLanguage: {primary_language}",
+                "creationMetadata:",
+                f"  sha: {sha}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +290,262 @@ class TestRunCodeqlQuery:
         result = tk._run_codeql_query(query="select 1", query_name="test")
         assert result.success is False
         assert "not available" in result.error.lower()
+
+    def test_run_codeql_query_falls_back_to_profile_generated_database_name(self, tmp_path):
+        tk, repo_path, output_dir, _ = _make_toolkit(tmp_path)
+        tk._software_profile = SimpleNamespace(version="deadbeef1234")
+        tk._codeql_database_names = {"python": "fake_repo-deadbeef-python"}
+        repo_path_hash = stable_data_hash(str(repo_path.resolve()))[:12]
+        actual_db_name = f"{repo_path.name}-{repo_path_hash}-deadbeef-python"
+        _write_codeql_database_metadata(
+            tk._codeql_db_base_path / actual_db_name,
+            source_repo_path=repo_path.resolve(),
+            sha="deadbeef1234",
+        )
+
+        captured = {}
+
+        def fake_run_query(database_path, query, output_format="sarif-latest"):
+            captured["database_path"] = database_path
+            captured["query"] = query
+            captured["output_format"] = output_format
+            return True, {"runs": [{"results": []}]}
+
+        tk._codeql_analyzer = SimpleNamespace(run_query=fake_run_query)
+
+        result = tk._run_codeql_query(query="import python\nselect 1", query_name="fallback_query")
+
+        assert result.success is True
+        assert captured["database_path"].endswith(actual_db_name)
+        assert (output_dir / "codeql-queries" / "python" / "fallback_query.ql").exists()
+
+    def test_run_codeql_query_finds_relocated_profile_generated_database(self, tmp_path):
+        tk, repo_path, output_dir, _ = _make_toolkit(tmp_path)
+        original_repo_path = (tmp_path / "old-root" / repo_path.name).resolve()
+        tk._software_profile = SimpleNamespace(
+            version="deadbeef1234",
+            metadata={"profile_repo_path": str(original_repo_path)},
+        )
+        tk._codeql_database_names = {"python": "fake_repo-deadbeef-python"}
+        old_repo_path_hash = stable_data_hash(str(original_repo_path))[:12]
+        actual_db_name = f"{repo_path.name}-{old_repo_path_hash}-deadbeef-python"
+        _write_codeql_database_metadata(
+            tk._codeql_db_base_path / actual_db_name,
+            source_repo_path=original_repo_path,
+            sha="deadbeef1234",
+        )
+
+        captured = {}
+
+        def fake_run_query(database_path, query, output_format="sarif-latest"):
+            captured["database_path"] = database_path
+            captured["query"] = query
+            captured["output_format"] = output_format
+            return True, {"runs": [{"results": []}]}
+
+        tk._codeql_analyzer = SimpleNamespace(run_query=fake_run_query)
+
+        result = tk._run_codeql_query(query="import python\nselect 1", query_name="relocated_query")
+
+        assert result.success is True
+        assert captured["database_path"].endswith(actual_db_name)
+        assert (output_dir / "codeql-queries" / "python" / "relocated_query.ql").exists()
+
+    def test_run_codeql_query_ignores_current_path_hash_database_when_profile_was_generated_elsewhere(
+        self,
+        tmp_path,
+    ):
+        tk, repo_path, output_dir, _ = _make_toolkit(tmp_path)
+        original_repo_path = (tmp_path / "old-root" / repo_path.name).resolve()
+        tk._software_profile = SimpleNamespace(
+            version="deadbeef1234",
+            metadata={"profile_repo_path": str(original_repo_path)},
+        )
+        tk._codeql_database_names = {"python": "fake_repo-deadbeef-python"}
+
+        expected_db_name = (
+            f"{repo_path.name}-{stable_data_hash(str(original_repo_path))[:12]}-deadbeef-python"
+        )
+        current_hash_db_name = (
+            f"{repo_path.name}-{stable_data_hash(str(repo_path.resolve()))[:12]}-deadbeef-python"
+        )
+        _write_codeql_database_metadata(
+            tk._codeql_db_base_path / expected_db_name,
+            source_repo_path=original_repo_path,
+            sha="deadbeef1234",
+        )
+        _write_codeql_database_metadata(
+            tk._codeql_db_base_path / current_hash_db_name,
+            source_repo_path=repo_path.resolve(),
+            sha="deadbeef1234",
+        )
+
+        captured = {}
+
+        def fake_run_query(database_path, query, output_format="sarif-latest"):
+            captured["database_path"] = database_path
+            captured["query"] = query
+            captured["output_format"] = output_format
+            return True, {"runs": [{"results": []}]}
+
+        tk._codeql_analyzer = SimpleNamespace(run_query=fake_run_query)
+
+        result = tk._run_codeql_query(
+            query="import python\nselect 1",
+            query_name="ignore_current_hash_query",
+        )
+
+        assert result.success is True
+        assert captured["database_path"].endswith(expected_db_name)
+        assert not captured["database_path"].endswith(current_hash_db_name)
+        assert (output_dir / "codeql-queries" / "python" / "ignore_current_hash_query.ql").exists()
+
+    def test_run_codeql_query_prefers_matching_profile_source_database_over_newer_collision(self, tmp_path):
+        tk, repo_path, output_dir, _ = _make_toolkit(tmp_path)
+        expected_source_repo_path = (tmp_path / "old-root-a" / repo_path.name).resolve()
+        colliding_source_repo_path = (tmp_path / "old-root-b" / repo_path.name).resolve()
+        tk._software_profile = SimpleNamespace(
+            version="deadbeef1234",
+            metadata={"profile_repo_path": str(expected_source_repo_path)},
+        )
+        tk._codeql_database_names = {"python": "fake_repo-deadbeef-python"}
+
+        expected_repo_path_hash = stable_data_hash(str(expected_source_repo_path))[:12]
+        colliding_repo_path_hash = stable_data_hash(str(colliding_source_repo_path))[:12]
+        expected_db_name = f"{repo_path.name}-{expected_repo_path_hash}-deadbeef-python"
+        colliding_db_name = f"{repo_path.name}-{colliding_repo_path_hash}-deadbeef-python"
+        expected_db_dir = tk._codeql_db_base_path / expected_db_name
+        colliding_db_dir = tk._codeql_db_base_path / colliding_db_name
+        _write_codeql_database_metadata(
+            expected_db_dir,
+            source_repo_path=expected_source_repo_path,
+            sha="deadbeef1234",
+        )
+        _write_codeql_database_metadata(
+            colliding_db_dir,
+            source_repo_path=colliding_source_repo_path,
+            sha="deadbeef1234",
+        )
+        os.utime(expected_db_dir, ns=(1, 1))
+        os.utime(colliding_db_dir, ns=(2, 2))
+
+        captured = {}
+
+        def fake_run_query(database_path, query, output_format="sarif-latest"):
+            captured["database_path"] = database_path
+            captured["query"] = query
+            captured["output_format"] = output_format
+            return True, {"runs": [{"results": []}]}
+
+        tk._codeql_analyzer = SimpleNamespace(run_query=fake_run_query)
+
+        result = tk._run_codeql_query(query="import python\nselect 1", query_name="multi_relocation_query")
+
+        assert result.success is True
+        assert captured["database_path"].endswith(expected_db_name)
+        assert not captured["database_path"].endswith(colliding_db_name)
+        assert (output_dir / "codeql-queries" / "python" / "multi_relocation_query.ql").exists()
+
+    def test_run_codeql_query_rejects_exact_profile_generated_database_with_mismatched_metadata(
+        self,
+        tmp_path,
+    ):
+        tk, repo_path, _, _ = _make_toolkit(tmp_path)
+        original_repo_path = (tmp_path / "old-root" / repo_path.name).resolve()
+        tk._software_profile = SimpleNamespace(
+            version="deadbeef1234",
+            metadata={"profile_repo_path": str(original_repo_path)},
+        )
+        tk._codeql_database_names = {"python": "fake_repo-deadbeef-python"}
+
+        exact_db_name = (
+            f"{repo_path.name}-{stable_data_hash(str(original_repo_path))[:12]}-deadbeef-python"
+        )
+        _write_codeql_database_metadata(
+            tk._codeql_db_base_path / exact_db_name,
+            source_repo_path=repo_path.resolve(),
+            sha="deadbeef1234",
+        )
+        tk._codeql_analyzer = SimpleNamespace(
+            run_query=lambda **kwargs: pytest.fail("mismatched exact DB should not run CodeQL"),
+        )
+
+        result = tk._run_codeql_query(
+            query="import python\nselect 1",
+            query_name="mismatched_exact_query",
+        )
+
+        assert result.success is False
+        assert "CodeQL database not found" in (result.error or "")
+
+    def test_run_codeql_query_rejects_ambiguous_relocated_databases_without_profile_repo_path(
+        self,
+        tmp_path,
+    ):
+        tk, repo_path, _, _ = _make_toolkit(tmp_path)
+        tk._software_profile = SimpleNamespace(version="deadbeef1234")
+        tk._codeql_database_names = {"python": "fake_repo-deadbeef-python"}
+
+        source_repo_path_a = (tmp_path / "old-root-a" / repo_path.name).resolve()
+        source_repo_path_b = (tmp_path / "old-root-b" / repo_path.name).resolve()
+        db_name_a = (
+            f"{repo_path.name}-{stable_data_hash(str(source_repo_path_a))[:12]}-deadbeef-python"
+        )
+        db_name_b = (
+            f"{repo_path.name}-{stable_data_hash(str(source_repo_path_b))[:12]}-deadbeef-python"
+        )
+        _write_codeql_database_metadata(
+            tk._codeql_db_base_path / db_name_a,
+            source_repo_path=source_repo_path_a,
+            sha="deadbeef1234",
+        )
+        _write_codeql_database_metadata(
+            tk._codeql_db_base_path / db_name_b,
+            source_repo_path=source_repo_path_b,
+            sha="deadbeef1234",
+        )
+        tk._codeql_analyzer = SimpleNamespace(
+            run_query=lambda **kwargs: pytest.fail("ambiguous fallback should not run CodeQL"),
+        )
+
+        result = tk._run_codeql_query(
+            query="import python\nselect 1",
+            query_name="ambiguous_relocation_query",
+        )
+
+        assert result.success is False
+        assert "CodeQL database not found" in (result.error or "")
+
+    def test_run_codeql_query_prefers_profile_generated_database_over_legacy_name(self, tmp_path):
+        tk, repo_path, output_dir, _ = _make_toolkit(tmp_path)
+        tk._software_profile = SimpleNamespace(version="deadbeef1234")
+        legacy_db_name = "fake_repo-deadbeef-python"
+        hashed_repo_path = stable_data_hash(str(repo_path.resolve()))[:12]
+        hashed_db_name = f"{repo_path.name}-{hashed_repo_path}-deadbeef-python"
+        tk._codeql_database_names = {"python": legacy_db_name}
+        (tk._codeql_db_base_path / legacy_db_name).mkdir(parents=True)
+        _write_codeql_database_metadata(
+            tk._codeql_db_base_path / hashed_db_name,
+            source_repo_path=repo_path.resolve(),
+            sha="deadbeef1234",
+        )
+
+        captured = {}
+
+        def fake_run_query(database_path, query, output_format="sarif-latest"):
+            captured["database_path"] = database_path
+            captured["query"] = query
+            captured["output_format"] = output_format
+            return True, {"runs": [{"results": []}]}
+
+        tk._codeql_analyzer = SimpleNamespace(run_query=fake_run_query)
+
+        result = tk._run_codeql_query(query="import python\nselect 1", query_name="prefer_hashed_query")
+
+        assert result.success is True
+        assert captured["database_path"].endswith(hashed_db_name)
+        assert not captured["database_path"].endswith(legacy_db_name)
+        assert (output_dir / "codeql-queries" / "python" / "prefer_hashed_query.ql").exists()
 
 
 class TestSetMemoryManagerLate:

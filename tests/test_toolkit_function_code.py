@@ -43,6 +43,50 @@ def test_get_function_code_skips_call_site_before_definition(tmp_path, monkeypat
     assert "const value = loadSettings();" not in result.content
 
 
+def test_get_function_code_requires_qualified_python_name_for_ambiguous_methods(tmp_path, monkeypatch):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    source_file = repo_path / "service.py"
+    source_file.write_text(
+        "\n".join(
+            [
+                "class Alpha:",
+                "    def handle(self):",
+                "        return 'alpha'",
+                "",
+                "class Beta:",
+                "    def handle(self):",
+                "        return 'beta'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        toolkit_module,
+        "_path_config",
+        {
+            "repo_root": tmp_path,
+            "codeql_db_path": tmp_path / "codeql-dbs",
+        },
+    )
+    monkeypatch.setattr(toolkit_module, "CodeQLAnalyzer", _FakeCodeQLAnalyzer)
+
+    toolkit = toolkit_module.AgenticToolkit(repo_path=repo_path, languages=["python"])
+
+    ambiguous = toolkit._get_function_code(source_file.name, "handle")
+    resolved = toolkit._get_function_code(source_file.name, "Beta.handle")
+
+    assert ambiguous.success is False
+    assert "Ambiguous Python symbol 'handle'" in (ambiguous.error or "")
+    assert resolved.success is True
+    assert "def handle(self):" in resolved.content
+    assert "return 'beta'" in resolved.content
+    assert "return 'alpha'" not in resolved.content
+
+
 def test_get_function_code_matches_java_annotation_prefixed_declaration(tmp_path, monkeypatch):
     repo_path = tmp_path / "repo"
     repo_path.mkdir()

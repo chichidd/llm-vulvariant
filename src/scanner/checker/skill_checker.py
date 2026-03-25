@@ -16,7 +16,6 @@ import hashlib
 import json
 import os
 import re
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -389,17 +388,21 @@ class SkillExploitabilityChecker:
 
         if not ordered_vulnerabilities:
             logger.info(f"No vulnerabilities found in {findings_path}")
-            result_doc = self._init_or_load_results(
-                output_path=output_path,
-                findings_path=findings_path,
-                repo_path=repo_path,
-                software_profile_path=software_profile_path,
-                total_vulns=0,
-                current_findings=current_findings_by_id,
-                findings_signature=findings_signature,
-                run_id=run_id,
-                claude_config_dir=runtime_dir,
-            )
+            try:
+                result_doc = self._init_or_load_results(
+                    output_path=output_path,
+                    findings_path=findings_path,
+                    repo_path=repo_path,
+                    software_profile_path=software_profile_path,
+                    total_vulns=0,
+                    current_findings=current_findings_by_id,
+                    findings_signature=findings_signature,
+                    run_id=run_id,
+                    claude_config_dir=runtime_dir,
+                )
+            except RuntimeError as exc:
+                logger.error(str(exc))
+                return self._error_result(str(exc))
             result_doc["metadata"]["completed_at"] = datetime.now().isoformat()
             result_doc = self._save_results(
                 output_path,
@@ -420,17 +423,21 @@ class SkillExploitabilityChecker:
         logger.info(f"Analyzing {len(ordered_vulnerabilities)} vulnerabilities from {findings_path}")
 
         # Initialize or load existing results
-        result_doc = self._init_or_load_results(
-            output_path=output_path,
-            findings_path=findings_path,
-            repo_path=repo_path,
-            software_profile_path=software_profile_path,
-            total_vulns=len(ordered_vulnerabilities),
-            current_findings=current_findings_by_id,
-            findings_signature=findings_signature,
-            run_id=run_id,
-            claude_config_dir=runtime_dir,
-        )
+        try:
+            result_doc = self._init_or_load_results(
+                output_path=output_path,
+                findings_path=findings_path,
+                repo_path=repo_path,
+                software_profile_path=software_profile_path,
+                total_vulns=len(ordered_vulnerabilities),
+                current_findings=current_findings_by_id,
+                findings_signature=findings_signature,
+                run_id=run_id,
+                claude_config_dir=runtime_dir,
+            )
+        except RuntimeError as exc:
+            logger.error(str(exc))
+            return self._error_result(str(exc))
 
         # Get already processed indices
         # Keep retryable rows out of the processed set so resumed runs revisit them.
@@ -518,12 +525,18 @@ class SkillExploitabilityChecker:
         """
         result_json_path: Optional[Path] = None
         claude_record_path: Optional[Path] = None
-        fallback_min_mtime: Optional[float] = None
         if evidence_dir:
             result_json_path = evidence_dir / "analysis_output.json"
             claude_record_path = evidence_dir / "claude_cli_invocation.json"
-            self._prepare_result_json_path(result_json_path)
-            fallback_min_mtime = time.time()
+            try:
+                self._prepare_result_json_path(result_json_path)
+            except RuntimeError as exc:
+                analysis = self._create_error_vuln_result(vuln, finding_id, str(exc))
+                analysis["finding_id"] = finding_id
+                analysis["original_finding"] = vuln
+                if claude_record_path:
+                    analysis["claude_cli_record_path"] = str(claude_record_path)
+                return analysis
 
         prompt = self._build_prompt(
             vuln, repo_path,
@@ -549,10 +562,7 @@ class SkillExploitabilityChecker:
             analysis.get("verdict")
         ) in {"UNKNOWN", "ERROR"}
         if needs_fallback and result_json_path:
-            file_analysis = self._load_analysis_from_output_path(
-                result_json_path,
-                min_mtime=fallback_min_mtime,
-            )
+            file_analysis = self._load_analysis_from_output_path(result_json_path)
             if file_analysis:
                 analysis = file_analysis
 
@@ -585,21 +595,11 @@ class SkillExploitabilityChecker:
         result_json_path: Optional[Path] = None,
     ) -> str:
         """Build Claude prompt for single vulnerability analysis."""
-        import os
-
         # Build concise vulnerability summary
         file_path = vuln.get('file_path', 'unknown')
         vuln_type = vuln.get('vulnerability_type', 'unknown')
         evidence = vuln.get('evidence', '')[:400]
         description = vuln.get('description', '')[:200]
-
-        # Collect host API key to forward into the container
-        api_key = (
-            os.environ.get("DEEPSEEK_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("NY_API_KEY")
-            or ""
-        )
         
         lines = [
             f"Quick vulnerability check using {self.skill_name} skill:",
@@ -639,7 +639,10 @@ class SkillExploitabilityChecker:
             f"COMMIT_HASH: {commit_hash}" if commit_hash else "COMMIT_HASH: HEAD",
             f"REPO_PATH: {repo_path.resolve()}",
             f"EVIDENCE_DIR: {evidence_dir.resolve() if evidence_dir else str(repo_path.resolve() / 'evidence')}",
-            f"API_KEY: {api_key}",
+            "If Docker verification needs provider credentials, forward the host environment into the container with",
+            "`docker run -e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY ...` so Docker copies the current values.",
+            "Do not leave `<API_KEY>` placeholders in the command.",
+            "Do not print or copy secret values into stdout, files, or the final JSON.",
             "",
             "After the static analysis (phases 1-4), if verdict is EXPLOITABLE, also run",
             "Phase 5 (Docker PoC Verification) from the skill and include the",
@@ -655,32 +658,17 @@ class SkillExploitabilityChecker:
             if result_json_path.exists():
                 result_json_path.unlink()
         except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(f"Failed to prepare result file {result_json_path}: {exc}")
+            raise RuntimeError(
+                f"Failed to prepare result file {result_json_path}: {exc}"
+            ) from exc
 
     def _load_analysis_from_output_path(
         self,
         output_json_path: Path,
-        min_mtime: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         """Load analysis JSON from a result file path provided in the prompt."""
         if not output_json_path.exists():
             return None
-
-        if min_mtime is not None:
-            try:
-                file_mtime = output_json_path.stat().st_mtime
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.warning(f"Failed to stat analysis output file {output_json_path}: {exc}")
-                return None
-            # Some filesystems have coarse mtime precision; allow a small skew
-            # to avoid rejecting fresh writes from the current invocation.
-            mtime_tolerance_seconds = 1.0
-            if (file_mtime + mtime_tolerance_seconds) < min_mtime:
-                logger.warning(
-                    f"Ignoring stale analysis output file {output_json_path} "
-                    f"(mtime={file_mtime:.6f} < min_mtime={min_mtime:.6f})"
-                )
-                return None
 
         try:
             text = output_json_path.read_text(encoding="utf-8")
@@ -1032,7 +1020,11 @@ class SkillExploitabilityChecker:
                         metadata["claude_runtime_dir"] = str(claude_config_dir)
                     return existing
             except Exception as exc:
-                logger.warning(f"Failed to resume existing exploitability results from {output_path}: {exc}")
+                logger.warning(
+                    "Failed to resume existing exploitability results from %s; reinitializing output: %s",
+                    output_path,
+                    exc,
+                )
         
         return {
             "metadata": {

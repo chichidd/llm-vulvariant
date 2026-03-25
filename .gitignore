@@ -156,4 +156,5 @@ codeql_dbs/
 .codeql/
 notebooks/
 .claude-runtime/
+.runtime-locks/
 .ruff_cache/

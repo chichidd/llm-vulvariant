@@ -133,6 +133,37 @@ def _session_count_from_usage_summary(summary: Optional[Dict[str, Any]]) -> int:
         return 1
     return 1 if summary else 0
 
+
+def _logical_call_count_from_usage_summary(summary: Optional[Dict[str, Any]]) -> int:
+    """Return how many logical calls one usage summary should count toward.
+
+    Explicit call/session totals win whenever they are present. This preserves
+    raw retried Claude CLI summaries that already report their internal retry
+    count, while still defaulting to one logical call for plain single-response
+    summaries without explicit totals.
+    """
+    if not isinstance(summary, dict) or not summary:
+        return 0
+    if _is_aggregated_usage_summary(summary):
+        return max(
+            to_int(summary.get("sessions_total")),
+            to_int(summary.get("calls_total")),
+        )
+    return 1
+
+
+def _call_total_from_usage_summary(summary: Optional[Dict[str, Any]]) -> int:
+    """Return the flat total-call contribution for one usage summary."""
+    if not isinstance(summary, dict) or not summary:
+        return 0
+    explicit_count = max(
+        to_int(summary.get("sessions_total")),
+        to_int(summary.get("calls_total")),
+    )
+    if explicit_count > 0:
+        return explicit_count
+    return _logical_call_count_from_usage_summary(summary)
+
 def _get_model_usage_map(claude_output: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     if not isinstance(claude_output, dict):
         return {}
@@ -375,16 +406,9 @@ def count_claude_cli_attempts(response: Any) -> int:
 
     prior_attempts = getattr(response, "prior_attempts", None) or []
     attempts_total = len(prior_attempts)
-    usage_summary = getattr(response, "usage_summary", None)
-    if isinstance(usage_summary, dict) and (
-        usage_summary.get("session_usage")
-        or usage_summary.get("top_level_usage")
-        or usage_summary.get("selected_model_usage")
-    ):
-        return attempts_total + 1
-    if getattr(response, "timed_out", False):
-        return attempts_total + 1
-    if getattr(response, "returncode", None) == 0:
+    # A completed subprocess always has a returncode; timeout-only failures keep
+    # ``returncode`` as ``None`` but still count as one real attempt.
+    if getattr(response, "returncode", None) is not None or getattr(response, "timed_out", False):
         return attempts_total + 1
     return attempts_total
 
@@ -464,7 +488,7 @@ def aggregate_usage_summaries(
     usage_summaries: Iterable[Optional[Dict[str, Any]]],
     selected_model: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Aggregate usage summaries with session totals as the default flat totals."""
+    """Aggregate usage summaries with logical-call totals and session counts."""
     selected_models_seen = set()
     sources_seen = set()
     providers_seen = set()
@@ -511,39 +535,42 @@ def aggregate_usage_summaries(
             aggregate["fallback_to_provider"] = item.get("fallback_to_provider")
 
         item_sessions = _session_count_from_usage_summary(item)
+        item_calls = _logical_call_count_from_usage_summary(item)
+        item_calls_total = _call_total_from_usage_summary(item)
         aggregate["sessions_total"] += item_sessions
         aggregate["turns_total"] += to_int(item.get("turns_total"))
+        aggregate["calls_total"] += item_calls_total
 
         selected_usage_raw = item.get("selected_model_usage")
         selected_usage = _normalize_usage_totals(selected_usage_raw)
         model_name = None
         if isinstance(selected_usage_raw, dict):
-            aggregate["calls_with_selected_model_usage"] += item_sessions
+            aggregate["calls_with_selected_model_usage"] += item_calls
             model_name = selected_usage_raw.get("model")
             if model_name:
                 selected_models_seen.add(str(model_name))
             _add_usage_totals(selected_usage_summary, selected_usage)
         else:
-            aggregate["calls_missing_selected_model_usage"] += item_sessions
+            aggregate["calls_missing_selected_model_usage"] += item_calls
 
         session_usage = _normalize_usage_totals(item.get("session_usage"))
         usage_for_totals = None
         if session_usage is not None:
-            aggregate["calls_with_session_usage"] += item_sessions
+            aggregate["calls_with_session_usage"] += item_calls
             usage_for_totals = dict(session_usage)
         else:
             top_level_usage = _normalize_usage_totals(item.get("top_level_usage"))
             if top_level_usage is not None:
-                aggregate["calls_with_top_level_usage_fallback"] += item_sessions
+                aggregate["calls_with_top_level_usage_fallback"] += item_calls
                 usage_for_totals = dict(top_level_usage)
             elif selected_usage is not None:
                 # Compatibility fallback for legacy raw summaries that only stored
                 # selected-model usage. This keeps resume/merge flows stable even
                 # though session totals are unavailable for those historical items.
-                aggregate["calls_with_selected_model_usage_session_fallback"] += item_sessions
+                aggregate["calls_with_selected_model_usage_session_fallback"] += item_calls
                 usage_for_totals = dict(selected_usage)
             else:
-                aggregate["calls_missing_usage"] += item_sessions
+                aggregate["calls_missing_usage"] += item_calls
 
         if model_name is None:
             model_name = item.get("selected_model") or item.get("requested_model")
@@ -570,7 +597,6 @@ def aggregate_usage_summaries(
             aggregate["cost_usd"] += session_cost
             aggregate["request_cost_usd"] += session_cost
 
-    aggregate["calls_total"] = aggregate["sessions_total"]
     aggregate["cost_usd"] = round(aggregate["cost_usd"], 6)
     aggregate["request_cost_usd"] = round(aggregate["request_cost_usd"], 6)
     aggregate["session_usage_summary"] = _finalize_usage_totals(aggregate["session_usage_summary"])

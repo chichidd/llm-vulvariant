@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from profiler.software import repo_analyzer as repo_analyzer_mod
 from profiler.software.repo_analyzer import RepoAnalyzer
 from utils.codeql_native import CallGraphEdge
@@ -187,3 +189,90 @@ def test_repo_analyzer_auto_detects_cuda_translation_units_for_cpp_codeql(tmp_pa
     assert analyzer.languages == ["cpp"]
     assert analyzer.codeql_languages == ["cpp"]
     assert analyzer.codeql_analyzer.create_calls == ["cpp"]
+
+
+def test_repo_analyzer_continues_when_some_requested_codeql_databases_fail(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "backend").mkdir(parents=True)
+    (repo / "web").mkdir(parents=True)
+    (repo / "backend" / "app.py").write_text("import os\n", encoding="utf-8")
+    (repo / "web" / "app.ts").write_text('import React from "react";\n', encoding="utf-8")
+
+    class _PartiallyFailingAnalyzer(_FakeCodeQLAnalyzer):
+        def create_database(self, source_path, language, database_name, overwrite=False):
+            if language == "javascript":
+                return False, "boom"
+            return True, str(Path(source_path) / f".fake-db-{language}-{database_name}")
+
+    monkeypatch.setattr(repo_analyzer_mod, "CodeQLAnalyzer", _PartiallyFailingAnalyzer)
+    monkeypatch.setattr(repo_analyzer_mod, "load_codeql_config", lambda: {"queries_path": str(tmp_path)})
+    monkeypatch.setattr(repo_analyzer_mod, "get_git_commit", lambda _repo: "0123456789abcdef")
+
+    analyzer = RepoAnalyzer(
+        repo_path=str(repo),
+        languages=["python", "javascript"],
+        cache_dir=str(tmp_path / "cache"),
+        rebuild_cache=True,
+    )
+    info = analyzer.get_info()
+
+    assert analyzer.languages == ["python", "javascript"]
+    assert sorted(analyzer._codeql_db_paths) == ["python"]
+    assert len(info["call_graph_edges"]) == 1
+
+
+def test_repo_analyzer_still_raises_when_all_requested_codeql_databases_fail(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    (repo / "backend.py").write_text("import os\n", encoding="utf-8")
+
+    class _FailingAnalyzer(_FakeCodeQLAnalyzer):
+        def create_database(self, source_path, language, database_name, overwrite=False):
+            _ = source_path
+            _ = language
+            _ = database_name
+            _ = overwrite
+            return False, "boom"
+
+    monkeypatch.setattr(repo_analyzer_mod, "CodeQLAnalyzer", _FailingAnalyzer)
+    monkeypatch.setattr(repo_analyzer_mod, "load_codeql_config", lambda: {"queries_path": str(tmp_path)})
+    monkeypatch.setattr(repo_analyzer_mod, "get_git_commit", lambda _repo: "0123456789abcdef")
+
+    with pytest.raises(RuntimeError, match="Failed to create CodeQL database"):
+        RepoAnalyzer(
+            repo_path=str(repo),
+            languages=["python"],
+            cache_dir=str(tmp_path / "cache"),
+            rebuild_cache=True,
+        )
+
+
+def test_repo_analyzer_continues_when_some_call_graph_builds_fail(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "backend").mkdir(parents=True)
+    (repo / "web").mkdir(parents=True)
+    (repo / "backend" / "app.py").write_text("def entry():\n    return 1\n", encoding="utf-8")
+    (repo / "web" / "app.ts").write_text("export function sink() { return 1; }\n", encoding="utf-8")
+
+    class _PartiallyFailingCallGraphAnalyzer(_FakeCodeQLAnalyzer):
+        def _build_call_graph(self, database_path, language):
+            _ = database_path
+            if language == "javascript":
+                raise RuntimeError("boom")
+            return super()._build_call_graph(database_path, language)
+
+    monkeypatch.setattr(repo_analyzer_mod, "CodeQLAnalyzer", _PartiallyFailingCallGraphAnalyzer)
+    monkeypatch.setattr(repo_analyzer_mod, "load_codeql_config", lambda: {"queries_path": str(tmp_path)})
+    monkeypatch.setattr(repo_analyzer_mod, "get_git_commit", lambda _repo: "0123456789abcdef")
+
+    analyzer = RepoAnalyzer(
+        repo_path=str(repo),
+        languages=["python", "javascript"],
+        cache_dir=str(tmp_path / "cache"),
+        rebuild_cache=True,
+    )
+    info = analyzer.get_info()
+
+    assert len(info["call_graph_edges"]) == 1
+    function_names = {function["name"] for function in info["functions"]}
+    assert "entry" in function_names

@@ -1,13 +1,9 @@
 """Tools exposed to the agentic vulnerability finder."""
 
+from __future__ import annotations
+
 import ast
 import json
-import os
-import re
-import shutil
-import subprocess
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -16,27 +12,23 @@ from utils.codeql_native import CodeQLAnalyzer
 from utils.language import (
     dedupe_languages,
     detect_languages as detect_repo_languages,
-    get_codeql_pack,
     get_extensions,
 )
-from utils.llm_utils import extract_function_snippet_based_on_name_with_ast
 from utils.logger import get_logger
-from utils.tree_utils import build_path_tree, format_file_size, render_tree
-from scanner.agent.utils import _to_dict
+from scanner.agent.toolkit_codeql import ToolkitCodeQLMixin
+from scanner.agent.toolkit_fs import ToolResult, ToolkitFSMixin
+from scanner.agent.toolkit_profile import ToolkitProfileMixin
+from scanner.agent.toolkit_reporting import ToolkitReportingMixin
 
 logger = get_logger(__name__)
 
-JS_IMPORT_EXTENSIONS = set(get_extensions("javascript"))
 
-@dataclass
-class ToolResult:
-    success: bool
-    content: str
-    error: Optional[str] = None
-
-
-
-class AgenticToolkit:
+class AgenticToolkit(
+    ToolkitCodeQLMixin,
+    ToolkitFSMixin,
+    ToolkitReportingMixin,
+    ToolkitProfileMixin,
+):
     def __init__(
         self,
         repo_path: Path,
@@ -45,7 +37,7 @@ class AgenticToolkit:
         languages: Optional[List[str]] = None,
         codeql_database_names: Optional[Dict[str, str]] = None,
     ):
-        self.repo_path = repo_path
+        self.repo_path = repo_path.resolve()
         self._file_cache: Dict[str, str] = {}
         self._memory_manager = memory_manager
         self._software_profile = software_profile
@@ -54,12 +46,14 @@ class AgenticToolkit:
         self._call_graph_edges: List[Dict] = []  # call graph edges from repo_analysis
         self._file_callers: Dict[str, set] = {}  # file -> set of caller files
         self._file_callees: Dict[str, set] = {}  # file -> set of callee files
+        self._iteration_touched_files: Set[str] = set()
 
         # Language configuration (multi-language aware).
         self._languages: List[str] = self._resolve_languages(languages=languages)
         self._source_extensions: Set[str] = self._resolve_source_extensions()
         
         # CodeQL configuration
+        self._codeql_template_root: Path = Path(_path_config['repo_root']) / '.codeql-queries'
         self._codeql_db_base_path: Path = _path_config.get('codeql_db_path', Path.home() / 'vuln' / 'codeql_dbs')
         self._codeql_database_names: Dict[str, str] = self._normalize_codeql_database_names(
             codeql_database_names
@@ -70,6 +64,39 @@ class AgenticToolkit:
         self._init_codeql()
         
         self._build_module_cache()
+
+    def _resolve_repo_path(
+        self,
+        path_value: str,
+        *,
+        kind: str,
+    ) -> tuple[Optional[Path], Optional[str]]:
+        """Resolve one repo-relative path and reject paths that escape the checkout."""
+        raw_path = str(path_value or "").strip()
+        if not raw_path:
+            return None, f"{kind.title()} path is empty"
+
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.repo_path / candidate
+        resolved = candidate.resolve(strict=False)
+        try:
+            resolved.relative_to(self.repo_path)
+        except ValueError:
+            return None, f"{kind.title()} path escapes repository root: {raw_path}"
+        return resolved, None
+
+    def _resolve_repo_relative_path(
+        self,
+        path_value: str,
+        *,
+        kind: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve one repo-relative path and return a normalized relative key."""
+        resolved_path, error = self._resolve_repo_path(path_value, kind=kind)
+        if error or resolved_path is None:
+            return None, error
+        return str(resolved_path.relative_to(self.repo_path)), None
 
     def _resolve_languages(
         self,
@@ -105,214 +132,11 @@ class AgenticToolkit:
             if lang_key and db_value:
                 normalized[lang_key] = db_value
         return normalized
-    
-    def _init_codeql(self):
-        """Initialize CodeQL analyzer and query directory."""
-        try:
-            self._codeql_analyzer = CodeQLAnalyzer()
-            if not self._codeql_analyzer.is_available:
-                logger.warning("CodeQL CLI is not available. CodeQL tools will be disabled.")
-                self._codeql_analyzer = None
-        except Exception as e:
-            logger.warning(f"Failed to initialize CodeQL analyzer: {e}")
-            self._codeql_analyzer = None
-        
-        template_root = Path(_path_config['repo_root']) / '.codeql-queries'
-        self._codeql_query_template_dirs = {
-            lang: template_root / lang
-            for lang in self._languages
-        }
-        self._codeql_query_dirs = {}
-        self._codeql_query_dirs_ready = set()
 
-    def _resolve_query_language(self, language: Optional[str] = None) -> str:
-        normalized = str(language or "").strip().lower()
-        if normalized:
-            return normalized
-        return self._primary_language()
-    
-    def _setup_query_dir(self, language: Optional[str] = None) -> bool:
-        """Lazily set up the CodeQL query directory under the output folder.
-        
-        Creates <output_dir>/codeql-queries/<language>/ and copies yml files
-        (qlpack.yml, codeql-pack.lock.yml) from the template directory so that
-        generated .ql files live alongside the results.
-        """
-        query_language = self._resolve_query_language(language)
-        if not self._memory_manager:
-            logger.warning("Memory manager not available. Cannot set up query directory.")
-            return False
-        
-        output_dir: Path = self._memory_manager.output_dir
-        query_dir = output_dir / "codeql-queries" / query_language
-        if (
-            query_language in self._codeql_query_dirs_ready
-            and self._codeql_query_dirs.get(query_language) == query_dir
-        ):
-            return True
+    def _build_codeql_analyzer(self) -> CodeQLAnalyzer:
+        """Build the CodeQL analyzer instance used by the toolkit."""
+        return CodeQLAnalyzer()
 
-        existing_query_dir = self._codeql_query_dirs.get(query_language)
-        if existing_query_dir and existing_query_dir != query_dir:
-            logger.info(
-                "CodeQL query directory changed for %s from %s to %s; rebuilding query workspace.",
-                query_language,
-                existing_query_dir,
-                query_dir,
-            )
-
-        query_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Copy yml files from template directory if available
-        template_dir = self._codeql_query_template_dirs.get(query_language)
-        if not template_dir:
-            template_dir = Path(_path_config['repo_root']) / '.codeql-queries' / query_language
-        if template_dir.exists():
-            for yml_file in template_dir.glob("*.yml"):
-                dest = query_dir / yml_file.name
-                if not dest.exists():
-                    shutil.copy2(yml_file, dest)
-                    logger.info(f"Copied {yml_file.name} to {query_dir}")
-        
-        self._codeql_query_dirs[query_language] = query_dir
-        self._codeql_query_dirs_ready.add(query_language)
-        logger.info(f"CodeQL query directory set up at: {query_dir}")
-        return True
-
-    def _ensure_query_pack(self, language: Optional[str] = None) -> bool:
-        """Ensure the CodeQL query pack is prepared with dependencies installed."""
-        query_language = self._resolve_query_language(language)
-        if not self._setup_query_dir(query_language):
-            return False
-
-        query_dir = self._codeql_query_dirs.get(query_language)
-        if not query_dir:
-            return False
-
-        qlpack_file = query_dir / "qlpack.yml"
-        qlpack_lock_file = query_dir / "codeql-pack.lock.yml"
-        
-        # Check if already prepared (lock file copied from template or previously installed)
-        if qlpack_lock_file.exists():
-            return True
-        
-        # Create qlpack.yml if not exists (no template available)
-        if not qlpack_file.exists():
-            try:
-                codeql_pack = get_codeql_pack(query_language)
-            except ValueError:
-                logger.warning(f"No CodeQL pack available for language: {query_language}")
-                return False
-            if not codeql_pack:
-                logger.warning(f"No CodeQL pack available for language: {query_language}")
-                return False
-            pack_name = f"llm-vulvariant-queries-{query_language}"
-            qlpack_content = f"""name: {pack_name}
-version: 1.0.0
-description: CodeQL queries for LLM vulnerability variant analysis
-dependencies:
-  {codeql_pack}: "*"
-"""
-            qlpack_file.write_text(qlpack_content, encoding="utf-8")
-        
-        # Install dependencies
-        logger.info("Installing CodeQL pack dependencies...")
-        try:
-            result = subprocess.run(
-                ["codeql", "pack", "install", str(query_dir)],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            if result.returncode != 0:
-                logger.error(f"CodeQL pack install failed: {result.stderr}")
-                return False
-            logger.info("CodeQL pack dependencies installed successfully")
-            return True
-        except subprocess.TimeoutExpired:
-            logger.error("CodeQL pack install timed out")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to install CodeQL pack: {e}")
-            return False
-    
-    def _get_codeql_database_name(self, language: Optional[str] = None) -> Optional[str]:
-        query_language = self._resolve_query_language(language)
-        if query_language in self._codeql_database_names:
-            return self._codeql_database_names[query_language]
-        primary_language = self._primary_language()
-        if primary_language in self._codeql_database_names:
-            return self._codeql_database_names[primary_language]
-        if self._codeql_database_names:
-            return next(iter(self._codeql_database_names.values()))
-        return None
-
-    def _get_codeql_database_path(self, language: Optional[str] = None) -> Optional[Path]:
-        """Get the full path to the CodeQL database."""
-        db_name = self._get_codeql_database_name(language=language)
-        if not db_name:
-            return None
-        db_path = self._codeql_db_base_path / db_name
-        if db_path.exists():
-            return db_path
-        return None
-    
-    def _build_module_cache(self):
-        """Build lookup caches from software profile."""
-        if not self._software_profile:
-            return
-        
-        modules = []
-        if hasattr(self._software_profile, 'modules'):
-            modules = self._software_profile.modules
-        elif isinstance(self._software_profile, dict):
-            modules = self._software_profile.get('modules', [])
-        
-        for m in modules:
-            m_dict = _to_dict(m)
-            if not m_dict:
-                continue
-            
-            module_name = m_dict.get('name', '')
-            self._module_cache[module_name] = m_dict
-            
-            # Map files to module
-            for f in m_dict.get('files', []):
-                self._file_to_module_cache[f] = module_name
-        
-        # Build call graph cache
-        self._build_call_graph_cache()
-    
-    def _build_call_graph_cache(self):
-        """Build file-level caller/callee lookup from call_graph_edges."""
-        self._file_callers = {}
-        self._file_callees = {}
-        
-        # Get call_graph_edges from repo_info.repo_analysis
-        repo_analysis = {}
-        if isinstance(self._software_profile, dict):
-            repo_info = self._software_profile.get('repo_info', {})
-            repo_analysis = repo_info.get('repo_analysis', {})
-        elif hasattr(self._software_profile, 'repo_info'):
-            repo_info = self._software_profile.repo_info or {}
-            repo_analysis = repo_info.get('repo_analysis', {}) if isinstance(repo_info, dict) else {}
-        
-        self._call_graph_edges = repo_analysis.get('call_graph_edges', [])
-        
-        for edge in self._call_graph_edges:
-            caller_file = edge.get('caller_file', '')
-            callee_file = edge.get('callee_file', '')
-            
-            if caller_file and callee_file:
-                # callee_file's callers include caller_file
-                if callee_file not in self._file_callers:
-                    self._file_callers[callee_file] = set()
-                self._file_callers[callee_file].add(caller_file)
-                
-                # caller_file's callees include callee_file
-                if caller_file not in self._file_callees:
-                    self._file_callees[caller_file] = set()
-                self._file_callees[caller_file].add(callee_file)
-    
     def set_memory_manager(self, memory_manager):
         """Set or update the memory manager reference."""
         self._memory_manager = memory_manager
@@ -320,73 +144,22 @@ dependencies:
         # Reset cached state so future queries use the current output directory.
         self._codeql_query_dirs = {}
         self._codeql_query_dirs_ready = set()
-    
-    def set_software_profile(self, software_profile):
-        """Set or update the software profile reference."""
-        self._software_profile = software_profile
-        self._build_module_cache()
 
+    def start_iteration_tracking(self) -> None:
+        """Reset per-iteration full-file read tracking."""
+        self._iteration_touched_files = set()
 
-    @staticmethod
-    def _format_size(size_bytes: int) -> str:
-        return format_file_size(size_bytes)
+    def _record_touched_file(self, file_path: str) -> None:
+        """Track one file that received a whole-file read during this iteration."""
+        normalized_path = str(file_path or "").strip()
+        if normalized_path:
+            self._iteration_touched_files.add(normalized_path)
 
-    @staticmethod
-    def _build_path_tree(paths_with_values: List[Any]) -> Dict:
-        return build_path_tree(paths_with_values)
-
-    @staticmethod
-    def _render_tree(node: Dict, prefix: str = "", value_formatter=None) -> List[str]:
-        return render_tree(node, prefix, value_formatter)
-
-    def _resolve_repo_relative_path(self, path_text: str) -> Optional[Path]:
-        """Return an absolute path only when the given path is inside the repo root.
-
-        This blocks absolute paths and traversal outside the repository root (e.g. "../secret").
-        """
-        if not path_text:
-            return None
-
-        requested_path = Path(path_text)
-        if requested_path.is_absolute():
-            return None
-
-        repo_root = self.repo_path.resolve()
-        candidate = (self.repo_path / requested_path).resolve()
-        try:
-            candidate.relative_to(repo_root)
-        except ValueError:
-            return None
-        return candidate
-
-    def _invalid_path_error(self, path_name: str, path_text: str) -> str:
-        """Build a consistent error for invalid paths."""
-        return (
-            f"Invalid {path_name}: {path_text}. "
-            f"Only repository-relative paths inside {self.repo_path} are allowed."
-        )
-
-    # ---- Multi-language file iteration helpers ----
-
-    def _is_source_file(self, path: Path) -> bool:
-        """Check if *path* is a source file of any configured language."""
-        return path.suffix.lower() in self._source_extensions
-
-    def _iter_source_files(self, root: Path, recursive: bool = True):
-        """Yield source files under *root* matching configured languages."""
-        IGNORED_DIRS = {".git", "node_modules", "__pycache__", "build", "dist",
-                        ".tox", "venv", ".venv", "vendor", "third_party"}
-        if recursive:
-            for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS]
-                for fname in filenames:
-                    fpath = Path(dirpath) / fname
-                    if self._is_source_file(fpath):
-                        yield fpath
-        else:
-            for fpath in root.iterdir():
-                if fpath.is_file() and self._is_source_file(fpath):
-                    yield fpath
+    def consume_tracked_files(self) -> List[str]:
+        """Return and clear the files eligible for auto-completion in this iteration."""
+        touched_files = sorted(self._iteration_touched_files)
+        self._iteration_touched_files = set()
+        return touched_files
 
     def get_available_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -529,7 +302,7 @@ dependencies:
                 "type": "function",
                 "function": {
                     "name": "analyze_data_flow",
-                    "description": "Deeply analyze a function's code structure and provide details: parameters, variable usage, function calls, attribute access, string operations, assignments, return values, etc.",
+                    "description": "Deeply analyze a Python function's code structure and provide details: parameters, variable usage, function calls, attribute access, string operations, assignments, return values, etc.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -740,420 +513,77 @@ dependencies:
             )
         try:
             if tool_name == "read_file":
-                return self._read_file(**parameters)
-            if tool_name == "search_in_file":
-                return self._search_in_file(**parameters)
-            if tool_name == "search_in_folder":
-                return self._search_in_folder(**parameters)
-            if tool_name == "list_files_in_folder":
-                return self._list_files_in_folder(**parameters)
-            if tool_name == "get_function_code":
-                return self._get_function_code(**parameters)
-            if tool_name == "get_imports":
-                return self._get_imports(**parameters)
-            if tool_name == "analyze_data_flow":
-                return self._analyze_data_flow(**parameters)
-            if tool_name == "report_vulnerability":
-                return self._report_vulnerability(**parameters)
-            if tool_name == "check_file_status":
-                return self._check_file_status(**parameters)
-            if tool_name == "get_module_call_relationships":
-                return self._get_module_call_relationships(**parameters)
-            if tool_name == "get_related_files":
-                return self._get_related_files(**parameters)
-            if tool_name == "run_codeql_query":
-                return self._run_codeql_query(**parameters)
-            if tool_name == "read_codeql_results":
-                return self._read_codeql_results(**parameters)
-            if tool_name == "mark_file_completed":
-                return self._mark_file_completed(**parameters)
-            return ToolResult(success=False, content="", error=f"Unknown tool: {tool_name}")
-        except Exception as exc:  # pylint: disable=broad-except
-            return ToolResult(success=False, content="", error=str(exc))
-
-    @staticmethod
-    def _normalize_tool_type(value: Any, expected_type: str) -> bool:
-        if expected_type == "string":
-            return isinstance(value, str)
-        if expected_type == "integer":
-            return isinstance(value, int) and not isinstance(value, bool)
-        if expected_type == "boolean":
-            return isinstance(value, bool)
-        if expected_type == "array":
-            return isinstance(value, list)
-        if expected_type == "object":
-            return isinstance(value, dict)
-        return True
-
-    def _get_tool_spec(self, tool_name: str) -> Dict[str, Any]:
-        for tool in self.get_available_tools():
-            fn = tool.get("function", {})
-            if fn.get("name") == tool_name:
-                return fn
-        return {}
-
-    def _validate_tool_parameters(self, tool_name: str, parameters: Dict[str, Any]) -> Optional[str]:
-        spec = self._get_tool_spec(tool_name)
-        if not spec:
-            return None
-
-        parameters_schema = spec.get("parameters", {})
-        properties = parameters_schema.get("properties", {})
-        required = set(parameters_schema.get("required", []))
-
-        for required_field in required:
-            if required_field not in parameters:
-                return f"Missing required parameter: {required_field}"
-
-        for key, value in parameters.items():
-            if key not in properties:
-                return f"Unknown parameter: {key}"
-
-            prop_schema = properties.get(key, {})
-            value_error = self._validate_schema_constraints(key, value, prop_schema)
-            if value_error is not None:
-                return value_error
-
-            expected_type = prop_schema.get("type")
-            if expected_type and not self._normalize_tool_type(value, expected_type):
-                return f"Invalid type for parameter {key}: expected {expected_type}"
-
-            if expected_type == "array":
-                item_schema = prop_schema.get("items") or {}
-                item_type = item_schema.get("type")
-                if item_type:
-                    for item in value:
-                        if not self._normalize_tool_type(item, item_type):
-                            return f"Invalid item type in parameter {key}: expected {item_type}"
-
-        if "start_line" in parameters or "end_line" in parameters:
-            start_line = parameters.get("start_line")
-            end_line = parameters.get("end_line")
-            if (
-                isinstance(start_line, int)
-                and isinstance(end_line, int)
-                and end_line < start_line
-            ):
-                return "Invalid range for read_file: end_line must be greater than or equal to start_line"
-
-        return None
-
-    def _validate_schema_constraints(self, name: str, value: Any, schema: Dict[str, Any]) -> Optional[str]:
-        if "enum" in schema:
-            allowed_values = schema.get("enum") or []
-            if value not in allowed_values:
-                return (
-                    f"Invalid value for parameter {name}: expected one of "
-                    f"{', '.join(str(v) for v in allowed_values)}"
-                )
-
-        if isinstance(value, (int, float)):
-            minimum = schema.get("minimum")
-            maximum = schema.get("maximum")
-            if minimum is not None and value < minimum:
-                return (
-                    f"Invalid value for parameter {name}: minimum is {minimum} "
-                    f"(expected >= {minimum})"
-                )
-            if maximum is not None and value > maximum:
-                return (
-                    f"Invalid value for parameter {name}: maximum is {maximum} "
-                    f"(expected <= {maximum})"
-                )
-
-        if isinstance(value, str):
-            min_length = schema.get("minLength")
-            max_length = schema.get("maxLength")
-            value_length = len(value)
-            if min_length is not None and value_length < min_length:
-                return f"Invalid value for parameter {name}: expected minimum length {min_length}"
-            if max_length is not None and value_length > max_length:
-                return f"Invalid value for parameter {name}: expected maximum length {max_length}"
-
-        if isinstance(value, (list, tuple)):
-            min_length = schema.get("minLength")
-            max_length = schema.get("maxLength")
-            value_length = len(value)
-            if min_length is not None and value_length < min_length:
-                return f"Invalid value for parameter {name}: expected minimum length {min_length}"
-            if max_length is not None and value_length > max_length:
-                return f"Invalid value for parameter {name}: expected maximum length {max_length}"
-
-        return None
-
-    def _read_file(self, file_path: str, start_line: int = None, end_line: int = None) -> ToolResult:
-        full_path = self._resolve_repo_relative_path(file_path)
-        if full_path is None:
-            return ToolResult(
-                success=False,
-                content="",
-                error=self._invalid_path_error("file_path", file_path),
-            )
-        if not full_path.exists():
-            return ToolResult(success=False, content="", error=f"File not found: {file_path}")
-        try:
-            content = full_path.read_text(encoding="utf-8", errors="ignore")
-            lines = content.split("\n")
-            if start_line is not None or end_line is not None:
-                start_idx = (start_line - 1) if start_line else 0
-                end_idx = end_line if end_line else len(lines)
-                lines = lines[start_idx:end_idx]
-                numbered_lines = [f"{start_idx + i + 1}: {line}" for i, line in enumerate(lines)]
-                content = "\n".join(numbered_lines)
+                result = self._read_file(**parameters)
+            elif tool_name == "search_in_file":
+                result = self._search_in_file(**parameters)
+            elif tool_name == "search_in_folder":
+                result = self._search_in_folder(**parameters)
+            elif tool_name == "list_files_in_folder":
+                result = self._list_files_in_folder(**parameters)
+            elif tool_name == "get_function_code":
+                result = self._get_function_code(**parameters)
+            elif tool_name == "get_imports":
+                result = self._get_imports(**parameters)
+            elif tool_name == "analyze_data_flow":
+                result = self._analyze_data_flow(**parameters)
+            elif tool_name == "report_vulnerability":
+                result = self._report_vulnerability(**parameters)
+            elif tool_name == "check_file_status":
+                result = self._check_file_status(**parameters)
+            elif tool_name == "get_module_call_relationships":
+                result = self._get_module_call_relationships(**parameters)
+            elif tool_name == "get_related_files":
+                result = self._get_related_files(**parameters)
+            elif tool_name == "run_codeql_query":
+                result = self._run_codeql_query(**parameters)
+            elif tool_name == "read_codeql_results":
+                result = self._read_codeql_results(**parameters)
+            elif tool_name == "mark_file_completed":
+                result = self._mark_file_completed(**parameters)
             else:
-                numbered_lines = [f"{i + 1}: {line}" for i, line in enumerate(lines)]
-                content = "\n".join(numbered_lines)
-            if len(content) > 5000:
-                content = content[:5000] + "\n... [truncated, use start_line/end_line to read specific sections]"
-            return ToolResult(success=True, content=content)
+                return ToolResult(success=False, content="", error=f"Unknown tool: {tool_name}")
+            self._track_tool_file_touch(tool_name, parameters, result)
+            return result
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
 
-    def _search_in_file(self, file_path: str, pattern: str, context_lines: int = 2) -> ToolResult:
-        full_path = self._resolve_repo_relative_path(file_path)
-        if full_path is None:
-            return ToolResult(
-                success=False,
-                content="",
-                error=self._invalid_path_error("file_path", file_path),
-            )
-        if not full_path.exists():
-            return ToolResult(success=False, content="", error=f"File not found: {file_path}")
-        try:
-            content = full_path.read_text(encoding="utf-8", errors="ignore")
-            lines = content.split("\n")
-            regex = re.compile(pattern, re.IGNORECASE)
-            matches = []
-            for i, line in enumerate(lines):
-                if regex.search(line):
-                    start = max(0, i - context_lines)
-                    end = min(len(lines), i + context_lines + 1)
-                    context = []
-                    for j in range(start, end):
-                        prefix = ">>> " if j == i else "    "
-                        context.append(f"{prefix}{j + 1}: {lines[j]}")
-                    matches.append("\n".join(context))
-            if not matches:
-                return ToolResult(success=True, content=f"No matches found for pattern: {pattern}")
-            result = f"Found {len(matches)} matches:\n\n" + "\n\n---\n\n".join(matches[:20])
-            if len(matches) > 20:
-                result += f"\n\n... and {len(matches) - 20} more matches"
-            return ToolResult(success=True, content=result)
-        except Exception as exc:  # pylint: disable=broad-except
-            return ToolResult(success=False, content="", error=str(exc))
-
-    def _search_in_folder(self, folder_path: str, pattern: str, max_results: int = 50) -> ToolResult:
-        full_path = self._resolve_repo_relative_path(folder_path)
-        if full_path is None:
-            return ToolResult(
-                success=False,
-                content="",
-                error=self._invalid_path_error("folder_path", folder_path),
-            )
-        if not full_path.exists():
-            return ToolResult(success=False, content="", error=f"Folder not found: {folder_path}")
-        if not full_path.is_dir():
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"Not a folder: {folder_path}",
-            )
-        try:
-            regex = re.compile(pattern, re.IGNORECASE)
-            file_results: Dict[str, List[Any]] = {}
-            total_matches = 0
-            for src_file in self._iter_source_files(full_path):
-                if total_matches >= max_results:
-                    break
-                try:
-                    content = src_file.read_text(encoding="utf-8", errors="ignore")
-                    lines = content.split("\n")
-                    for i, line in enumerate(lines):
-                        if regex.search(line):
-                            rel_path = str(src_file.relative_to(self.repo_path))
-                            file_results.setdefault(rel_path, []).append((i + 1, line.strip()))
-                            total_matches += 1
-                            if total_matches >= max_results:
-                                break
-                except Exception:  # pylint: disable=broad-except
-                    continue
-            if not file_results:
-                return ToolResult(success=True, content=f"No matches found for pattern: {pattern}")
-            result_lines = [f"Found {total_matches} matches in {len(file_results)} files:\n"]
-            for file_path in sorted(file_results.keys()):
-                result_lines.append(f"\n{file_path}:")
-                for line_num, line_content in file_results[file_path][:10]:
-                    result_lines.append(f"  L{line_num}: {line_content}")
-                if len(file_results[file_path]) > 10:
-                    result_lines.append(
-                        f"  ... and {len(file_results[file_path]) - 10} more matches in this file"
-                    )
-            return ToolResult(success=True, content="\n".join(result_lines))
-        except Exception as exc:  # pylint: disable=broad-except
-            return ToolResult(success=False, content="", error=str(exc))
-
-    def _list_files_in_folder(self, folder_path: str, recursive: bool = True) -> ToolResult:
-        full_path = self._resolve_repo_relative_path(folder_path)
-        if full_path is None:
-            return ToolResult(
-                success=False,
-                content="",
-                error=self._invalid_path_error("folder_path", folder_path),
-            )
-        if not full_path.exists():
-            return ToolResult(success=False, content="", error=f"Folder not found: {folder_path}")
-        if not full_path.is_dir():
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"Not a folder: {folder_path}",
-            )
-        try:
-            file_info: List[Any] = []
-            total_size = 0
-            for src_file in self._iter_source_files(full_path, recursive=recursive):
-                rel_path = str(src_file.relative_to(self.repo_path))
-                size = src_file.stat().st_size
-                total_size += size
-                file_info.append((rel_path, size))
-            if not file_info:
-                return ToolResult(success=True, content="No source files found")
-            tree = self._build_path_tree(file_info)
-            tree_lines = self._render_tree(tree, value_formatter=self._format_size)
-            result = f"Found {len(file_info)} source files (total: {self._format_size(total_size)}):\n\n" + "\n".join(tree_lines)
-            return ToolResult(success=True, content=result)
-        except Exception as exc:  # pylint: disable=broad-except
-            return ToolResult(success=False, content="", error=str(exc))
-
-    def _get_function_code(self, file_path: str, function_name: str) -> ToolResult:
-        full_path = self._resolve_repo_relative_path(file_path)
-        if full_path is None:
-            return ToolResult(
-                success=False,
-                content="",
-                error=self._invalid_path_error("file_path", file_path),
-            )
-        if not full_path.exists():
-            return ToolResult(success=False, content="", error=f"File not found: {file_path}")
-        try:
-            content = full_path.read_text(encoding="utf-8", errors="ignore")
-            lines = content.split("\n")
-
-            if full_path.suffix == ".py":
-                tree = ast.parse(content)
-                for node in ast.walk(tree):
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                        if node.name == function_name:
-                            start_line = node.lineno - 1
-                            end_line = node.end_lineno if hasattr(node, "end_lineno") else start_line + 50
-                            func_lines = lines[start_line:end_line]
-                            numbered = [f"{start_line + i + 1}: {line}" for i, line in enumerate(func_lines)]
-                            return ToolResult(success=True, content="\n".join(numbered))
-                return ToolResult(success=False, content="", error=f"Function/class not found: {function_name}")
-
-            snippet = extract_function_snippet_based_on_name_with_ast(
-                content,
-                function_name,
-                with_line_numbers=True,
-                line_number_format="standard",
-            )
-            if not snippet:
-                return ToolResult(success=False, content="", error=f"Function/class not found: {function_name}")
-            return ToolResult(success=True, content=snippet)
-        except Exception as exc:  # pylint: disable=broad-except
-            return ToolResult(success=False, content="", error=str(exc))
-
-    def _get_imports(self, file_path: str) -> ToolResult:
-        full_path = self._resolve_repo_relative_path(file_path)
-        if full_path is None:
-            return ToolResult(
-                success=False,
-                content="",
-                error=self._invalid_path_error("file_path", file_path),
-            )
-        if not full_path.exists():
-            return ToolResult(success=False, content="", error=f"File not found: {file_path}")
-        try:
-            content = full_path.read_text(encoding="utf-8", errors="ignore")
-            suffix = full_path.suffix.lower()
-
-            imports: List[str] = []
-
-            if suffix == ".py":
-                tree = ast.parse(content)
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Import):
-                        for alias in node.names:
-                            imports.append(
-                                f"import {alias.name}" + (f" as {alias.asname}" if alias.asname else "")
-                            )
-                    elif isinstance(node, ast.ImportFrom):
-                        module = node.module or ""
-                        names = ", ".join(
-                            alias.name + (f" as {alias.asname}" if alias.asname else "") for alias in node.names
-                        )
-                        imports.append(f"from {module} import {names}")
-            elif suffix in {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh"}:
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("#include"):
-                        imports.append(stripped)
-            elif suffix == ".go":
-                # Match single and grouped imports
-                imports.extend(re.findall(r'^\s*import\s+(?:".+?"|\((?:[^)]+)\))', content, re.MULTILINE | re.DOTALL))
-            elif suffix == ".java":
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("import "):
-                        imports.append(stripped.rstrip(";"))
-            elif suffix in JS_IMPORT_EXTENSIONS:
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    if self._is_js_import_statement(stripped):
-                        imports.append(stripped.rstrip(";"))
-            elif suffix == ".rs":
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("use ") or stripped.startswith("extern crate "):
-                        imports.append(stripped.rstrip(";"))
-            elif suffix == ".rb":
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("require ") or stripped.startswith("require_relative "):
-                        imports.append(stripped)
-            else:
-                # Fallback: grep for common import patterns
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    if re.match(r'^(import |from |#include |require |use |extern crate )', stripped):
-                        imports.append(stripped)
-
-            if not imports:
-                return ToolResult(success=True, content="No imports found")
-            return ToolResult(success=True, content="\n".join(imports))
-        except Exception as exc:  # pylint: disable=broad-except
-            return ToolResult(success=False, content="", error=str(exc))
-
-    @staticmethod
-    def _is_js_import_statement(line: str) -> bool:
-        if not line:
-            return False
-        return bool(
-            re.match(r"^import\b", line)
-            or re.match(r"^export\b.*\bfrom\b", line)
-            or re.match(r"^(?:const|let|var)\b.*\b(?:require|import)\s*\(", line)
+    def _track_tool_file_touch(
+        self,
+        tool_name: str,
+        parameters: Dict[str, Any],
+        result: ToolResult,
+    ) -> None:
+        """Track only whole-file reads so auto-completion does not over-count coverage."""
+        if not result.success:
+            return
+        if tool_name != "read_file":
+            return
+        start_line = parameters.get("start_line")
+        end_line = parameters.get("end_line")
+        if start_line not in (None, 1) or end_line is not None:
+            return
+        if result.truncated:
+            return
+        file_path, error = self._resolve_repo_relative_path(
+            parameters.get("file_path", ""),
+            kind="file",
         )
+        if error or not file_path:
+            return
+        self._record_touched_file(file_path)
 
     def _analyze_data_flow(self, file_path: str, function_name: str) -> ToolResult:
-        full_path = self._resolve_repo_relative_path(file_path)
-        if full_path is None:
+        full_path, error = self._resolve_repo_path(file_path, kind="file")
+        if error:
+            return ToolResult(success=False, content="", error=error)
+        if not full_path.exists():
+            return ToolResult(success=False, content="", error=f"File not found: {file_path}")
+        if full_path.suffix.lower() not in {".py", ".pyi"}:
             return ToolResult(
                 success=False,
                 content="",
-                error=self._invalid_path_error("file_path", file_path),
+                error="analyze_data_flow only supports Python source files",
             )
-        if not full_path.exists():
-            return ToolResult(success=False, content="", error=f"File not found: {file_path}")
         try:
             content = full_path.read_text(encoding="utf-8", errors="ignore")
             tree = ast.parse(content)
@@ -1260,570 +690,3 @@ dependencies:
             return ToolResult(success=True, content=json.dumps(analysis, indent=2, ensure_ascii=False))
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
-
-    def _report_vulnerability(self, **kwargs) -> ToolResult:
-        return ToolResult(success=True, content=json.dumps(kwargs, indent=2, ensure_ascii=False))
-
-    def _check_file_status(self, file_paths: List[str]) -> ToolResult:
-        """Check the scan status of files from memory."""
-        for fp in file_paths:
-            resolved_path = self._resolve_repo_relative_path(fp)
-            if resolved_path is None:
-                return ToolResult(
-                    success=False,
-                    content="",
-                    error=self._invalid_path_error("file_path", fp),
-                )
-
-        if not self._memory_manager:
-            return ToolResult(
-                success=True,
-                content=json.dumps({
-                    "note": "Memory not available. All files are considered pending.",
-                    "files": {fp: "pending" for fp in file_paths}
-                }, indent=2)
-            )
-        
-        result = {}
-        for fp in file_paths:
-            status = self._memory_manager.memory.file_status.get(fp, "not_tracked")
-            result[fp] = status
-        
-        # Add summary
-        summary_text = self._memory_manager.summarize_statuses(result)
-        
-        return ToolResult(
-            success=True,
-            content=json.dumps({
-                "summary": summary_text,
-                "files": result
-            }, indent=2, ensure_ascii=False)
-        )
-
-    def _mark_file_completed(self, file_path: str, reason: str = "") -> ToolResult:
-        """Mark a file as completed after thorough analysis.
-        
-        Args:
-            file_path: File path to mark as completed
-            reason: Brief explanation of why the file is considered complete
-        
-        Returns:
-            ToolResult confirming the file was marked
-        """
-        # Verify the file exists and is within repository
-        full_path = self._resolve_repo_relative_path(file_path)
-        if full_path is None:
-            return ToolResult(
-                success=False,
-                content="",
-                error=self._invalid_path_error("file_path", file_path),
-            )
-        if not full_path.exists():
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"File not found: {file_path}"
-            )
-        if not self._memory_manager:
-            return ToolResult(
-                success=False,
-                content="",
-                error="Memory manager not available. Cannot mark file status."
-            )
-        
-        # Mark as completed in memory
-        self._memory_manager.memory.file_status[file_path] = "completed"
-        
-        # Save reason to memory
-        if reason:
-            self._memory_manager.memory.file_completion_reasons[file_path] = reason
-            logger.info(f"File marked completed: {file_path} - {reason}")
-        else:
-            logger.info(f"File marked completed: {file_path}")
-
-        save_fn = getattr(self._memory_manager, "save", None)
-        if callable(save_fn):
-            save_fn()
-        
-        return ToolResult(
-            success=True,
-            content=json.dumps({
-                "file_path": file_path,
-                "status": "completed",
-                "reason": reason or "No reason provided"
-            }, indent=2, ensure_ascii=False)
-        )
-
-    def _get_module_call_relationships(self, file_path: str = None, module_name: str = None) -> ToolResult:
-        """Get call relationships for a file or module."""
-        if not self._software_profile:
-            return ToolResult(
-                success=False,
-                content="",
-                error="Software profile not available. Cannot determine call relationships."
-            )
-        
-        # Determine the module name
-        target_module = module_name
-        if not target_module and file_path:
-            target_module = self._file_to_module_cache.get(file_path)
-            if not target_module:
-                # Try partial match
-                for cached_file, mod in self._file_to_module_cache.items():
-                    if file_path in cached_file or cached_file in file_path:
-                        target_module = mod
-                        break
-        
-        if not target_module:
-            return ToolResult(
-                success=True,
-                content=json.dumps({
-                    "error": f"Could not find module for file: {file_path}",
-                    "hint": "The file may not be part of any tracked module. Try listing modules first."
-                }, indent=2)
-            )
-        
-        # Get module info
-        module_info = self._module_cache.get(target_module, {})
-        if not module_info:
-            return ToolResult(
-                success=True,
-                content=json.dumps({
-                    "error": f"Module '{target_module}' not found in profile",
-                    "available_modules": list(self._module_cache.keys())[:20]
-                }, indent=2)
-            )
-        
-        # Build relationships info
-        callers = module_info.get('called_by_modules', [])
-        callees = module_info.get('calls_modules', [])
-        
-        # Get files for each related module
-        caller_details = []
-        for caller in callers:
-            caller_info = self._module_cache.get(caller, {})
-            caller_details.append({
-                "module": caller,
-                "category": caller_info.get('category', 'unknown'),
-                "files": caller_info.get('files', [])[:5],  # Limit files shown
-                "file_count": len(caller_info.get('files', []))
-            })
-        
-        callee_details = []
-        for callee in callees:
-            callee_info = self._module_cache.get(callee, {})
-            callee_details.append({
-                "module": callee,
-                "category": callee_info.get('category', 'unknown'),
-                "files": callee_info.get('files', [])[:5],
-                "file_count": len(callee_info.get('files', []))
-            })
-        
-        result = {
-            "module": target_module,
-            "category": module_info.get('category', 'unknown'),
-            "files_in_module": module_info.get('files', []),
-            "callers": {
-                "count": len(callers),
-                "modules": caller_details
-            },
-            "callees": {
-                "count": len(callees),
-                "modules": callee_details
-            },
-            "data_sources": module_info.get('data_sources', []),
-            "data_formats": module_info.get('data_formats', []),
-        }
-        
-        return ToolResult(
-            success=True,
-            content=json.dumps(result, indent=2, ensure_ascii=False)
-        )
-
-    def _get_related_files(self, file_path: str, query_type: str) -> ToolResult:
-        """Get caller or callee files for a given file using call graph edges."""
-        if not self._software_profile:
-            return ToolResult(
-                success=False,
-                content="",
-                error="Software profile not available. Cannot determine related files."
-            )
-        
-        if query_type not in ("caller", "callee"):
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"Invalid query_type: {query_type}. Must be 'caller' or 'callee'."
-            )
-        
-        # Try to find the file in cache (exact match or partial match)
-        target_file = file_path
-        if file_path not in self._file_callers and file_path not in self._file_callees:
-            # Try partial match
-            for cached_file in set(self._file_callers.keys()) | set(self._file_callees.keys()):
-                if file_path in cached_file or cached_file in file_path:
-                    target_file = cached_file
-                    break
-        
-        # Get related files based on query type
-        if query_type == "caller":
-            related_files = list(self._file_callers.get(target_file, set()))
-        else:  # callee
-            related_files = list(self._file_callees.get(target_file, set()))
-        
-        # Get detailed edges for context
-        detailed_edges = []
-        for edge in self._call_graph_edges:
-            if query_type == "caller":
-                if edge.get('callee_file', '') == target_file:
-                    detailed_edges.append({
-                        "caller_file": edge.get('caller_file'),
-                        "caller_name": edge.get('caller'),
-                        "callee_name": edge.get('callee'),
-                        "call_site_line": edge.get('call_site_line')
-                    })
-            else:  # callee
-                if edge.get('caller_file', '') == target_file:
-                    detailed_edges.append({
-                        "callee_file": edge.get('callee_file'),
-                        "callee_name": edge.get('callee'),
-                        "caller_name": edge.get('caller'),
-                        "call_site_line": edge.get('call_site_line')
-                    })
-        
-        return ToolResult(
-            success=True,
-            content=json.dumps({
-                "source_file": file_path,
-                "matched_file": target_file if target_file != file_path else None,
-                "query_type": query_type,
-                "total_files": len(related_files),
-                "files": sorted(related_files),
-                "call_edges": detailed_edges[:50]  # Limit to 50 edges
-            }, indent=2, ensure_ascii=False)
-        )
-
-    @staticmethod
-    def _infer_query_language(query: str) -> Optional[str]:
-        """Infer CodeQL query language from `import <lang>`."""
-        import_match = re.search(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_]*)", query, re.MULTILINE)
-        if not import_match:
-            return None
-        import_key = import_match.group(1).strip().lower()
-        alias_map = {
-            "python": "python",
-            "cpp": "cpp",
-            "c": "cpp",
-            "go": "go",
-            "java": "java",
-            "javascript": "javascript",
-            "js": "javascript",
-            "ruby": "ruby",
-        }
-        return alias_map.get(import_key)
-
-    def _choose_query_language(self, query: str) -> str:
-        """Choose the most suitable language for query pack/database routing."""
-        inferred = self._infer_query_language(query)
-        if inferred and inferred in self._languages:
-            return inferred
-        if inferred and inferred in self._codeql_database_names:
-            return inferred
-        for lang in self._languages:
-            if self._get_codeql_database_path(lang):
-                return lang
-        return self._primary_language()
-
-    def _run_codeql_query(self, query: str, query_name: str) -> ToolResult:
-        """Run a CodeQL query on the pre-loaded database.
-        
-        Args:
-            query: QL query code string or path to a .ql file
-            query_name: Descriptive name for the query (used for result file naming)
-        
-        Returns:
-            ToolResult with query findings summary
-        """
-        # Check if CodeQL is available
-        if not self._codeql_analyzer:
-            return ToolResult(
-                success=False,
-                content="",
-                error="CodeQL analyzer is not available. Please ensure CodeQL CLI is installed."
-            )
-        
-        query_language = self._choose_query_language(query)
-        db_name = self._get_codeql_database_name(language=query_language)
-        db_path = self._get_codeql_database_path(language=query_language)
-        if not db_path:
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"CodeQL database not found. Database name: {db_name}, "
-                      f"Search path: {self._codeql_db_base_path}"
-            )
-        
-        # Ensure query pack is ready
-        if not self._ensure_query_pack(query_language):
-            return ToolResult(
-                success=False,
-                content="",
-                error="Failed to prepare CodeQL query pack. Check logs for details."
-            )
-
-        query_dir = self._codeql_query_dirs.get(query_language)
-        if not query_dir:
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"CodeQL query directory not initialized for language: {query_language}",
-            )
-        
-        # Write query code to the qlpack directory (where dependencies are installed)
-        # This is required for CodeQL to resolve dependencies like 'import python'
-        safe_name = re.sub(r'[^\w\-]', '_', query_name)
-        query_path = query_dir / f"{safe_name}.ql"
-        query_path.write_text(query, encoding="utf-8")
-        
-        try:
-            # Run the query
-            logger.info(
-                "Running CodeQL query '%s' [language=%s, database=%s]",
-                query_name,
-                query_language,
-                db_path,
-            )
-            success, result = self._codeql_analyzer.run_query(
-                database_path=str(db_path),
-                query=str(query_path),
-                output_format="sarif-latest")
-            
-            if not success:
-                error_msg = str(result) if result else "Unknown error"
-                return ToolResult(
-                    success=False,
-                    content="",
-                    error=f"CodeQL query execution failed: {error_msg}"
-                )
-            
-            # Extract findings from SARIF result
-            findings = self._extract_codeql_findings(result)
-            
-            # Save results to output_dir/codeql-results/
-            self._save_codeql_results(
-                query_name,
-                result,
-                findings,
-                query_language=query_language,
-                database_name=db_name,
-            )
-            
-            # Record findings in memory
-            self._record_codeql_findings_in_memory(query_name, findings)
-            
-            # Return summary
-            summary = self._format_codeql_summary(query_name, findings)
-            return ToolResult(success=True, content=summary)
-            
-        except Exception as e:
-            logger.error(f"CodeQL query execution error: {e}")
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"CodeQL query error: {str(e)}"
-            )
-
-    def _extract_codeql_findings(self, sarif_result: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Extract findings from SARIF result."""
-        findings = []
-        runs = sarif_result.get("runs", []) if isinstance(sarif_result, dict) else []
-        
-        for run in runs:
-            for result in run.get("results", []):
-                rule_id = result.get("ruleId", "unknown")
-                message = result.get("message", {}).get("text", "No message")
-                level = result.get("level", "warning")
-                
-                locations = result.get("locations", [])
-                for loc in locations:
-                    physical_loc = loc.get("physicalLocation", {})
-                    artifact_loc = physical_loc.get("artifactLocation", {})
-                    uri = artifact_loc.get("uri", "")
-                    region = physical_loc.get("region", {})
-                    start_line = region.get("startLine", 0)
-                    end_line = region.get("endLine", start_line)
-                    snippet = region.get("snippet", {}).get("text", "")
-                    
-                    findings.append({
-                        "rule_id": rule_id,
-                        "message": message,
-                        "level": level,
-                        "file": uri,
-                        "start_line": start_line,
-                        "end_line": end_line,
-                        "snippet": snippet[:200] if snippet else ""
-                    })
-        
-        return findings
-
-    def _save_codeql_results(
-        self,
-        query_name: str,
-        sarif_result: Dict[str, Any],
-        findings: List[Dict[str, Any]],
-        query_language: Optional[str] = None,
-        database_name: Optional[str] = None,
-    ):
-        """Save CodeQL results to output_dir/codeql-results/."""
-        if not self._memory_manager:
-            logger.warning("Memory manager not available, cannot save CodeQL results to output_dir")
-            return
-        
-        output_dir = self._memory_manager.output_dir
-        results_dir = output_dir / "codeql-results"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Sanitize query name for filename
-        safe_name = re.sub(r'[^\w\-]', '_', query_name)
-        
-        # Save full SARIF result
-        sarif_file = results_dir / f"{safe_name}.sarif"
-        sarif_file.write_text(json.dumps(sarif_result, indent=2, ensure_ascii=False), encoding="utf-8")
-        
-        # Save summarized findings as JSON
-        summary_file = results_dir / f"{safe_name}_findings.json"
-        summary_data = {
-            "query_name": query_name,
-            "timestamp": datetime.now().isoformat(),
-            "query_language": query_language or self._primary_language(),
-            "database": database_name or self._get_codeql_database_name(query_language),
-            "total_findings": len(findings),
-            "findings": findings
-        }
-        summary_file.write_text(json.dumps(summary_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        
-        logger.info(f"CodeQL results saved to {results_dir}/{safe_name}.*")
-
-    def _record_codeql_findings_in_memory(self, query_name: str, findings: List[Dict[str, Any]]):
-        """Record CodeQL findings in agent memory."""
-        if not self._memory_manager:
-            return
-        
-        # Record each finding
-        for finding in findings:
-            finding_record = {
-                "source": "codeql",
-                "query_name": query_name,
-                "file_path": finding.get("file", ""),
-                "vulnerability_type": finding.get("rule_id", "unknown"),
-                "description": finding.get("message", ""),
-                "evidence": finding.get("snippet", ""),
-                "line_number": finding.get("start_line", 0),
-                "confidence": "codeql-generated",
-                "similarity_to_known": f"Detected by CodeQL query: {query_name}"
-            }
-            self._memory_manager.add_finding(finding_record)
-        
-        # Also add a summary to issues if there are findings
-        if findings:
-            summary = f"CodeQL query '{query_name}' found {len(findings)} potential issues"
-            self._memory_manager.add_issue(summary)
-
-    def _format_codeql_summary(self, query_name: str, findings: List[Dict[str, Any]]) -> str:
-        """Format CodeQL findings into a readable summary."""
-        if not findings:
-            return f"CodeQL query '{query_name}' completed. No vulnerabilities found."
-        
-        lines = [
-            f"## CodeQL Query Results: {query_name}",
-            f"Found **{len(findings)}** potential issue(s):",
-            ""
-        ]
-        
-        # Group by file
-        by_file: Dict[str, List[Dict]] = {}
-        for f in findings:
-            file_path = f.get("file", "unknown")
-            by_file.setdefault(file_path, []).append(f)
-        
-        for file_path, file_findings in sorted(by_file.items()):
-            lines.append(f"### {file_path}")
-            for finding in file_findings[:5]:  # Limit per file
-                line = finding.get("start_line", "?")
-                rule = finding.get("rule_id", "unknown")
-                msg = finding.get("message", "")[:100]
-                lines.append(f"- **L{line}** [{rule}]: {msg}")
-            if len(file_findings) > 5:
-                lines.append(f"  ... and {len(file_findings) - 5} more in this file")
-            lines.append("")
-        
-        if len(by_file) > 10:
-            lines.append(f"... and issues in {len(by_file) - 10} more files")
-        
-        lines.append("")
-        lines.append("Results saved to `codeql-results/`. Use `read_codeql_results` tool to see full findings if truncated.")
-        
-        return "\n".join(lines)
-
-    def _read_codeql_results(self, query_name: str, offset: int = 0, limit: int = 50) -> ToolResult:
-        """Read full CodeQL query results from a previous query.
-        
-        Args:
-            query_name: The query name used when running the query
-            offset: Start index for pagination (default: 0)
-            limit: Maximum number of findings to return (default: 50)
-        
-        Returns:
-            ToolResult with paginated findings
-        """
-        if not self._memory_manager:
-            return ToolResult(
-                success=False,
-                content="",
-                error="Memory manager not available. Cannot read CodeQL results."
-            )
-        
-        # Sanitize query name for filename
-        safe_name = re.sub(r'[^\w\-]', '_', query_name)
-        results_dir = self._memory_manager.output_dir / "codeql-results"
-        findings_file = results_dir / f"{safe_name}_findings.json"
-        
-        if not findings_file.exists():
-            # List available results
-            available = []
-            if results_dir.exists():
-                available = [f.stem.replace('_findings', '') for f in results_dir.glob('*_findings.json')]
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"Results not found for query: {query_name}. Available queries: {available}"
-            )
-        
-        try:
-            data = json.loads(findings_file.read_text(encoding="utf-8"))
-            findings = data.get("findings", [])
-            total = len(findings)
-            
-            # Apply pagination
-            paginated = findings[offset:offset + limit]
-            
-            result = {
-                "query_name": query_name,
-                "total_findings": total,
-                "offset": offset,
-                "limit": limit,
-                "returned": len(paginated),
-                "has_more": offset + limit < total,
-                "findings": paginated
-            }
-            
-            return ToolResult(
-                success=True,
-                content=json.dumps(result, indent=2, ensure_ascii=False)
-            )
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                content="",
-                error=f"Failed to read CodeQL results: {str(e)}"
-            )

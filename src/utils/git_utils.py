@@ -197,6 +197,15 @@ def has_uncommitted_changes(repo_path: str, include_untracked: bool = True) -> b
                 continue
             return True
         return False
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").lower()
+        if "not a git repository" in stderr:
+            logger.info(f"Treating non-git directory as clean for cleanliness check: {repo_path}")
+            return False
+        logger.info(f"Failed to check repository cleanliness: {e}")
+        # Fail closed for real git command failures.
+        return True
     except Exception as e:
         logger.info(f"Failed to check repository cleanliness: {e}")
-        return False
+        # Fail closed: callers use this guard before checkout/restore/cache reuse.
+        return True

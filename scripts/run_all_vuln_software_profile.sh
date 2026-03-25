@@ -4,6 +4,7 @@ set -euo pipefail
 # Generate software profiles for all repo/commit pairs in vuln.json.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+APP_DIR="${APP_DIR:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
 source "$SCRIPT_DIR/profile_paths.sh"
 
 VULN_JSON="${VULN_JSON:-../data/vuln.json}"
@@ -16,23 +17,53 @@ LLM_NAME="${LLM_NAME:-}"
 FORCE_REGENERATE=0
 EXTRA_ARGS=()
 
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [[ -z "$PYTHON_BIN" ]]; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  else
+    echo "ERROR: neither python nor python3 is available in PATH" >&2
+    exit 1
+  fi
+fi
+read -r -a PYTHON_CMD <<<"$PYTHON_BIN"
+
 cleanup_codeql_temp_artifacts() {
   local repo_dir="$1"
   [[ -d "$repo_dir" ]] || return 0
 
-  local cleaned=0
-  if [[ -L "$repo_dir/_codeql_detected_source_root" || -e "$repo_dir/_codeql_detected_source_root" ]]; then
-    rm -f "$repo_dir/_codeql_detected_source_root"
-    cleaned=1
-  fi
-  if [[ -d "$repo_dir/_codeql_build_dir" ]]; then
-    rm -rf "$repo_dir/_codeql_build_dir"
-    cleaned=1
-  fi
+  "${PYTHON_CMD[@]}" - cleanup_codeql_temp_artifacts "$APP_DIR" "$repo_dir" <<'PY'
+from pathlib import Path
+import shutil
+import sys
 
-  if [[ "$cleaned" -eq 1 ]]; then
-    echo "Cleaned CodeQL temp artifacts: $repo_dir"
-  fi
+app_dir = Path(sys.argv[2]).resolve()
+repo_dir = Path(sys.argv[3]).resolve()
+
+sys.path.insert(0, str(app_dir / "src"))
+
+from config import _path_config
+from utils import repo_lock as repo_lock_module
+
+_path_config["repo_root"] = app_dir
+
+cleaned = False
+with repo_lock_module.hold_repo_lock(repo_dir, purpose="cleanup_codeql_temp_artifacts"):
+    detected_source_root = repo_dir / "_codeql_detected_source_root"
+    if detected_source_root.exists() or detected_source_root.is_symlink():
+        detected_source_root.unlink()
+        cleaned = True
+
+    build_dir = repo_dir / "_codeql_build_dir"
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+        cleaned = True
+
+if cleaned:
+    print(f"Cleaned CodeQL temp artifacts: {repo_dir}")
+PY
 }
 
 usage() {
@@ -143,6 +174,7 @@ total="${#entries[@]}"
 current=0
 failed=0
 succeeded=0
+failed_entries=()
 
 for entry in "${entries[@]}"; do
   IFS='|' read -r repo_name commit <<< "$entry"
@@ -153,7 +185,13 @@ for entry in "${entries[@]}"; do
   echo "=========================================="
   echo "[$current/$total] Processing: $repo_name @ ${commit:0:12}"
   echo "=========================================="
-  cleanup_codeql_temp_artifacts "$repo_dir"
+  if ! cleanup_codeql_temp_artifacts "$repo_dir"; then
+    failed=$((failed + 1))
+    failed_entries+=("$repo_name@$commit:cleanup")
+    echo "Failed: $repo_name @ ${commit:0:12} (cleanup failed)"
+    echo ""
+    continue
+  fi
 
   cmd=(
     software-profile
@@ -178,6 +216,7 @@ for entry in "${entries[@]}"; do
     echo "Success: $repo_name @ ${commit:0:12}"
   else
     failed=$((failed + 1))
+    failed_entries+=("$repo_name@$commit")
     echo "Failed: $repo_name @ ${commit:0:12}"
   fi
   echo ""
@@ -189,6 +228,12 @@ echo "=========================================="
 echo "Total processed: $total"
 echo "Succeeded: $succeeded"
 echo "Failed: $failed"
+if [[ ${#failed_entries[@]} -gt 0 ]]; then
+  echo "Failed entries:"
+  for failed_entry in "${failed_entries[@]}"; do
+    echo "  - $failed_entry"
+  done
+fi
 echo "Results saved to: $OUTPUT_DIR"
 
 if [[ "$failed" -gt 0 ]]; then

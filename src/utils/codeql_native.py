@@ -42,18 +42,33 @@ codeql database analyze my_db --format=sarif-latest --output=results.sarif
 ```
 """
 
+from contextlib import contextmanager
+from dataclasses import dataclass
+import fcntl
+import hashlib
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import tempfile
-import shutil
-from pathlib import Path
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from utils.logger import get_logger
 
 # Initialize logger for this module
 logger = get_logger(__name__)
+
+
+@contextmanager
+def _hold_database_creation_lock(lock_path: Path):
+    """Serialize create/remove operations for one database path."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -66,89 +81,72 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     Returns:
         A dict containing CodeQL configuration
     """
+    import yaml
+    from pathlib import Path
+
+    # Try importing the config module (to obtain default paths)
     try:
-        import yaml
-        from pathlib import Path
-        
-        # Try importing the config module (to obtain default paths)
+        from config import _path_config
+    except ImportError:
+        logger.debug("Could not import config module in load_codeql_config")
+        _path_config = None
+
+    # Default config file path
+    if config_path is None:
+        config_path = Path(__file__).parent.parent.parent / "config" / "codeql_config.yaml"
+
+    config = {
+        'cli_path': '',
+        'queries_path': '',
+        'database_dir': '',
+        'threads': 0,
+        'memory': 0,
+        'timeout': 600,
+    }
+
+    if config_path.exists():
         try:
-            from config import _path_config
-        except ImportError:
-            logger.debug("Could not import config module in load_codeql_config")
-            _path_config = None
-        
-        # Default config file path
-        if config_path is None:
-            config_path = Path(__file__).parent.parent.parent / "config" / "codeql_config.yaml"
-        
-        config = {}
-        
-        if config_path.exists():
             with open(config_path, 'r', encoding='utf-8') as f:
-                yaml_config = yaml.safe_load(f)
-            
-            codeql_cli = yaml_config.get('codeql_cli', {})
-            config['cli_path'] = codeql_cli.get('cli_path', '')
-            config['queries_path'] = codeql_cli.get('queries_path', '')
-            config['database_dir'] = codeql_cli.get('database_dir', '')
-            config['threads'] = codeql_cli.get('threads', 0)
-            config['memory'] = codeql_cli.get('memory', 0)
-            config['timeout'] = codeql_cli.get('timeout', 600)
-        else:
-            # Use defaults
-            config = {
-                'cli_path': '',
-                'queries_path': '',
-                'database_dir': '',
-                'threads': 0,
-                'memory': 0,
-                'timeout': 600
-            }
-        
-        logger.debug(f"Loaded CodeQL config: queries_path={config.get('queries_path')}, database_dir={config.get('database_dir')}")
+                yaml_config = yaml.safe_load(f) or {}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load CodeQL config from {config_path}: {exc}") from exc
+        if not isinstance(yaml_config, dict):
+            raise RuntimeError(f"CodeQL config must be a mapping: {config_path}")
+        codeql_cli = yaml_config.get('codeql_cli', {})
+        if not isinstance(codeql_cli, dict):
+            raise RuntimeError(f"codeql_cli section must be a mapping: {config_path}")
+        config['cli_path'] = codeql_cli.get('cli_path', '')
+        config['queries_path'] = codeql_cli.get('queries_path', '')
+        config['database_dir'] = codeql_cli.get('database_dir', '')
+        config['threads'] = codeql_cli.get('threads', 0)
+        config['memory'] = codeql_cli.get('memory', 0)
+        config['timeout'] = codeql_cli.get('timeout', 600)
 
-        # Determine the repo root (llm-vulvariant/) for resolving relative paths
-        if _path_config and 'repo_root' in _path_config:
-            _repo_root = str(_path_config['repo_root'])
-        else:
-            # __file__ is src/utils/codeql_native.py → go up 3 levels to llm-vulvariant/
-            _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    logger.debug(f"Loaded CodeQL config: queries_path={config.get('queries_path')}, database_dir={config.get('database_dir')}")
 
-        # If no query path is provided, use the default (.codeql under repo root)
-        if not config['queries_path']:
-            config['queries_path'] = os.path.join(_repo_root, ".codeql")
-        elif not os.path.isabs(config['queries_path']):
-            # Resolve relative queries_path against the repo root, not the CWD
-            config['queries_path'] = os.path.join(_repo_root, config['queries_path'])
-        
-        # If no database directory is provided, use the project's configured path
-        if not config['database_dir']:
-            if _path_config:
-                config['database_dir'] = str(_path_config['codeql_db_path'])
-            else:
-                # If config cannot be imported, fall back to a temp directory
-                config['database_dir'] = os.path.join(tempfile.gettempdir(), "codeql-dbs")
-        
-        # Ensure database directory exists
-        os.makedirs(config['database_dir'], exist_ok=True)
-        
-        return config
-        
-    except Exception as e:
-        # If loading fails, return defaults
-        logger.error(f"Failed to load CodeQL config: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
-        default_config = {
-            'cli_path': '',
-            'queries_path': os.path.join(os.path.dirname(__file__), "codeql", "queries"),
-            'database_dir': os.path.join(tempfile.gettempdir(), "codeql-dbs"),
-            'threads': 0,
-            'memory': 0,
-            'timeout': 600
-        }
-        os.makedirs(default_config['database_dir'], exist_ok=True)
-        return default_config
+    # Determine the repo root (llm-vulvariant/) for resolving relative paths
+    if _path_config and 'repo_root' in _path_config:
+        _repo_root = str(_path_config['repo_root'])
+    else:
+        # __file__ is src/utils/codeql_native.py → go up 3 levels to llm-vulvariant/
+        _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+
+    # If no query path is provided, use the default (.codeql under repo root)
+    if not config['queries_path']:
+        config['queries_path'] = os.path.join(_repo_root, ".codeql")
+    elif not os.path.isabs(config['queries_path']):
+        # Resolve relative queries_path against the repo root, not the CWD
+        config['queries_path'] = os.path.join(_repo_root, config['queries_path'])
+
+    # If no database directory is provided, use the project's configured path
+    if not config['database_dir']:
+        if _path_config:
+            config['database_dir'] = str(_path_config['codeql_db_path'])
+        else:
+            config['database_dir'] = os.path.join(tempfile.gettempdir(), "codeql-dbs")
+
+    os.makedirs(config['database_dir'], exist_ok=True)
+    return config
 
 
 @dataclass 
@@ -290,7 +288,10 @@ class CodeQLAnalyzer:
             "build.ninja",
             "compile_commands.json",
         }
-        return any((root / marker).exists() for marker in indicators)
+        for marker in indicators:
+            if any(root.rglob(marker)):
+                return True
+        return False
 
     @staticmethod
     def _is_complete_database(db_path: str) -> bool:
@@ -318,7 +319,7 @@ class CodeQLAnalyzer:
                     )
                     return False
         except Exception:
-            pass  # If we can't parse YAML, fall through to True for backwards compat
+            return False
         return True
 
     @staticmethod
@@ -369,18 +370,14 @@ class CodeQLAnalyzer:
         if not normalized_lang:
             return False, f"Unsupported language: {language}"
         
-        # Determine database path
+        # Determine database path. Include the source path hash so different
+        # repositories with the same basename do not clobber each other's DBs.
         if not database_name:
-            database_name = os.path.basename(source_path) + f"-{normalized_lang}"
+            source_hash = hashlib.sha1(source_path.encode("utf-8")).hexdigest()[:12]
+            database_name = f"{os.path.basename(source_path)}-{source_hash}-{normalized_lang}"
         
         db_path = os.path.join(self.config['database_dir'], database_name)
-        
-        # If database path already exists
-        if os.path.exists(db_path):
-            if not overwrite and self._is_complete_database(db_path):
-                return True, db_path
-            # Remove incomplete database or recreate when overwrite=True.
-            shutil.rmtree(db_path, ignore_errors=True)
+        db_lock_path = Path(self.config['database_dir']) / f".{database_name}.lock"
         
         def _create_db(extra_args: Optional[List[str]] = None) -> Tuple[bool, str, str]:
             args = [
@@ -397,60 +394,72 @@ class CodeQLAnalyzer:
                 args.extend(extra_args)
             return self._run_codeql(args, timeout=1800)  # 30-minute timeout
 
-        # C/C++ repos frequently have no build metadata at repo root (mixed-language monorepos).
-        # In that case, autobuild is expected to fail and only adds noisy errors.
-        if normalized_lang == "cpp" and not self._has_cpp_build_system(source_path):
-            logger.info(
-                "No C/C++ build system detected at %s; using --build-mode=none directly.",
-                source_path,
-            )
-            buildless_success, buildless_stdout, buildless_stderr = _create_db(["--build-mode=none"])
-            if buildless_success:
-                return True, db_path
-            buildless_error = self._format_codeql_error(buildless_stdout, buildless_stderr)
-            logger.info(
-                "C/C++ buildless mode failed; retrying default build mode. Error: %s",
-                buildless_error,
-            )
+        with _hold_database_creation_lock(db_lock_path):
+            # If database path already exists, reuse the completed DB or clear
+            # the stale/incomplete directory before creating it again.
             if os.path.exists(db_path):
+                if not overwrite and self._is_complete_database(db_path):
+                    return True, db_path
                 shutil.rmtree(db_path, ignore_errors=True)
-            primary_success, primary_stdout, primary_stderr = _create_db()
-            if primary_success:
+
+            if normalized_lang == "cpp":
+                has_build_system = self._has_cpp_build_system(source_path)
+                if not has_build_system:
+                    # Buildless extraction is the fastest reliable mode when the repo
+                    # does not expose a recognizable C/C++ build system anywhere.
+                    logger.info(
+                        "No C/C++ build system detected for %s; trying "
+                        "--build-mode=none before default autobuild.",
+                        source_path,
+                    )
+                    buildless_success, buildless_stdout, buildless_stderr = _create_db(["--build-mode=none"])
+                    if buildless_success:
+                        return True, db_path
+                    buildless_error = self._format_codeql_error(buildless_stdout, buildless_stderr)
+                    logger.debug("C/C++ buildless-mode error: %s", buildless_error)
+                    if os.path.exists(db_path):
+                        shutil.rmtree(db_path, ignore_errors=True)
+                    logger.info(
+                        "CodeQL database create failed for C/C++ with --build-mode=none; "
+                        "retrying default build mode as a last resort."
+                    )
+                    success, stdout, stderr = _create_db()
+                    if success:
+                        return True, db_path
+                    primary_error = self._format_codeql_error(stdout, stderr)
+                    return False, (
+                        "Failed to create database. "
+                        f"Buildless (--build-mode=none) error: {buildless_error}\n"
+                        f"Default mode error: {primary_error}"
+                    )
+
+            # Primary attempt (default build mode, usually autobuild for compiled languages)
+            success, stdout, stderr = _create_db()
+            if success:
                 return True, db_path
-            primary_error = self._format_codeql_error(primary_stdout, primary_stderr)
-            return False, (
-                "Failed to create database. "
-                f"Buildless (--build-mode=none) error: {buildless_error}\n"
-                f"Default mode error: {primary_error}"
-            )
 
-        # Primary attempt (default build mode, usually autobuild for compiled languages)
-        success, stdout, stderr = _create_db()
-        if success:
-            return True, db_path
+            primary_error = self._format_codeql_error(stdout, stderr)
 
-        primary_error = self._format_codeql_error(stdout, stderr)
+            # C/C++ fallback: autobuild preserves compile flags when a build system exists.
+            if normalized_lang == "cpp":
+                logger.info(
+                    "CodeQL database create failed for C/C++ with default build mode; "
+                    "retrying with --build-mode=none."
+                )
+                logger.debug("C/C++ default build-mode error: %s", primary_error)
+                if os.path.exists(db_path):
+                    shutil.rmtree(db_path, ignore_errors=True)
+                fallback_success, fallback_stdout, fallback_stderr = _create_db(["--build-mode=none"])
+                if fallback_success:
+                    return True, db_path
+                fallback_error = self._format_codeql_error(fallback_stdout, fallback_stderr)
+                return False, (
+                    "Failed to create database. "
+                    f"Default mode error: {primary_error}\n"
+                    f"Fallback (--build-mode=none) error: {fallback_error}"
+                )
 
-        # C/C++ fallback: buildless extraction avoids fragile project-specific autobuilds.
-        if normalized_lang == "cpp":
-            logger.info(
-                "CodeQL database create failed for C/C++ with default build mode; "
-                "retrying with --build-mode=none."
-            )
-            logger.debug("C/C++ default build-mode error: %s", primary_error)
-            if os.path.exists(db_path):
-                shutil.rmtree(db_path, ignore_errors=True)
-            fallback_success, fallback_stdout, fallback_stderr = _create_db(["--build-mode=none"])
-            if fallback_success:
-                return True, db_path
-            fallback_error = self._format_codeql_error(fallback_stdout, fallback_stderr)
-            return False, (
-                "Failed to create database. "
-                f"Default mode error: {primary_error}\n"
-                f"Fallback (--build-mode=none) error: {fallback_error}"
-            )
-
-        return False, f"Failed to create database: {primary_error}"
+            return False, f"Failed to create database: {primary_error}"
     
     def run_query(
         self,
@@ -483,12 +492,15 @@ class CodeQLAnalyzer:
                     query_path = self.QUERY_SUITES[query].format(lang=lang)
             else:
                 # Try custom queries directory
-                custom_query = os.path.join(self.config['queries_path'], query)
+                custom_query = os.path.join(self.config.get('queries_path', ''), query)
                 if os.path.exists(custom_query):
                     query_path = custom_query
         
+        normalized_format = str(output_format or "sarif-latest").strip().lower()
+        output_suffix = ".sarif" if normalized_format.startswith("sarif") else f".{normalized_format}"
+
         # Create a temporary output file
-        with tempfile.NamedTemporaryFile(suffix=".sarif", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=output_suffix, delete=False) as f:
             output_path = f.name
         
         try:
@@ -510,8 +522,11 @@ class CodeQLAnalyzer:
             success, stdout, stderr = self._run_codeql(args)
             
             if success and os.path.exists(output_path):
-                with open(output_path, 'r') as f:
-                    result = json.load(f)
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    if normalized_format in {"json", "sarif-latest", "sarifv2.1.0"} or normalized_format.startswith("sarif"):
+                        result = json.load(f)
+                    else:
+                        result = f.read()
                 return True, result
             else:
                 return False, f"Query failed: {stderr}"

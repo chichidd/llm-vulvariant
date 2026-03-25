@@ -22,7 +22,7 @@ import json
 import re
 
 from profiler.software.models import ModuleInfo, SoftwareProfile
-from scanner.similarity.embedding import EmbeddingRetrievalConfig, EmbeddingRetriever
+from scanner.similarity.embedding import DEFAULT_EMBEDDING_MODEL_NAME, EmbeddingRetrievalConfig, EmbeddingRetriever
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -137,6 +137,17 @@ def _profile_mtime_ns(profile_path: Optional[Path]) -> int:
         return -1
 
 
+def _profile_is_parseable(profile_path: Path) -> bool:
+    """Return whether one persisted software profile can be parsed successfully."""
+    try:
+        data = json.loads(profile_path.read_text(encoding="utf-8"))
+        SoftwareProfile.from_dict(data)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning(f"Failed to load profile {profile_path}: {exc}")
+        return False
+    return True
+
+
 def _select_latest_profile_ref(profile_refs: Sequence[ProfileRef]) -> Optional[ProfileRef]:
     """Pick the newest profile reference using persisted profile mtimes."""
     if not profile_refs:
@@ -175,21 +186,31 @@ def resolve_profile_commit(
     if commit_hint:
         exact_matches = [candidate for candidate in profile_candidates if candidate[0] == commit_hint]
         if exact_matches:
-            return exact_matches[0][0]
+            parseable_matches = [candidate for candidate in exact_matches if _profile_is_parseable(candidate[1])]
+            if not parseable_matches:
+                return None
+            return parseable_matches[0][0]
 
         prefix_matches = [
             candidate for candidate in profile_candidates
             if candidate[0].startswith(commit_hint)
         ]
         if prefix_matches:
-            return max(
-                prefix_matches,
+            parseable_matches = [candidate for candidate in prefix_matches if _profile_is_parseable(candidate[1])]
+            if not parseable_matches:
+                return None
+            selected = max(
+                parseable_matches,
                 key=lambda item: (_profile_mtime_ns(item[1]), item[0]),
-            )[0]
+            )
+            return selected[0]
         return None
 
+    parseable_candidates = [candidate for candidate in profile_candidates if _profile_is_parseable(candidate[1])]
+    if not parseable_candidates:
+        return None
     selected = max(
-        profile_candidates,
+        parseable_candidates,
         key=lambda item: (_profile_mtime_ns(item[1]), item[0]),
     )
     return selected[0]
@@ -219,12 +240,13 @@ def select_profile_ref(
 
 
 def build_text_retriever(
-    model_name: str = "BAAI--bge-large-en-v1.5",
+    model_name: Optional[str] = None,
     device: str = "cpu",
 ) -> Optional[EmbeddingRetriever]:
     """Build an embedding retriever for text similarity.
 
-    Falls back to `None` when the model cannot be loaded.
+    Returns ``None`` when the configured model path or backend cannot be
+    loaded so callers can fall back to lexical similarity.
     """
     config = EmbeddingRetrievalConfig(
         model_name=model_name,
@@ -233,9 +255,17 @@ def build_text_retriever(
         normalize=True,
     )
     try:
-        return EmbeddingRetriever(config=config)
+        retriever = EmbeddingRetriever(config=config)
+        retriever._ensure_loaded()
+        return retriever
     except Exception as exc:  # pylint: disable=broad-except
-        logger.warning(f"Falling back to lexical text similarity: {exc}")
+        logger.warning(
+            "Failed to build embedding retriever for auto-target similarity; "
+            "falling back to lexical similarity. model_name=%r, device=%r, error=%s",
+            model_name or DEFAULT_EMBEDDING_MODEL_NAME,
+            device,
+            exc,
+        )
         return None
 
 
@@ -248,9 +278,9 @@ def compute_profile_similarity(
     """Compute profile similarity with five dimensions.
 
     Metrics:
-    1) description similarity (embedding or lexical fallback)
-    2) target application similarity (embedding or lexical fallback)
-    3) target user similarity (embedding or lexical fallback)
+    1) description similarity (embedding when configured, lexical otherwise)
+    2) target application similarity (embedding when configured, lexical otherwise)
+    3) target user similarity (embedding when configured, lexical otherwise)
     4) module-name Jaccard similarity
     5) module dependency/import Jaccard similarity
     """
@@ -449,6 +479,9 @@ def _text_similarity(
         try:
             return float(text_retriever.similarity(left, right))
         except Exception as exc:  # pylint: disable=broad-except
-            logger.debug(f"Embedding similarity failed, using lexical fallback: {exc}")
+            logger.warning(
+                "Embedding similarity failed at runtime; falling back to lexical similarity. error=%s",
+                exc,
+            )
 
     return _jaccard_similarity(_tokenize_text(left), _tokenize_text(right))

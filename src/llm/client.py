@@ -1,6 +1,7 @@
 import copy
+import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 import os
 import time
 import yaml
@@ -18,6 +19,8 @@ from utils.number_utils import to_int
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+# Sentinel that distinguishes "argument omitted" from "argument explicitly set to the default value".
+_UNSET = object()
 
 
 def capture_llm_usage_snapshot(llm_client: Any) -> Optional[int]:
@@ -53,45 +56,38 @@ def safe_chat_call(llm_client: Any, messages: List[Dict[str, str]], **kwargs) ->
     keeps runtime behavior (passing kwargs like ``temperature``) while preserving
     compatibility with those clients.
     """
+    chat_fn = getattr(llm_client, "chat")
     if not kwargs:
-        return llm_client.chat(messages)
+        return chat_fn(messages)
+
     try:
-        return llm_client.chat(messages, **kwargs)
-    except TypeError as exc:
-        if "unexpected keyword argument" in str(exc):
-            return llm_client.chat(messages)
-        raise
+        signature = inspect.signature(chat_fn)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is not None:
+        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+        if not accepts_kwargs:
+            accepted_keyword_names = {
+                param.name
+                for param in signature.parameters.values()
+                if param.kind in {
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                }
+            }
+            if not set(kwargs).issubset(accepted_keyword_names):
+                return chat_fn(messages)
+
+    return chat_fn(messages, **kwargs)
 
 
-def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, Any]:
-    """
-    Load LLM configuration from a YAML file.
-
-    Args:
-        config_path: Path to the config file; uses a default path if not provided.
-
-    Returns:
-        A dict containing LLM configuration.
-    """
-    try:
-        if config_path is None:
-            config_path = Path(__file__).parent.parent.parent / "config" / "llm_config.yaml"
-        
-        if config_path.exists():
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-
-            if isinstance(config, dict):
-                return config
-    except Exception as e:
-        import logging
-        logging.debug(f"Failed to load LLM config: {e}")
-    
-    # Defaults
+def _default_llm_config() -> Dict[str, Any]:
+    """Return the built-in fallback LLM configuration."""
     return {
         'llm': {
             'default': {
-                'temperature': 1.0,
+                'temperature': 0.1,
                 'top_p': 0.9,
                 'max_tokens': 0,
                 'timeout': 120,
@@ -106,10 +102,46 @@ def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, A
     }
 
 
-@dataclass
+def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    Load LLM configuration from a YAML file.
+
+    Args:
+        config_path: Path to the config file; uses a default path if not provided.
+
+    Returns:
+        A dict containing LLM configuration.
+    """
+    if config_path is None:
+        config_path = Path(__file__).parent.parent.parent / "config" / "llm_config.yaml"
+    config_path = Path(config_path)
+
+    if not config_path.exists():
+        return _default_llm_config()
+
+    try:
+        raw_text = config_path.read_text(encoding='utf-8')
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read LLM config: {config_path}: {exc}") from exc
+
+    if not raw_text.strip():
+        return _default_llm_config()
+
+    try:
+        config = yaml.safe_load(raw_text)
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"Failed to parse LLM config: {config_path}: {exc}") from exc
+    if config is None:
+        return _default_llm_config()
+    if isinstance(config, dict):
+        return config
+    raise RuntimeError(f"Invalid LLM config at {config_path}: top-level YAML must be a mapping")
+
+
+@dataclass(init=False)
 class LLMConfig:
     """LLM configuration."""
-    provider: str = ""  # openai, deepseek
+    provider: str = ""  # openai, deepseek, lab
     model: str = ""
     api_key: Optional[str] = None
     base_url: Optional[str] = None
@@ -128,84 +160,149 @@ class LLMConfig:
     backoff_factor: float = 2.0  # Exponential backoff factor
     
 
-    enable_thinking: bool = True  # DeepSeek thinking parameter
-    
-    def __post_init__(self):
+    enable_thinking: Optional[bool] = None  # DeepSeek thinking parameter
+
+    def __init__(
+        self,
+        provider: str = "",
+        model: str = "",
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        fallback_provider: Any = _UNSET,
+        fallback_on_retry_exhausted: Any = _UNSET,
+        temperature: Any = _UNSET,
+        top_p: Any = _UNSET,
+        max_tokens: Any = _UNSET,
+        timeout: Any = _UNSET,
+        context_limit: Any = _UNSET,
+        max_retries: Any = _UNSET,
+        initial_delay: Any = _UNSET,
+        max_delay: Any = _UNSET,
+        backoff_factor: Any = _UNSET,
+        enable_thinking: Any = _UNSET,
+    ) -> None:
+        self.provider = provider
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+        self.fallback_provider = None if fallback_provider is _UNSET else fallback_provider
+        self.fallback_on_retry_exhausted = None if fallback_on_retry_exhausted is _UNSET else fallback_on_retry_exhausted
+        self.temperature = 1.0 if temperature is _UNSET else temperature
+        self.top_p = 0.9 if top_p is _UNSET else top_p
+        self.max_tokens = 0 if max_tokens is _UNSET else max_tokens
+        self.timeout = 120 if timeout is _UNSET else timeout
+        self.context_limit = 0 if context_limit is _UNSET else context_limit
+        self.max_retries = 10 if max_retries is _UNSET else max_retries
+        self.initial_delay = 1.0 if initial_delay is _UNSET else initial_delay
+        self.max_delay = 60.0 if max_delay is _UNSET else max_delay
+        self.backoff_factor = 2.0 if backoff_factor is _UNSET else backoff_factor
+        self.enable_thinking = None if enable_thinking is _UNSET else enable_thinking
+        self._explicit_config_fields: Set[str] = {
+            field_name
+            for field_name, value in (
+                ("temperature", temperature),
+                ("top_p", top_p),
+                ("max_tokens", max_tokens),
+                ("timeout", timeout),
+                ("context_limit", context_limit),
+                ("fallback_provider", fallback_provider),
+                ("fallback_on_retry_exhausted", fallback_on_retry_exhausted),
+                ("max_retries", max_retries),
+                ("initial_delay", initial_delay),
+                ("max_delay", max_delay),
+                ("backoff_factor", backoff_factor),
+                ("enable_thinking", enable_thinking),
+            )
+            if value is not _UNSET
+        }
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
         """Auto-populate api_key/base_url based on provider, preferring YAML config."""
-        # First try to load from YAML
+        explicit_fields = getattr(self, "_explicit_config_fields", set())
+        # First try to load from YAML.
         yaml_config = load_llm_config_from_yaml()
         llm_config = yaml_config.get('llm', {})
         providers_config = llm_config.get('providers', {})
         default_config = llm_config.get('default', {})
-        
-        # If not explicitly set, use defaults
-        if self.temperature == 1.0 and 'temperature' in default_config:
+
+        # If not explicitly set, use YAML defaults.
+        if "temperature" not in explicit_fields and self.temperature == 1.0 and 'temperature' in default_config:
             self.temperature = default_config['temperature']
-        if self.top_p == 0.9 and 'top_p' in default_config:
+        if "top_p" not in explicit_fields and self.top_p == 0.9 and 'top_p' in default_config:
             self.top_p = default_config['top_p']
-        if self.timeout == 120 and 'timeout' in default_config:
+        if "timeout" not in explicit_fields and self.timeout == 120 and 'timeout' in default_config:
             self.timeout = default_config['timeout']
-        if self.max_retries == 10 and 'max_retries' in default_config:
+        if "max_retries" not in explicit_fields and self.max_retries == 10 and 'max_retries' in default_config:
             self.max_retries = default_config['max_retries']
-        if self.initial_delay == 1.0 and 'initial_delay' in default_config:
+        if "initial_delay" not in explicit_fields and self.initial_delay == 1.0 and 'initial_delay' in default_config:
             self.initial_delay = default_config['initial_delay']
-        if self.max_delay == 60.0 and 'max_delay' in default_config:
+        if "max_delay" not in explicit_fields and self.max_delay == 60.0 and 'max_delay' in default_config:
             self.max_delay = default_config['max_delay']
-        if self.backoff_factor == 2.0 and 'backoff_factor' in default_config:
+        if "backoff_factor" not in explicit_fields and self.backoff_factor == 2.0 and 'backoff_factor' in default_config:
             self.backoff_factor = default_config['backoff_factor']
-        if 'enable_thinking' in default_config:
+        if "enable_thinking" not in explicit_fields and self.enable_thinking is None and 'enable_thinking' in default_config:
             self.enable_thinking = default_config['enable_thinking']
-        
-        # Load provider-specific config
+
+        # Load provider-specific config.
         if self.provider and self.provider in providers_config:
             provider_config = providers_config[self.provider]
-            
+
             # Keep explicit credentials/model overrides from the caller.
             if not self.api_key and 'api_key_env' in provider_config:
                 self.api_key = os.getenv(provider_config['api_key_env'])
-            
-            # Set other fields
+
+            # Set other fields.
             if not self.base_url and 'base_url' in provider_config:
                 self.base_url = provider_config['base_url']
             if not self.model and 'model' in provider_config:
                 self.model = provider_config['model']
-            if not self.fallback_provider and 'fallback_provider' in provider_config:
+            if "fallback_provider" not in explicit_fields and not self.fallback_provider and 'fallback_provider' in provider_config:
                 self.fallback_provider = provider_config['fallback_provider']
-            if self.fallback_on_retry_exhausted is None and 'fallback_on_retry_exhausted' in provider_config:
+            if (
+                "fallback_on_retry_exhausted" not in explicit_fields
+                and self.fallback_on_retry_exhausted is None
+                and 'fallback_on_retry_exhausted' in provider_config
+            ):
                 self.fallback_on_retry_exhausted = provider_config['fallback_on_retry_exhausted']
-            if self.max_tokens == 0 and 'max_tokens' in provider_config:
+            if "max_tokens" not in explicit_fields and self.max_tokens == 0 and 'max_tokens' in provider_config:
                 self.max_tokens = provider_config['max_tokens']
-            if self.context_limit == 0 and 'context_limit' in provider_config:
+            if "context_limit" not in explicit_fields and self.context_limit == 0 and 'context_limit' in provider_config:
                 self.context_limit = provider_config['context_limit']
 
         if self.fallback_on_retry_exhausted is None:
             self.fallback_on_retry_exhausted = False
         else:
             self.fallback_on_retry_exhausted = bool(self.fallback_on_retry_exhausted)
-        
-        # Backward compatibility: if YAML has no config, use hardcoded defaults
-        if self.provider and not self.base_url:
-            if self.provider == "deepseek":
-                # DeepSeek API
-                if not self.api_key:
-                    self.api_key = os.getenv("DEEPSEEK_API_KEY")
+
+        # Backward compatibility: if YAML is missing fields, fill provider defaults.
+        if self.provider == "deepseek":
+            if not self.api_key:
+                self.api_key = os.getenv("DEEPSEEK_API_KEY")
+            if not self.base_url:
                 self.base_url = "https://api.deepseek.com/v1"
-                if not self.model:
-                    self.model = "deepseek-chat"
-                if self.max_tokens == 0:
-                    self.max_tokens = 65536
-                if self.context_limit == 0:
-                    self.context_limit = 131072
-            elif self.provider == "openai":
-                if not self.api_key:
-                    self.api_key = os.getenv("NY_API_KEY")
+            if not self.model:
+                self.model = "deepseek-chat"
+            if "max_tokens" not in explicit_fields and self.max_tokens == 0:
+                self.max_tokens = 65536
+            if "context_limit" not in explicit_fields and self.context_limit == 0:
+                self.context_limit = 131072
+        elif self.provider == "openai":
+            if not self.api_key:
+                self.api_key = os.getenv("NY_API_KEY")
+            if not self.base_url:
                 self.base_url = "https://ai.nengyongai.cn/v1"
-                if not self.model:
-                    self.model = "gpt-5.1"
-                if self.max_tokens == 0:
-                    self.max_tokens = 65536
-                if self.context_limit == 0:
-                    self.context_limit = 65536
+            if not self.model:
+                self.model = "gpt-5.1"
+            if "max_tokens" not in explicit_fields and self.max_tokens == 0:
+                self.max_tokens = 65536
+            if "context_limit" not in explicit_fields and self.context_limit == 0:
+                self.context_limit = 65536
+
+        if self.enable_thinking is None:
+            self.enable_thinking = True
+
+
 class LLMRetryExhaustedError(Exception):
     """Raised when LLM retries are exhausted."""
     def __init__(self, message: str, last_error: Exception = None):
@@ -363,7 +460,18 @@ class BaseLLMClient(ABC):
         if isinstance(exception, (ConnectionError, TimeoutError, socket.timeout)):
             return True
         
-        # Check keywords in the error message
+        status_code = getattr(exception, "status_code", None)
+        if isinstance(status_code, int) and (status_code >= 500 or status_code == 429):
+            return True
+        exception_name = type(exception).__name__
+        if status_code is None and exception_name in {"APIConnectionError", "APITimeoutError"}:
+            return True
+
+        # Preserve parser/validation failures as non-retriable even when their
+        # messages include retry-like words such as "timeout".
+        if isinstance(exception, (TypeError, ValueError)):
+            return False
+
         error_msg = str(exception).lower()
         retriable_keywords = [
             'rate limit', 'rate_limit', 'ratelimit',
@@ -375,7 +483,7 @@ class BaseLLMClient(ABC):
         ]
         if any(keyword in error_msg for keyword in retriable_keywords):
             return True
-        
+
         return False
     
     def _calculate_delay(self, attempt: int) -> float:
@@ -396,42 +504,14 @@ class BaseLLMClient(ABC):
         return min(delay, self.max_delay)
 
     def _get_normalized_fallback_provider(self) -> str:
-        return (self.config.fallback_provider or "").strip().lower()
+        return str(self.config.fallback_provider or "").strip().lower()
 
-    def _is_fallback_eligible_exception(self, exception: Exception) -> bool:
-        try:
-            from openai import (
-                APIConnectionError,
-                APITimeoutError,
-                APIStatusError,
-                InternalServerError,
-                RateLimitError,
-            )
-
-            if isinstance(
-                exception,
-                (
-                    APIConnectionError,
-                    APITimeoutError,
-                    InternalServerError,
-                    RateLimitError,
-                ),
-            ):
-                return True
-            if isinstance(exception, APIStatusError):
-                return exception.status_code >= 500 or exception.status_code == 429
-        except ImportError:
-            pass
-
-        import socket
-        return isinstance(exception, (ConnectionError, TimeoutError, socket.timeout))
-    
     def _should_use_provider_fallback(self, exception: Exception) -> bool:
         return (
             self.config.provider == "lab"
             and bool(self.config.fallback_on_retry_exhausted)
             and self._get_normalized_fallback_provider() == "deepseek"
-            and self._is_fallback_eligible_exception(exception)
+            and self._should_retry(exception)
         )
 
     def _execute_with_provider_fallback(
@@ -522,13 +602,13 @@ class BaseLLMClient(ABC):
                 exc,
             )
             raise
-
-    def _execute_with_retry(self, request_name_or_func: Any, *args: Any, **kwargs: Any) -> Any:
+    
+    def _execute_with_retry(self, func, *args, **kwargs) -> Any:
         """
         Execute a function with retry logic.
 
         Args:
-            request_name_or_func: Request name plus function, or function alone.
+            func: Function to execute.
             *args: Positional args.
             **kwargs: Keyword args.
 
@@ -538,21 +618,12 @@ class BaseLLMClient(ABC):
         Raises:
             LLMRetryExhaustedError: When retries are exhausted.
         """
+        func_name = getattr(func, "__name__", "")
         request_name = None
-        if isinstance(request_name_or_func, str):
-            if not args:
-                raise TypeError("Function is required when request_name is provided")
-            request_name = request_name_or_func
-            func = args[0]
-            func_args = args[1:]
-        else:
-            func = request_name_or_func
-            func_args = args
-            func_name = getattr(func, "__name__", "")
-            if func_name == "_make_chat_request":
-                request_name = "chat"
-            elif func_name in {"_make_complete_request", "_make_completion_request"}:
-                request_name = "complete"
+        if func_name == "_make_chat_request":
+            request_name = "chat"
+        elif func_name in {"_make_complete_request", "_make_completion_request"}:
+            request_name = "complete"
 
         last_exception = None
 
@@ -560,7 +631,7 @@ class BaseLLMClient(ABC):
             with self._ensure_usage_lock():
                 usage_history_start = len(self._usage_history)
             try:
-                return func(*func_args, **kwargs)
+                return func(*args, **kwargs)
             except Exception as e:
                 last_exception = e
                 with self._ensure_usage_lock():
@@ -597,7 +668,7 @@ class BaseLLMClient(ABC):
                     if request_name and self._should_use_provider_fallback(e):
                         return self._execute_with_provider_fallback(
                             request_name,
-                            *func_args,
+                            *args,
                             exhausted_retries=self.max_retries,
                             final_exception=e,
                             **kwargs,
@@ -667,13 +738,10 @@ class OpenAIClient(BaseLLMClient):
     
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
         """Send a chat request (with retry logic)."""
-        return self._execute_with_retry("chat", self._make_chat_request, messages, tools=tools, **kwargs)
+        return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
     
-    def _make_complete_request(self, prompt: str, **kwargs: Any) -> str:
-        return self._make_chat_request([{"role": "user", "content": prompt}], **kwargs)
-
     def complete(self, prompt: str, **kwargs) -> str:
-        return self._execute_with_retry("complete", self._make_complete_request, prompt, **kwargs)
+        return self.chat([{"role": "user", "content": prompt}], **kwargs)
 
 
 
@@ -762,14 +830,11 @@ class DeepSeekClient(BaseLLMClient):
             - No tool_calls and separate_reasoning=True: {"reasoning": str, "content": str}
             - Otherwise: str (merged content)
         """
-        return self._execute_with_retry("chat", self._make_chat_request, messages, tools=tools, **kwargs)
+        return self._execute_with_retry(self._make_chat_request, messages, tools=tools, **kwargs)
     
-    def _make_complete_request(self, prompt: str, **kwargs: Any) -> str:
-        return self._make_chat_request([{"role": "user", "content": prompt}], **kwargs)
-
     def complete(self, prompt: str, **kwargs) -> str:
         """Send a completion request (translated into chat format)."""
-        return self._execute_with_retry("complete", self._make_complete_request, prompt, **kwargs)
+        return self.chat([{"role": "user", "content": prompt}], **kwargs)
     
 
 
@@ -777,9 +842,9 @@ class DeepSeekClient(BaseLLMClient):
 def create_llm_client(config: LLMConfig) -> BaseLLMClient:
     """Create an LLM client."""
     providers = {
-        "lab": OpenAIClient,
         "openai": OpenAIClient,
         "deepseek": DeepSeekClient,
+        "lab": OpenAIClient,
     }
     
     client_class = providers.get(config.provider)

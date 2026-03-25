@@ -6,12 +6,14 @@ Capabilities:
 3. Entry point detection: identify HTTP endpoints, CLI entries, etc.
 """
 
+import ast
 import os
 import pickle
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union
 from dataclasses import dataclass, field
+from profiler.fingerprint import stable_data_hash
 from utils.codeql_native import CodeQLAnalyzer, load_codeql_config, CallGraphEdge
 from utils.git_utils import get_git_commit
 from utils.language import get_extensions
@@ -272,7 +274,7 @@ class RepoAnalyzer:
                 for dep in list(dependencies.values())
             ]
             logger.info(f"Extracted {len(info['dependencies'])} dependencies")
-        logger.info(f"Deep analysis completed successfully")
+        logger.info("Deep analysis completed successfully")
         return info
     
     @staticmethod
@@ -352,11 +354,34 @@ class RepoAnalyzer:
         return self._detect_languages()
     
 
+    def _build_cache_key(self) -> str:
+        """Build a cache key that changes with repo path, CodeQL config, and analyzer code."""
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        payload = {
+            "schema_version": 1,
+            "repo_path": str(self.repo_path),
+            "commit_hash": self.commit_hash,
+            "languages": list(self.languages),
+            "codeql_version": getattr(self.codeql_analyzer, "version", ""),
+            "codeql_config": getattr(self.codeql_analyzer, "config", {}),
+            "source_hashes": {
+                "repo_analyzer.py": stable_data_hash(Path(__file__).read_text(encoding="utf-8")),
+                "codeql_native.py": stable_data_hash(
+                    (repo_root / "utils" / "codeql_native.py").read_text(encoding="utf-8")
+                ),
+            },
+        }
+        return stable_data_hash(payload)[:12]
+
     def _load_or_build(self, rebuild: bool = False, cache_path: Optional[Path] = None):
         """Load cache or rebuild analysis data."""
         if cache_path is None:
             language_key = "-".join(self.languages) if self.languages else "none"
-            cache_path = self.cache_dir / f"{self.repo_path.name}-{self.commit_hash[:8]}-{language_key}.pkl"
+            cache_key = self._build_cache_key()
+            cache_path = (
+                self.cache_dir
+                / f"{self.repo_path.name}-{self.commit_hash[:8]}-{language_key}-{cache_key}.pkl"
+            )
         
         # Try loading cache
         if not rebuild and cache_path.exists():
@@ -378,7 +403,7 @@ class RepoAnalyzer:
 
                 self._rebuild_function_indexes()
 
-                logger.info(f"Cache loaded successfully")
+                logger.info("Cache loaded successfully")
                 logger.info(f"  - Functions: {len(self._functions)}")
                 logger.info(f"  - Call graph edges: {len(self._call_graph_edges)}")
                 logger.info(f"  - Dependencies: {len(self._dependencies)}")
@@ -387,7 +412,7 @@ class RepoAnalyzer:
                 logger.warning(f"Failed to load cache: {e}, rebuilding...")
         
         # Build analysis data
-        logger.info(f"Building analysis data (this may take a few minutes)...")
+        logger.info("Building analysis data (this may take a few minutes)...")
         self._build_analysis()
         
         # Save cache
@@ -460,7 +485,8 @@ class RepoAnalyzer:
         db_errors: Dict[str, str] = {}
 
         for lang in self.codeql_languages:
-            db_name = f"{self.repo_path.name}-{self.commit_hash[:8]}-{lang}"
+            repo_path_hash = stable_data_hash(str(self.repo_path))[:12]
+            db_name = f"{self.repo_path.name}-{repo_path_hash}-{self.commit_hash[:8]}-{lang}"
             success, db_path_or_error = self.codeql_analyzer.create_database(
                 source_path=str(self.repo_path),
                 language=lang,
@@ -474,7 +500,7 @@ class RepoAnalyzer:
                 db_errors[lang] = db_path_or_error
                 logger.warning("    Failed to create database for %s: %s", lang, db_path_or_error)
 
-        if self.codeql_languages and not self._codeql_db_paths:
+        if db_errors and not self._codeql_db_paths:
             detail = "; ".join(f"{lang}={err}" for lang, err in sorted(db_errors.items()))
             raise RuntimeError(f"Failed to create CodeQL database(s): {detail}")
         
@@ -506,6 +532,7 @@ class RepoAnalyzer:
             self._call_graph_edges = []
             return
 
+        call_graph_errors: Dict[str, str] = {}
         for lang, db_path in self._codeql_db_paths.items():
             try:
                 logger.info("Building call graph with CodeQL for %s database: %s", lang, db_path)
@@ -526,10 +553,15 @@ class RepoAnalyzer:
                     seen_edge_keys.add(key)
                     merged_edges.append(edge)
             except Exception as e:
+                call_graph_errors[lang] = str(e)
                 logger.warning(f"Failed to build call graph via CodeQL for {lang}: {e}")
                 import traceback
 
                 logger.debug(traceback.format_exc())
+
+        if call_graph_errors:
+            detail = "; ".join(f"{lang}={err}" for lang, err in sorted(call_graph_errors.items()))
+            logger.warning("Continuing with partial call graph coverage: %s", detail)
 
         self._call_graph_edges = merged_edges
 
@@ -564,9 +596,109 @@ class RepoAnalyzer:
                 )
             else:
                 skipped_unresolved += 1
+
+        # Supplement call-graph results with direct source parsing so leaf
+        # helpers and entrypoints without incoming/outgoing edges are retained.
+        self._extract_functions_from_sources()
         
         if skipped_unresolved > 0:
             logger.debug(f"Skipped {skipped_unresolved} unresolved callee references (builtins/stdlib/third-party)")
+
+    def _extract_functions_from_sources(self):
+        """Extract source-defined functions that CodeQL edges may miss."""
+        active_languages = list(getattr(self, "languages", []) or [])
+        active_extensions: Set[str] = set()
+        for lang in active_languages:
+            try:
+                active_extensions |= get_extensions(lang)
+            except ValueError:
+                logger.debug("Skip unsupported function-discovery language: %s", lang)
+
+        if not active_extensions:
+            return
+
+        ignored_dirs = {
+            ".git",
+            "__pycache__",
+            "node_modules",
+            "build",
+            "dist",
+            ".tox",
+            "venv",
+            ".venv",
+        }
+        for root, dirs, files in os.walk(self.repo_path):
+            dirs[:] = [d for d in dirs if d not in ignored_dirs]
+            for fname in files:
+                suffix = Path(fname).suffix.lower()
+                if suffix not in active_extensions:
+                    continue
+                file_path = Path(root) / fname
+                try:
+                    content = file_path.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                rel_path = str(file_path.relative_to(self.repo_path))
+                if suffix == ".py":
+                    self._extract_python_functions(rel_path, content)
+                else:
+                    self._extract_regex_functions(rel_path, content, suffix)
+
+    def _extract_python_functions(self, file_path: str, content: str):
+        """Extract Python function definitions from source text."""
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return
+        except Exception:
+            return
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self._register_function(node.name, file_path, node.lineno)
+
+    def _extract_regex_functions(self, file_path: str, content: str, suffix: str):
+        """Extract functions for non-Python languages using lightweight patterns."""
+        patterns = []
+        if suffix == ".go":
+            patterns = [
+                re.compile(r"^\s*func\s+(?:\([^)]+\)\s*)?([A-Za-z_]\w*)\s*\("),
+            ]
+        elif suffix in JS_TS_EXTS:
+            patterns = [
+                re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_]\w*)\s*\("),
+                re.compile(r"^\s*(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_]\w*)\s*=>"),
+            ]
+        elif suffix == ".java":
+            patterns = [
+                re.compile(
+                    r"^\s*(?:public|private|protected|static|final|synchronized|abstract|native|strictfp|\s)+"
+                    r"[\w<>\[\], ?]+\s+([A-Za-z_]\w*)\s*\([^;]*\)\s*(?:throws\s+[^{]+)?\s*\{"
+                ),
+            ]
+        elif suffix == ".rb":
+            patterns = [
+                re.compile(r"^\s*def\s+([A-Za-z_]\w*[!?=]?)\b"),
+            ]
+        elif suffix in C_FAMILY_EXTS:
+            patterns = [
+                re.compile(
+                    r"^\s*(?:[A-Za-z_][\w:<>\*\s&~]*\s+)+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*"
+                    r"(?:const\s*)?(?:noexcept\s*)?(?:->\s*[^\{]+)?\s*\{"
+                ),
+            ]
+        else:
+            return
+
+        for line_num, line in enumerate(content.splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("//") or stripped.startswith("#"):
+                continue
+            for pattern in patterns:
+                match = pattern.match(line)
+                if match:
+                    self._register_function(match.group(1), file_path, line_num)
+                    break
     
     def _analyze_dependencies(self):
         """Analyze third-party library dependencies."""

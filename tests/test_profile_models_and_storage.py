@@ -4,6 +4,8 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from profiler.profile_storage import ProfileStorageManager
 from profiler.software.models import DataFlowPattern, ModuleInfo, SoftwareProfile
 from profiler.vulnerability.models import (
@@ -274,13 +276,31 @@ def test_profile_storage_manager_does_not_log_success_when_atomic_replace_fails(
     manager.save_checkpoint("flow", {"k": 1}, "repo", "ver")
     checkpoint_dir = tmp_path / "repo" / "ver" / "checkpoints"
 
-    with patch("pathlib.Path.replace", side_effect=OSError("disk full")), patch(
-        "profiler.profile_storage.logger.info"
-    ) as info_log, patch("profiler.profile_storage.logger.warning") as warning_log:
+    with patch("pathlib.Path.replace", side_effect=OSError("disk full")), pytest.raises(
+        RuntimeError,
+        match="Failed to write JSON file",
+    ), patch("profiler.profile_storage.logger.info") as info_log, patch(
+        "profiler.profile_storage.logger.error"
+    ) as error_log:
         manager.save_checkpoint("flow", {"k": 2}, "repo", "ver")
 
     assert manager.load_checkpoint("flow", "repo", "ver") == {"k": 1}
     info_log.assert_not_called()
-    warning_log.assert_called_once()
-    assert "Failed to write JSON file" in warning_log.call_args[0][0]
+    error_log.assert_called_once()
+    assert "Failed to write JSON file" in error_log.call_args[0][0]
     assert not list(checkpoint_dir.glob(".*.tmp"))
+
+
+def test_profile_storage_manager_final_result_write_failure_raises(tmp_path):
+    manager = ProfileStorageManager(base_dir=tmp_path, profile_type="test")
+    manager.save_final_result("software_profile.json", "{}", "repo", "ver")
+    result_dir = tmp_path / "repo" / "ver"
+
+    with patch("pathlib.Path.replace", side_effect=OSError("disk full")), pytest.raises(
+        RuntimeError,
+        match="Failed to write text file",
+    ):
+        manager.save_final_result("software_profile.json", "{}", "repo", "ver")
+
+    assert manager.load_final_result("software_profile.json", "repo", "ver") == "{}"
+    assert not list(result_dir.glob(".*.tmp"))

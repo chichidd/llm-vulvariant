@@ -19,12 +19,28 @@ MAX_ITERATIONS_CAP="${MAX_ITERATIONS_CAP:-20}"
 SIMILARITY_THRESHOLD="${SIMILARITY_THRESHOLD:-0.7}"
 FALLBACK_TOP_N="${FALLBACK_TOP_N:-3}"
 MAX_TARGETS="${MAX_TARGETS:-$FALLBACK_TOP_N}"
-CRITICAL_STOP_MODE="${CRITICAL_STOP_MODE:-min}"
+CRITICAL_STOP_MODE="${CRITICAL_STOP_MODE:-max}"
 SOFTWARE_PROFILE_TIMEOUT="${SOFTWARE_PROFILE_TIMEOUT:-1800}"
 EXPLOITABILITY_TIMEOUT="${EXPLOITABILITY_TIMEOUT:-1800}"
+SCAN_JOBS="${SCAN_JOBS:-1}"
+EXPLOITABILITY_JOBS="${EXPLOITABILITY_JOBS:-1}"
+EXPLOITABILITY_RUNTIME_MODE="${EXPLOITABILITY_RUNTIME_MODE:-run}"
 LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
 LLM_NAME="${LLM_NAME:-}"
-RUN_ID="${RUN_ID:-nvidia-full-$(date +%Y%m%d-%H%M%S)}"
+RUN_ID="${RUN_ID:-nvidia-full-$(date +%Y%m%d-%H%M%S)-$$}"
+PYTHON_BIN="${PYTHON_BIN:-}"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+  else
+    echo "ERROR: neither python nor python3 is available in PATH" >&2
+    exit 1
+  fi
+fi
+read -r -a PYTHON_CMD <<<"$PYTHON_BIN"
 
 LOG_DIR="$ROOT"
 PROFILE_LOG="$LOG_DIR/output-nvidia-profile-$RUN_ID.log"
@@ -38,27 +54,80 @@ cleanup_codeql_temp_artifacts() {
   local repo_dir="$1"
   [[ -d "$repo_dir" ]] || return 0
 
-  local cleaned=0
-  if [[ -L "$repo_dir/_codeql_detected_source_root" || -e "$repo_dir/_codeql_detected_source_root" ]]; then
-    rm -f "$repo_dir/_codeql_detected_source_root"
-    cleaned=1
-  fi
-  if [[ -d "$repo_dir/_codeql_build_dir" ]]; then
-    rm -rf "$repo_dir/_codeql_build_dir"
-    cleaned=1
-  fi
-  if [[ "$cleaned" -eq 1 ]]; then
-    echo "[$(date -Iseconds)] cleaned CodeQL temp artifacts: $repo_dir" | tee -a "$STATUS_LOG"
-  fi
+  "${PYTHON_CMD[@]}" - "$APP_DIR" "$repo_dir" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+
+app_dir = Path(sys.argv[1]).resolve()
+repo_dir = Path(sys.argv[2]).resolve()
+
+sys.path.insert(0, str(app_dir / "src"))
+
+from config import _path_config
+from utils import repo_lock as repo_lock_module
+
+_path_config["repo_root"] = app_dir
+
+cleaned = False
+with repo_lock_module.hold_repo_lock(repo_dir, purpose="cleanup_codeql_temp_artifacts"):
+    detected_source_root = repo_dir / "_codeql_detected_source_root"
+    if detected_source_root.exists() or detected_source_root.is_symlink():
+        detected_source_root.unlink()
+        cleaned = True
+
+    build_dir = repo_dir / "_codeql_build_dir"
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+        cleaned = True
+
+if cleaned:
+    print(repo_dir)
+PY
+}
+
+resolve_locked_head_commit() {
+  local repo_dir="$1"
+  "${PYTHON_CMD[@]}" - <<'PY' "$APP_DIR" "$repo_dir"
+from pathlib import Path
+import sys
+
+app_dir = Path(sys.argv[1]).resolve()
+repo_dir = Path(sys.argv[2]).resolve()
+
+sys.path.insert(0, str(app_dir / "src"))
+
+from config import _path_config
+from utils import git_utils as git_utils_module
+from utils import repo_lock as repo_lock_module
+
+_path_config["repo_root"] = app_dir
+git_utils_module.logger.disabled = True
+repo_lock_module.logger.disabled = True
+
+with repo_lock_module.hold_repo_lock(repo_dir, purpose="script_resolve_head_commit"):
+    commit = git_utils_module.get_git_commit(str(repo_dir))
+
+if not commit:
+    raise SystemExit(f"Failed to resolve git HEAD for {repo_dir}")
+
+print(commit)
+PY
 }
 
 echo "[$(date -Iseconds)] RUN_ID=$RUN_ID" | tee -a "$STATUS_LOG"
 echo "[$(date -Iseconds)] PROFILE_LOG=$PROFILE_LOG" | tee -a "$STATUS_LOG"
 echo "[$(date -Iseconds)] SCAN_LOG=$SCAN_LOG" | tee -a "$STATUS_LOG"
 echo "[$(date -Iseconds)] EXP_LOG=$EXP_LOG" | tee -a "$STATUS_LOG"
+echo "[$(date -Iseconds)] SCAN_JOBS=$SCAN_JOBS EXPLOITABILITY_JOBS=$EXPLOITABILITY_JOBS" | tee -a "$STATUS_LOG"
+
+if (( EXPLOITABILITY_JOBS > 1 )) && [[ "$EXPLOITABILITY_RUNTIME_MODE" != "folder" ]]; then
+  echo "[$(date -Iseconds)] EXPLOITABILITY_RUNTIME_MODE=$EXPLOITABILITY_RUNTIME_MODE is incompatible with EXPLOITABILITY_JOBS=$EXPLOITABILITY_JOBS; forcing folder mode" | tee -a "$STATUS_LOG"
+  EXPLOITABILITY_RUNTIME_MODE="folder"
+fi
 
 echo "[$(date -Iseconds)] Stage 1/5: verify existing vuln profiles" | tee -a "$STATUS_LOG"
-python - <<'PY' "$VULN_JSON" "$VULN_PROFILES_DIR" | tee -a "$STATUS_LOG"
+"${PYTHON_CMD[@]}" - <<'PY' "$VULN_JSON" "$VULN_PROFILES_DIR" | tee -a "$STATUS_LOG"
 import json
 import sys
 from pathlib import Path
@@ -82,8 +151,10 @@ for i, repo, cve, p in missing:
 PY
 
 echo "[$(date -Iseconds)] Stage 2/5: link source software profiles for vuln entries into soft-nvidia" | tee -a "$STATUS_LOG"
-python - <<'PY' "$VULN_JSON" "$SOURCE_REPO_PROFILES" "$REPO_PROFILES_NVIDIA" | tee -a "$STATUS_LOG"
+"${PYTHON_CMD[@]}" - <<'PY' "$VULN_JSON" "$SOURCE_REPO_PROFILES" "$REPO_PROFILES_NVIDIA" | tee -a "$STATUS_LOG"
+import fcntl
 import json
+import tempfile
 import shutil
 import sys
 from pathlib import Path
@@ -103,18 +174,40 @@ for repo, commit in need:
     src_dir = src_root / repo / commit
     dst_dir = dst_root / repo / commit
     dst_dir.parent.mkdir(parents=True, exist_ok=True)
-    if dst_dir.exists() or dst_dir.is_symlink():
-        skipped += 1
-        continue
-    if not src_dir.exists():
-        missing_src += 1
-        continue
-    try:
-        dst_dir.symlink_to(src_dir)
-        linked += 1
-    except Exception:
-        shutil.copytree(src_dir, dst_dir)
-        copied += 1
+    lock_path = dst_dir.parent / f".{commit}.publish.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if dst_dir.exists() or dst_dir.is_symlink():
+            skipped += 1
+            continue
+        if not src_dir.exists():
+            missing_src += 1
+            continue
+
+        temp_path = None
+        try:
+            temp_path = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{commit}.publish-",
+                    dir=str(dst_dir.parent),
+                )
+            )
+            shutil.rmtree(temp_path)
+            try:
+                temp_path.symlink_to(src_dir)
+                temp_path.replace(dst_dir)
+                linked += 1
+            except Exception:
+                temp_path.unlink(missing_ok=True)
+                shutil.copytree(src_dir, temp_path)
+                temp_path.replace(dst_dir)
+                copied += 1
+        finally:
+            if temp_path is not None:
+                if temp_path.is_symlink():
+                    temp_path.unlink(missing_ok=True)
+                elif temp_path.exists():
+                    shutil.rmtree(temp_path, ignore_errors=True)
 
 print(f"source_profiles_needed={len(need)}")
 print(f"source_profiles_linked={linked}")
@@ -138,8 +231,19 @@ for d in "$REPOS_NVIDIA"/*; do
   [[ -d "$d" ]] || continue
   idx=$((idx+1))
   repo="$(basename "$d")"
-  commit="$(git -C "$d" rev-parse HEAD)"
-  cleanup_codeql_temp_artifacts "$d"
+  if ! commit="$(resolve_locked_head_commit "$d")"; then
+    fail=$((fail+1))
+    echo "[$(date -Iseconds)] [profile $idx/$total] fail resolve_head $repo" | tee -a "$STATUS_LOG"
+    continue
+  fi
+  if ! cleanup_output="$(cleanup_codeql_temp_artifacts "$d")"; then
+    fail=$((fail+1))
+    echo "[$(date -Iseconds)] [profile $idx/$total] fail cleanup $repo@$commit" | tee -a "$STATUS_LOG"
+    continue
+  fi
+  if [[ -n "$cleanup_output" ]]; then
+    echo "[$(date -Iseconds)] cleaned CodeQL temp artifacts: $cleanup_output" | tee -a "$STATUS_LOG"
+  fi
   profile="$REPO_PROFILES_NVIDIA/$repo/$commit/software_profile.json"
 
   if [[ -f "$profile" ]]; then
@@ -150,7 +254,7 @@ for d in "$REPOS_NVIDIA"/*; do
 
   echo "[$(date -Iseconds)] [profile $idx/$total] build $repo@$commit" | tee -a "$STATUS_LOG"
   profile_cmd=(
-    python -m cli.software
+    "${PYTHON_CMD[@]}" -m cli.software
     --repo-name "$repo"
     --repo-base-path "$REPOS_NVIDIA"
     --target-version "$commit"
@@ -172,7 +276,7 @@ echo "[$(date -Iseconds)] Stage 3 summary: total=$total ok=$ok skip=$skip fail=$
 
 echo "[$(date -Iseconds)] Stage 4/5: run batch scanner" | tee -a "$STATUS_LOG"
 scan_cmd=(
-  python -m cli.batch_scanner
+  "${PYTHON_CMD[@]}" -m cli.batch_scanner
   --vuln-json "$VULN_JSON"
   --source-repos-root "$SOURCE_REPOS_ROOT"
   --source-soft-profiles-dir "$SOURCE_REPO_PROFILES"
@@ -183,6 +287,7 @@ scan_cmd=(
   --similarity-threshold "$SIMILARITY_THRESHOLD"
   --fallback-top-n "$FALLBACK_TOP_N"
   --max-targets "$MAX_TARGETS"
+  --jobs "$SCAN_JOBS"
   --max-iterations-cap "$MAX_ITERATIONS_CAP"
   --critical-stop-mode "$CRITICAL_STOP_MODE"
   --llm-provider "$LLM_PROVIDER"
@@ -194,7 +299,7 @@ fi
 echo "[$(date -Iseconds)] Stage 4 completed" | tee -a "$STATUS_LOG"
 
 echo "[$(date -Iseconds)] Stage 5/5: run exploitability and generate reports" | tee -a "$STATUS_LOG"
-python -m cli.exploitability \
+"${PYTHON_CMD[@]}" -m cli.exploitability \
   --scan-results-dir "$SCAN_OUTPUT_DIR" \
   --soft-profile-dir "$REPO_PROFILES_NVIDIA" \
   --repo-base-path "$REPOS_NVIDIA" \
@@ -203,8 +308,9 @@ python -m cli.exploitability \
   --submission-output-dir "$EXP_OUTPUT_DIR" \
   --submission-prefix exploitable_findings \
   --claude-runtime-root "$RUNTIME_ROOT" \
-  --claude-runtime-mode run \
+  --claude-runtime-mode "$EXPLOITABILITY_RUNTIME_MODE" \
   --run-id "$RUN_ID" \
+  --jobs "$EXPLOITABILITY_JOBS" \
   --timeout "$EXPLOITABILITY_TIMEOUT" \
   >> "$EXP_LOG" 2>&1
 echo "[$(date -Iseconds)] Stage 5 completed" | tee -a "$STATUS_LOG"

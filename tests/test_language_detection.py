@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from utils.language import detect_language, detect_languages
 
 

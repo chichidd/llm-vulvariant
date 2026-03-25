@@ -8,11 +8,25 @@ from llm import (
     aggregate_llm_usage_since,
     capture_llm_usage_snapshot,
 )
+from llm.tool_arguments import normalize_tool_arguments
 from utils.claude_cli import coerce_aggregated_usage_summary, merge_aggregated_usage_summaries
 from utils.logger import get_logger
 from utils.number_utils import to_int
 
 logger = get_logger(__name__)
+
+
+def _parse_tool_arguments(
+    raw_arguments: Any,
+    parameter_schema: Optional[Dict[str, Any]] = None,
+    provider: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Normalize one tool-call payload into a JSON object."""
+    return normalize_tool_arguments(
+        raw_arguments,
+        parameters_schema=parameter_schema,
+        provider=provider,
+    )
 
 
 def run_agent_analysis(
@@ -65,12 +79,32 @@ def run_agent_analysis(
             file_identifier=conversation_name,
         )
         if saved_conv and saved_conv.get('conversation_name') == conversation_name:
-            logger.info(f"Resuming from saved conversation: {conversation_name}")
-            messages = saved_conv.get('messages', [])
-            start_iteration = saved_conv.get('llm_calls', 0)
-            if saved_conv.get("llm_usage"):
-                prior_usage_summary = coerce_aggregated_usage_summary(saved_conv.get("llm_usage"))
-            logger.info(f"Resuming from iteration {start_iteration}/{max_iterations}")
+            saved_status = saved_conv.get("status")
+            if saved_status == "completed":
+                saved_result = saved_conv.get("result")
+                saved_modules = saved_result.get("modules") if isinstance(saved_result, dict) else None
+                if isinstance(saved_modules, list) and saved_modules:
+                    logger.info(f"Reusing completed conversation result: {conversation_name}")
+                    messages = saved_conv.get("messages", [])
+                    llm_calls = max(0, to_int(saved_conv.get("llm_calls", 0)))
+                    return True, saved_result, llm_calls, messages
+                logger.info(
+                    "Skipping resume from completed %s conversation without reusable modules",
+                    conversation_name,
+                )
+            elif saved_status == "failed":
+                logger.info(
+                    "Skipping resume from %s conversation with terminal status: %s",
+                    conversation_name,
+                    saved_status,
+                )
+            else:
+                logger.info(f"Resuming from saved conversation: {conversation_name}")
+                messages = saved_conv.get('messages', [])
+                start_iteration = saved_conv.get('llm_calls', 0)
+                if saved_conv.get("llm_usage"):
+                    prior_usage_summary = coerce_aggregated_usage_summary(saved_conv.get("llm_usage"))
+                logger.info(f"Resuming from iteration {start_iteration}/{max_iterations}")
     
     # If no checkpoint is available, initialize a new conversation
     if messages is None:
@@ -80,6 +114,12 @@ def run_agent_analysis(
         ]
 
     usage_snapshot = capture_llm_usage_snapshot(llm_client)
+    tool_parameter_schemas = {
+        tool_definition.get("function", {}).get("name"): tool_definition.get("function", {}).get("parameters")
+        for tool_definition in tools
+        if isinstance(tool_definition, dict) and isinstance(tool_definition.get("function"), dict)
+    }
+    llm_provider = getattr(getattr(llm_client, "config", None), "provider", None)
 
     def _build_conversation_usage_summary(total_llm_calls: int) -> Dict[str, Any]:
         current_summary = coerce_aggregated_usage_summary(
@@ -170,11 +210,24 @@ def run_agent_analysis(
         has_finalize = False
         for tool in tool_calls:
             tool_name = tool.function.name
-            try:
-                parameters = json.loads(tool.function.arguments)
-            except json.JSONDecodeError:
-                parameters = {}
-                logger.error("Failed to parse tool arguments")
+            parameters, argument_error = _parse_tool_arguments(
+                tool.function.arguments,
+                parameter_schema=tool_parameter_schemas.get(tool_name),
+                provider=llm_provider,
+            )
+            if argument_error:
+                logger.error(argument_error)
+                tool_result_content = f"Error: {argument_error}"
+                if len(tool_result_content) > 10000:
+                    tool_result_content = tool_result_content[:10000] + "\n... [truncated]"
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool.id,
+                        "content": tool_result_content,
+                    }
+                )
+                continue
             
             logger.debug(f"  [TOOL] {tool_name}: {json.dumps(parameters, ensure_ascii=False)[:500]}...")
             

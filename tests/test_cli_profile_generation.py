@@ -98,9 +98,15 @@ def test_run_vulnerability_profile_generation_passes_expected_arguments(monkeypa
             captured["vuln_entry"] = vuln_entry
             captured["output_dir"] = output_dir
 
-        def generate_vulnerability_profile(self, repo_path, save_results=True):
+        def generate_vulnerability_profile(
+            self,
+            repo_path,
+            save_results=True,
+            force_regenerate=False,
+        ):
             captured["repo_path"] = repo_path
             captured["save_results"] = save_results
+            captured["force_regenerate"] = force_regenerate
             return "vulnerability-profile"
 
     monkeypatch.setattr(profile_generation, "VulnerabilityProfiler", StubProfiler)
@@ -111,6 +117,7 @@ def test_run_vulnerability_profile_generation_passes_expected_arguments(monkeypa
         llm_client="llm",
         repo_profile=repo_profile,
         vuln_entry=vuln_entry,
+        force_regenerate=True,
     )
 
     assert result == "vulnerability-profile"
@@ -120,3 +127,4 @@ def test_run_vulnerability_profile_generation_passes_expected_arguments(monkeypa
     assert captured["output_dir"] == str(tmp_path / "profiles")
     assert captured["repo_path"] == str(Path(tmp_path / "repo"))
     assert captured["save_results"] is True
+    assert captured["force_regenerate"] is True

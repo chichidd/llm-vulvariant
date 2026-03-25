@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,16 +36,23 @@ class SkillModuleAnalyzer:
         excluded_folders: Optional[List[str]] = None,
         code_extensions: Optional[List[str]] = None,
         max_key_functions: int = 12,
+        validation_mode: bool = False,
+        validation_temperature: float = 0.0,
+        validation_max_workers: int = 1,
     ):
         self.llm_client = llm_client
         self.excluded_folders = excluded_folders or []
         self.code_extensions = set(ext.lower() for ext in (code_extensions or []))
         self.max_key_functions = max_key_functions
+        self.validation_mode = bool(validation_mode)
+        self.validation_temperature = float(validation_temperature)
+        self.validation_max_workers = max(1, int(validation_max_workers))
 
         self.skill_root = self._resolve_skill_root()
         self.taxonomy = self._load_taxonomy()
         self._last_llm_usage: Dict[str, Any] = {}
         self._last_claude_cli_record_path: Optional[str] = None
+        self._last_module_analysis_mode = "claude_cli"
 
     @staticmethod
     def _count_claude_attempts(response: Any) -> int:
@@ -75,18 +85,26 @@ class SkillModuleAnalyzer:
         repo_path = Path(repo_path).resolve()
         if not self.taxonomy:
             logger.warning("Taxonomy not available; returning empty module list.")
-            return {"modules": [], "llm_calls": 0}
+            return {"modules": [], "llm_calls": 0, "analysis_completed": False}
 
         output_dir = self._resolve_output_dir(storage_manager, repo_name, version)
         if force_regenerate:
             self._reset_output_dir(output_dir)
-        success, llm_usage, record_path = self._run_claude_analysis(repo_path, output_dir, repo_name)
+        success, llm_usage, record_path, analysis_mode = self._run_module_analysis(
+            repo_info,
+            repo_path,
+            output_dir,
+            repo_name,
+        )
         if not success:
             return {
                 "modules": [],
                 "llm_calls": self._infer_llm_call_count(llm_usage),
                 "llm_usage": llm_usage,
                 "claude_cli_record_path": str(record_path) if record_path else None,
+                "module_analysis_record_path": str(record_path) if record_path else None,
+                "module_analysis_mode": analysis_mode,
+                "analysis_completed": False,
             }
 
         module_map = self._load_json(output_dir / "module_map.json") or {}
@@ -106,9 +124,12 @@ class SkillModuleAnalyzer:
             "llm_calls": self._infer_llm_call_count(llm_usage),
             "llm_usage": llm_usage,
             "claude_cli_record_path": str(record_path) if record_path else None,
+            "module_analysis_record_path": str(record_path) if record_path else None,
+            "module_analysis_mode": analysis_mode,
             "taxonomy": "ai_infra_taxonomy_v1",
             "module_map": module_map,
             "file_index": filtered_index,
+            "analysis_completed": True,
         }
 
         if storage_manager and repo_name:
@@ -129,6 +150,13 @@ class SkillModuleAnalyzer:
     def _load_taxonomy(self) -> Dict[str, Any]:
         return load_ai_infra_taxonomy(self.skill_root)
 
+    def _resolve_scan_script_path(self) -> Optional[Path]:
+        """Locate the standalone module-analysis script used by validation mode."""
+        if not self.skill_root:
+            return None
+        script_path = self.skill_root / "scripts" / "scan_repo.py"
+        return script_path if script_path.exists() else None
+
     def _resolve_output_dir(
         self,
         storage_manager: Any,
@@ -143,6 +171,166 @@ class SkillModuleAnalyzer:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 return out_dir
         return Path(tempfile.mkdtemp(prefix="skill_module_modeler_"))
+
+    def _run_module_analysis(
+        self,
+        repo_info: Dict[str, Any],
+        repo_path: Path,
+        output_dir: Path,
+        repo_name: Optional[str],
+    ) -> Tuple[bool, Dict[str, Any], Path, str]:
+        """Run module analysis with the configured execution mode."""
+        if self.validation_mode:
+            success, llm_usage, record_path = self._run_validation_script_analysis(
+                repo_info,
+                repo_path,
+                output_dir,
+                repo_name,
+            )
+            self._last_module_analysis_mode = "validation_script"
+            return success, llm_usage, record_path, "validation_script"
+
+        success, llm_usage, record_path = self._run_claude_analysis(
+            repo_path,
+            output_dir,
+            repo_name,
+        )
+        self._last_module_analysis_mode = "claude_cli"
+        return success, llm_usage, record_path, "claude_cli"
+
+    def _write_module_analysis_record(self, record_path: Path, payload: Dict[str, Any]) -> None:
+        """Persist a small invocation record for reproducibility and debugging."""
+        try:
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to persist module-analysis record %s: %s", record_path, exc)
+
+    def _run_validation_script_analysis(
+        self,
+        repo_info: Dict[str, Any],
+        repo_path: Path,
+        output_dir: Path,
+        repo_name: Optional[str],
+    ) -> Tuple[bool, Dict[str, Any], Path]:
+        """Run the standalone scan script with pinned settings for validation runs."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        record_path = output_dir / "module_analysis_invocation.json"
+        script_path = self._resolve_scan_script_path()
+        llm_config = getattr(getattr(self, "llm_client", None), "config", None)
+        provider = str(getattr(llm_config, "provider", "") or "").strip()
+        model = str(getattr(llm_config, "model", "") or "").strip()
+
+        if not script_path:
+            self._write_module_analysis_record(
+                record_path,
+                {
+                    "analysis_mode": "validation_script",
+                    "started_at": datetime.now(UTC).isoformat(),
+                    "finished_at": datetime.now(UTC).isoformat(),
+                    "command": [],
+                    "cwd": str(_path_config["repo_root"]),
+                    "returncode": None,
+                    "stdout": "",
+                    "stderr": "scan_repo.py not found",
+                },
+            )
+            logger.warning("Validation module analyzer script not found")
+            return False, {}, record_path
+
+        command = [
+            sys.executable,
+            str(script_path),
+            "--repo",
+            str(repo_path),
+            "--out",
+            str(output_dir),
+            "--analysis-mode",
+            "validation_script",
+            "--llm-temperature",
+            str(self.validation_temperature),
+            "--max-workers",
+            str(self.validation_max_workers),
+            "--require-llm",
+        ]
+        validation_file_list_path = output_dir / "validation_file_list.json"
+        validation_file_list = self._build_validation_file_list(repo_info)
+        validation_file_list_path.write_text(
+            json.dumps(validation_file_list, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        command.extend(["--file-list", str(validation_file_list_path)])
+        if self.excluded_folders:
+            command.extend(["--exclude", *self.excluded_folders])
+        if provider:
+            command.extend(["--llm-provider", provider])
+        if model:
+            command.extend(["--llm-model", model])
+
+        started_at = datetime.now(UTC).isoformat()
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=str(_path_config["repo_root"]),
+        )
+        finished_at = datetime.now(UTC).isoformat()
+
+        signals_path = output_dir / "signals.json"
+        module_map_path = output_dir / "module_map.json"
+        file_index_path = output_dir / "file_index.json"
+        module_profile_path = output_dir / "module_profile.json"
+        signals_payload = self._load_json(signals_path) or {}
+        llm_usage = signals_payload.get("llm_usage_summary", {}) if isinstance(signals_payload, dict) else {}
+        llm_usage = dict(llm_usage) if isinstance(llm_usage, dict) else {}
+        if not llm_usage.get("source"):
+            llm_usage["source"] = "llm_client"
+        if provider and not llm_usage.get("provider"):
+            llm_usage["provider"] = provider
+        if model and not llm_usage.get("requested_model"):
+            llm_usage["requested_model"] = model
+
+        self._write_module_analysis_record(
+            record_path,
+            {
+                "analysis_mode": "validation_script",
+                "repo_name": repo_name,
+                "repo_path": str(repo_path),
+                "output_dir": str(output_dir),
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "command": command,
+                "cwd": str(_path_config["repo_root"]),
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "signals_path": str(signals_path),
+                "module_map_path": str(module_map_path),
+                "file_index_path": str(file_index_path),
+                "module_profile_path": str(module_profile_path),
+            },
+        )
+
+        required_outputs = [signals_path, module_map_path, file_index_path, module_profile_path]
+        outputs_ready = all(path.exists() for path in required_outputs)
+        self._last_llm_usage = llm_usage
+        self._last_claude_cli_record_path = str(record_path)
+
+        if result.returncode == 0 and outputs_ready:
+            logger.info("Validation module analysis completed: %s", result.stdout[:500])
+            return True, llm_usage, record_path
+
+        if result.returncode == 0 and not outputs_ready:
+            logger.warning("Validation module analysis finished but required outputs are missing")
+        elif result.stderr:
+            logger.warning("Validation module analysis failed: %s", result.stderr[:500])
+        else:
+            logger.warning("Validation module analysis failed without stderr output")
+        return False, llm_usage, record_path
 
     def _run_claude_analysis(
         self,
@@ -181,8 +369,14 @@ class SkillModuleAnalyzer:
         llm_usage["calls_total"] = llm_usage["sessions_total"]
         self._last_llm_usage = llm_usage
         self._last_claude_cli_record_path = str(record_path)
+        required_outputs = [
+            output_dir / "module_map.json",
+            output_dir / "file_index.json",
+            output_dir / "module_profile.json",
+        ]
+        outputs_ready = all(path.exists() for path in required_outputs)
 
-        if response.returncode == 0:
+        if response.returncode == 0 and outputs_ready:
             result_text = ""
             if response.parsed_output:
                 result_text = str(response.parsed_output.get("result", "")).strip()
@@ -194,6 +388,9 @@ class SkillModuleAnalyzer:
                 )
             logger.info(f"Claude analysis completed: {result_text[:500]}")
             return True, llm_usage, record_path
+        if response.returncode == 0 and not outputs_ready:
+            logger.warning("Claude analysis finished but required outputs are missing")
+            return False, llm_usage, record_path
 
         if response.error_type == "FileNotFoundError":
             logger.error("Claude CLI not found. Please install it first.")
@@ -247,7 +444,7 @@ class SkillModuleAnalyzer:
 
         code_files = [
             f for f in repo_info.get("files", [])
-            if not self._is_excluded_path(f)
+            if self._is_included_code_path(f)
         ]
 
         module_scores = self._module_scores(module_map)
@@ -319,7 +516,7 @@ class SkillModuleAnalyzer:
     ) -> List[Dict[str, Any]]:
         code_files = [
             f for f in repo_info.get("files", [])
-            if not self._is_excluded_path(f)
+            if self._is_included_code_path(f)
         ]
         files_by_module: Dict[str, List[str]] = {}
         for rel_path in code_files:
@@ -331,7 +528,11 @@ class SkillModuleAnalyzer:
         for module in modules:
             name = module.get("name", "")
             category, _ = self._split_module_name(name)
-            files = module.get("files") or files_by_module.get(name, [])
+            files = [
+                file_path
+                for file_path in (module.get("files") or files_by_module.get(name, []))
+                if self._is_included_code_path(file_path)
+            ]
             normalized.append({
                 "name": name,
                 "category": module.get("category") or category,
@@ -418,6 +619,24 @@ class SkillModuleAnalyzer:
             if self._matches_excluded(part):
                 return True
         return False
+
+    def _is_included_code_path(self, rel_path: str) -> bool:
+        """Apply configured folder and extension filters to a relative path."""
+        normalized_path = str(rel_path or "").replace("\\", "/").strip()
+        if not normalized_path or self._is_excluded_path(normalized_path):
+            return False
+        if not self.code_extensions:
+            return True
+        return Path(normalized_path).suffix.lower() in self.code_extensions
+
+    def _build_validation_file_list(self, repo_info: Dict[str, Any]) -> List[str]:
+        """Build the exact validation scan scope from the configured filters."""
+        validation_files = [
+            str(file_path).replace("\\", "/")
+            for file_path in repo_info.get("files", [])
+            if self._is_included_code_path(str(file_path))
+        ]
+        return sorted(set(validation_files))
 
     def _matches_excluded(self, name: str) -> bool:
         for pattern in self.excluded_folders:

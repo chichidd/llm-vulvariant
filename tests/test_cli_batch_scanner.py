@@ -1,17 +1,39 @@
 import json
 import sys
+import threading
 from argparse import Namespace
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
 from profiler.software.models import ModuleInfo, SoftwareProfile
+from scanner.similarity.embedding import DEFAULT_EMBEDDING_MODEL_NAME
 from scanner.similarity.retriever import ProfileRef, ProfileSimilarityMetrics, SimilarProfileCandidate
 
+import cli.batch_scanner_cache as batch_scanner_cache
+import cli.batch_scanner_execution as batch_scanner_execution
 import cli.batch_scanner as batch_scanner
 
 
 def _mk_profile(name: str):
     return SoftwareProfile(name=name, modules=[ModuleInfo(name="m")])
+
+
+def test_batch_scanner_reexports_cache_helpers_from_split_module():
+    assert (
+        batch_scanner._load_cached_software_profile_if_compatible
+        is batch_scanner_cache._load_cached_software_profile_if_compatible
+    )
+    assert (
+        batch_scanner._cached_vulnerability_profile_matches_current_inputs
+        is batch_scanner_cache._cached_vulnerability_profile_matches_current_inputs
+    )
+
+
+def test_batch_scanner_reexports_execution_helpers_from_split_module():
+    assert batch_scanner._run_target_scan is batch_scanner_execution._run_target_scan
+    assert batch_scanner._run_selected_target_scans is batch_scanner_execution._run_selected_target_scans
 
 
 def test_normalize_cve_id_fallback():
@@ -44,6 +66,34 @@ def test_parse_args_accepts_explicit_source_and_target_flags(monkeypatch):
     assert args.target_soft_profiles_dir == "soft-target"
 
 
+def test_parse_args_defaults_critical_stop_mode_to_max(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["batch-scanner"])
+
+    args = batch_scanner.parse_args()
+
+    assert args.critical_stop_mode == "max"
+
+
+def test_parse_args_defaults_similarity_model_to_embedding_default(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["batch-scanner"])
+
+    args = batch_scanner.parse_args()
+
+    assert args.similarity_model_name == DEFAULT_EMBEDDING_MODEL_NAME
+
+
+def test_parse_args_help_describes_skip_existing_scan_validation(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["batch-scanner", "--help"])
+
+    with pytest.raises(SystemExit):
+        batch_scanner.parse_args()
+
+    captured = capsys.readouterr()
+    assert "--skip-existing-scans" in captured.out
+    assert "complete coverage" in captured.out
+    assert "matching fingerprint" in captured.out
+
+
 def test_parse_args_rejects_legacy_shared_target_flags(monkeypatch):
     monkeypatch.setattr(
         sys,
@@ -67,7 +117,24 @@ def test_validate_args_rejects_negative_limit():
         max_targets=5,
         fallback_top_n=3,
         max_iterations_cap=10,
+        jobs=1,
         limit=-1,
+        source_soft_profiles_dir="soft",
+        target_soft_profiles_dir="soft-target",
+        vuln_profiles_dir="vuln",
+    )
+
+    assert batch_scanner._validate_args(args) is False
+
+
+def test_validate_args_rejects_non_positive_jobs():
+    args = Namespace(
+        similarity_threshold=0.7,
+        max_targets=5,
+        fallback_top_n=3,
+        max_iterations_cap=10,
+        jobs=0,
+        limit=None,
         source_soft_profiles_dir="soft",
         target_soft_profiles_dir="soft-target",
         vuln_profiles_dir="vuln",
@@ -297,11 +364,701 @@ def test_run_target_scan_passes_profile_base_path_and_dirname(monkeypatch, tmp_p
     assert captured["cve_id"] == "CVE-2026-0001"
 
 
+def test_ensure_software_profile_delegates_cache_validation_to_generator(monkeypatch, tmp_path):
+    repo_root = tmp_path / "repos"
+    repo_dir = repo_root / "demo"
+    repo_dir.mkdir(parents=True)
+    profiles_dir = tmp_path / "profiles"
+    generated = []
+    loaded_profile = _mk_profile("demo")
+
+    monkeypatch.setattr(
+        batch_scanner,
+        "run_software_profile_generation",
+        lambda **kwargs: generated.append(kwargs),
+    )
+    monkeypatch.setattr(batch_scanner, "load_software_profile", lambda *args, **kwargs: loaded_profile)
+
+    profile = batch_scanner._ensure_software_profile(
+        repo_name="demo",
+        commit_hash="a" * 40,
+        repos_root=repo_root,
+        repo_profiles_dir=profiles_dir,
+        llm_client=object(),
+        force_regenerate=False,
+        cache={},
+        regenerated_keys=set(),
+    )
+
+    assert profile is loaded_profile
+    assert len(generated) == 1
+
+
+def test_ensure_software_profile_missing_repo_uses_fingerprint_validated_cache(monkeypatch, tmp_path):
+    profiles_dir = tmp_path / "profiles"
+    cached_profile = _mk_profile("demo")
+    captured = {}
+
+    def fake_load_cached(**kwargs):
+        captured.update(kwargs)
+        return cached_profile
+
+    monkeypatch.setattr(
+        batch_scanner,
+        "_load_cached_software_profile_if_compatible",
+        fake_load_cached,
+    )
+    monkeypatch.setattr(
+        batch_scanner,
+        "load_software_profile",
+        lambda *args, **kwargs: pytest.fail("missing-repo reuse must not bypass fingerprint validation"),
+    )
+
+    profile = batch_scanner._ensure_software_profile(
+        repo_name="demo",
+        commit_hash="a" * 40,
+        repos_root=tmp_path / "repos",
+        repo_profiles_dir=profiles_dir,
+        llm_client=object(),
+        force_regenerate=False,
+        cache={},
+        regenerated_keys=set(),
+    )
+
+    assert profile is cached_profile
+    assert captured["repo_name"] == "demo"
+    assert captured["commit_hash"] == "a" * 40
+    assert captured["repo_profiles_dir"] == profiles_dir
+
+
+def test_ensure_software_profile_dirty_repo_uses_fingerprint_validated_cache(monkeypatch, tmp_path):
+    repo_root = tmp_path / "repos"
+    repo_dir = repo_root / "demo"
+    repo_dir.mkdir(parents=True)
+    profiles_dir = tmp_path / "profiles"
+    cached_profile = _mk_profile("demo")
+    captured = {}
+
+    def fake_load_cached(**kwargs):
+        captured.update(kwargs)
+        return cached_profile
+
+    monkeypatch.setattr(batch_scanner, "has_uncommitted_changes", lambda _path: True)
+    monkeypatch.setattr(
+        batch_scanner,
+        "_load_cached_software_profile_if_compatible",
+        fake_load_cached,
+    )
+    monkeypatch.setattr(
+        batch_scanner,
+        "load_software_profile",
+        lambda *args, **kwargs: pytest.fail("dirty-repo reuse must not bypass fingerprint validation"),
+    )
+
+    profile = batch_scanner._ensure_software_profile(
+        repo_name="demo",
+        commit_hash="a" * 40,
+        repos_root=repo_root,
+        repo_profiles_dir=profiles_dir,
+        llm_client=object(),
+        force_regenerate=False,
+        cache={},
+        regenerated_keys=set(),
+    )
+
+    assert profile is cached_profile
+    assert captured["repo_name"] == "demo"
+    assert captured["commit_hash"] == "a" * 40
+    assert captured["repo_profiles_dir"] == profiles_dir
+
+
 def test_run_target_scan_reports_skipped_for_existing_findings(monkeypatch, tmp_path):
     def fake_run_single_target_scan(**kwargs):
         raise AssertionError("existing result should have been skipped")
 
     monkeypatch.setattr(batch_scanner.agent_scanner, "run_single_target_scan", fake_run_single_target_scan)
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_scan_languages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_codeql_database_names", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "build_scan_fingerprint",
+        lambda **_kwargs: {"hash": "expected"},
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: {"hash": "expected"},
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps({"coverage_status": "complete", "scan_fingerprint": {"hash": "expected"}}),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "skipped"
+
+
+def test_run_target_scan_does_not_skip_legacy_findings_when_live_validation_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    captured = {}
+
+    def fake_run_single_target_scan(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(batch_scanner.agent_scanner, "run_single_target_scan", fake_run_single_target_scan)
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: None,
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        force_regenerate_profiles=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps({"coverage_status": "complete"}),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "ok"
+    assert captured["target"].repo_name == "target-repo"
+
+
+def test_run_target_scan_reuses_complete_saved_findings_when_live_validation_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "run_single_target_scan",
+        lambda **kwargs: pytest.fail("complete saved findings should be reused"),
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_profile_based_scan_fingerprint_for_skip",
+        lambda **_kwargs: {"hash": "saved"},
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        force_regenerate_profiles=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps(
+            {
+                "coverage_status": "complete",
+                "scan_fingerprint": {
+                    "hash": "saved",
+                    "scan_config": {"max_iterations": 3},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "skipped"
+
+
+def test_run_target_scan_does_not_reuse_saved_findings_when_live_validation_fails_on_existing_repo(
+    monkeypatch,
+    tmp_path,
+):
+    repo_dir = tmp_path / "repos" / "target-repo"
+    repo_dir.mkdir(parents=True)
+    captured = {}
+
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "run_single_target_scan",
+        lambda **kwargs: captured.update(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_profile_based_scan_fingerprint_for_skip",
+        lambda **_kwargs: pytest.fail("existing target checkout must not use profile-only fallback"),
+    )
+    monkeypatch.setattr(batch_scanner, "has_uncommitted_changes", lambda _path: False)
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        force_regenerate_profiles=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps(
+            {
+                "coverage_status": "complete",
+                "scan_fingerprint": {
+                    "hash": "saved",
+                    "scan_config": {"max_iterations": 3},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "ok"
+    assert captured["target"].repo_name == "target-repo"
+
+
+def test_run_target_scan_rescans_when_profile_based_skip_fingerprint_is_stale(
+    monkeypatch,
+    tmp_path,
+):
+    captured = {}
+
+    def fake_run_single_target_scan(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(batch_scanner.agent_scanner, "run_single_target_scan", fake_run_single_target_scan)
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_profile_based_scan_fingerprint_for_skip",
+        lambda **_kwargs: {"hash": "current"},
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        force_regenerate_profiles=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps(
+            {
+                "coverage_status": "complete",
+                "scan_fingerprint": {
+                    "hash": "saved",
+                    "scan_config": {"max_iterations": 3},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "ok"
+    assert captured["target"].repo_name == "target-repo"
+
+
+def test_run_target_scan_does_not_reuse_profile_only_skip_validation_for_dirty_target_repo(
+    monkeypatch,
+    tmp_path,
+):
+    repo_dir = tmp_path / "repos" / "target-repo"
+    repo_dir.mkdir(parents=True)
+    captured = {}
+
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "run_single_target_scan",
+        lambda **kwargs: captured.update(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_profile_based_scan_fingerprint_for_skip",
+        lambda **_kwargs: pytest.fail("dirty target with existing checkout must not use profile-only fallback"),
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        force_regenerate_profiles=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps(
+            {
+                "coverage_status": "complete",
+                "scan_fingerprint": {
+                    "hash": "saved",
+                    "scan_config": {"max_iterations": 3},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "ok"
+    assert captured["target"].repo_name == "target-repo"
+
+
+def test_run_target_scan_builds_skip_existing_fingerprint_from_checked_out_target_tree(
+    monkeypatch,
+    tmp_path,
+):
+    repo_root = tmp_path / "repos"
+    repo_dir = repo_root / "target-repo"
+    repo_dir.mkdir(parents=True)
+    marker_path = repo_dir / "marker.txt"
+    marker_path.write_text("current", encoding="utf-8")
+
+    state = {"commit": "current"}
+
+    monkeypatch.setattr(batch_scanner_execution, "get_git_commit", lambda _path: state["commit"])
+    monkeypatch.setattr(batch_scanner_execution, "get_git_restore_target", lambda _path: "current")
+    monkeypatch.setattr(batch_scanner_execution, "has_uncommitted_changes", lambda _path: False)
+
+    def _fake_checkout(_path, commit):
+        state["commit"] = commit
+        marker_path.write_text("target", encoding="utf-8")
+        return True
+
+    def _fake_restore(_path, _target):
+        state["commit"] = "current"
+        marker_path.write_text("current", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(batch_scanner_execution, "checkout_commit", _fake_checkout)
+    monkeypatch.setattr(batch_scanner_execution, "restore_git_position", _fake_restore)
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "_resolve_scan_languages",
+        lambda repo_path, _profile: [marker_path.read_text(encoding="utf-8")],
+    )
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_codeql_database_names", lambda *_args, **_kwargs: {})
+    captured_fingerprint = {}
+
+    def _fake_build_scan_fingerprint(**kwargs):
+        captured_fingerprint.update(kwargs)
+        return {"hash": kwargs["scan_languages"][0]}
+
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "build_scan_fingerprint",
+        _fake_build_scan_fingerprint,
+    )
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "run_single_target_scan",
+        lambda **kwargs: pytest.fail("matching target-tree fingerprint should skip rescans"),
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=repo_root,
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        critical_stop_max_priority=1,
+        verbose=False,
+        skip_existing_scans=True,
+        force_regenerate_profiles=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target_commit = "t" * 40
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", target_commit, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-tttttttttttt"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps({"coverage_status": "complete", "scan_fingerprint": {"hash": "target"}}),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "skipped"
+    assert marker_path.read_text(encoding="utf-8") == "current"
+    assert captured_fingerprint["critical_stop_max_priority"] == 1
+
+
+def test_build_expected_scan_fingerprint_for_skip_raises_when_restore_fails(
+    monkeypatch,
+    tmp_path,
+):
+    repo_dir = tmp_path / "repos" / "target-repo"
+    repo_dir.mkdir(parents=True)
+
+    @contextmanager
+    def _fake_lock(*_args, **_kwargs):
+        yield
+
+    state = {"commit": "current"}
+    monkeypatch.setattr(batch_scanner_execution, "hold_repo_lock", _fake_lock)
+    monkeypatch.setattr(batch_scanner_execution, "get_git_commit", lambda _path: state["commit"])
+    monkeypatch.setattr(batch_scanner_execution, "get_git_restore_target", lambda _path: "current")
+    monkeypatch.setattr(batch_scanner_execution, "has_uncommitted_changes", lambda _path: False)
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "checkout_commit",
+        lambda _path, commit: state.__setitem__("commit", commit) or True,
+    )
+    monkeypatch.setattr(batch_scanner_execution, "restore_git_position", lambda _path, _target: False)
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_scan_languages", lambda *_args, **_kwargs: ["python"])
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_codeql_database_names", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "build_scan_fingerprint",
+        lambda **_kwargs: {"hash": "expected"},
+    )
+
+    batch_args = Namespace(
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+    )
+    target_commit = "t" * 40
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", target_commit, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    scan_target = batch_scanner.agent_scanner.ScanTarget(
+        repo_name="target-repo",
+        commit_hash=target_commit,
+        similarity=target,
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to restore target-repo"):
+        batch_scanner._build_expected_scan_fingerprint_for_skip(
+            batch_args=batch_args,
+            cve_id="CVE-2026-0001",
+            vulnerability_profile=object(),
+            llm_client=object(),
+            target=target,
+            scan_target=scan_target,
+            target_repo_path=repo_dir,
+        )
+
+
+def test_build_profile_based_scan_fingerprint_for_skip_uses_profile_repo_path_hashed_codeql_database_names(monkeypatch):
+    captured = {}
+
+    def _fake_build_scan_fingerprint(**kwargs):
+        captured.update(kwargs)
+        return {"hash": "expected"}
+
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "build_scan_fingerprint",
+        _fake_build_scan_fingerprint,
+    )
+
+    batch_args = Namespace(
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+    )
+    target_commit = "t" * 40
+    profile_repo_path = Path("/tmp/target-profile").resolve()
+    target_profile = _mk_profile("target-repo")
+    target_profile.repo_info = {"repo_analysis": {"codeql_languages": ["python", "javascript"]}}
+    target_profile.metadata = {"profile_repo_path": str(profile_repo_path)}
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef(
+            "target-repo",
+            target_commit,
+            target_profile,
+        ),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    scan_target = batch_scanner.agent_scanner.ScanTarget(
+        repo_name="target-repo",
+        commit_hash=target_commit,
+        similarity=target,
+    )
+
+    fingerprint = batch_scanner._build_profile_based_scan_fingerprint_for_skip(
+        batch_args=batch_args,
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+        scan_target=scan_target,
+    )
+
+    assert fingerprint == {"hash": "expected"}
+    expected_path_hash = batch_scanner.agent_scanner.stable_data_hash(str(profile_repo_path))[:12]
+    assert captured["codeql_database_names"] == {
+        "python": f"target-repo-{expected_path_hash}-tttttttt-python",
+        "javascript": f"target-repo-{expected_path_hash}-tttttttt-javascript",
+    }
+
+
+def test_run_target_scan_rescans_existing_findings_without_complete_coverage(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_single_target_scan(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(batch_scanner.agent_scanner, "run_single_target_scan", fake_run_single_target_scan)
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_scan_languages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_codeql_database_names", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "build_scan_fingerprint",
+        lambda **_kwargs: {"hash": "expected"},
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: {"hash": "expected"},
+    )
 
     batch_args = Namespace(
         scan_output_dir=tmp_path / "scan-out",
@@ -330,7 +1087,63 @@ def test_run_target_scan_reports_skipped_for_existing_findings(monkeypatch, tmp_
         target=target,
     )
 
-    assert status == "skipped"
+    assert status == "ok"
+    assert captured["target"].repo_name == "target-repo"
+
+
+def test_run_target_scan_rescans_existing_findings_when_scan_fingerprint_is_stale(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_single_target_scan(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(batch_scanner.agent_scanner, "run_single_target_scan", fake_run_single_target_scan)
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_scan_languages", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(batch_scanner.agent_scanner, "_resolve_codeql_database_names", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "build_scan_fingerprint",
+        lambda **_kwargs: {"hash": "expected"},
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: {"hash": "expected"},
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps({"coverage_status": "complete", "scan_fingerprint": {"hash": "stale"}}),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "ok"
+    assert captured["target"].repo_name == "target-repo"
 
 
 def test_run_target_scan_does_not_skip_existing_when_profiles_are_regenerated(monkeypatch, tmp_path):
@@ -374,6 +1187,125 @@ def test_run_target_scan_does_not_skip_existing_when_profiles_are_regenerated(mo
     assert captured["repo_base_path"] == tmp_path / "repos"
 
 
+def test_run_target_scan_reports_incomplete_for_partial_coverage(monkeypatch, tmp_path):
+    def fake_run_single_target_scan(**kwargs):
+        output_dir = batch_scanner.agent_scanner.resolve_output_dir(
+            cve_id=kwargs["cve_id"],
+            target_repo=kwargs["target"].repo_name,
+            target_commit=kwargs["target"].commit_hash,
+            output_base=str(kwargs["output_base"]),
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "agentic_vuln_findings.json").write_text(
+            json.dumps({"coverage_status": "partial"}),
+            encoding="utf-8",
+        )
+        return False
+
+    monkeypatch.setattr(batch_scanner.agent_scanner, "run_single_target_scan", fake_run_single_target_scan)
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "incomplete"
+
+
+def test_run_target_scan_reports_failed_when_stale_partial_output_was_not_updated(monkeypatch, tmp_path):
+    output_dir = batch_scanner.agent_scanner.resolve_output_dir(
+        cve_id="CVE-2026-0001",
+        target_repo="target-repo",
+        target_commit="a" * 40,
+        output_base=str(tmp_path / "scan-out"),
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    findings_path = output_dir / "agentic_vuln_findings.json"
+    findings_path.write_text(
+        json.dumps({"coverage_status": "partial"}),
+        encoding="utf-8",
+    )
+    original_mtime_ns = findings_path.stat().st_mtime_ns
+
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "run_single_target_scan",
+        lambda **_kwargs: False,
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "failed"
+    assert findings_path.stat().st_mtime_ns == original_mtime_ns
+
+
+def test_load_saved_scan_quality_reads_coverage_metadata(tmp_path):
+    output_dir = tmp_path / "scan-out"
+    output_dir.mkdir()
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps(
+            {
+                "coverage_status": "partial",
+                "critical_scope_present": True,
+                "critical_complete": False,
+                "critical_scope_total_files": 12,
+                "critical_scope_completed_files": 4,
+                "scan_progress": {"completed": 4, "pending": 8, "findings": 1},
+                "scan_fingerprint": {"hash": "expected"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    saved = batch_scanner._load_saved_scan_quality(output_dir)
+
+    assert saved["coverage_status"] == "partial"
+    assert saved["critical_scope_total_files"] == 12
+    assert saved["scan_progress"]["completed"] == 4
+    assert saved["scan_fingerprint_hash"] == "expected"
+
+
 def test_ensure_vulnerability_profile_uses_source_repos_root_for_vuln_loading(monkeypatch, tmp_path):
     repo_name = "demo"
     commit_hash = "abc123"
@@ -383,6 +1315,7 @@ def test_ensure_vulnerability_profile_uses_source_repos_root_for_vuln_loading(mo
 
     monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: object())
     monkeypatch.setattr(batch_scanner, "load_vulnerability_profile", lambda *args, **kwargs: None)
+    monkeypatch.setattr(batch_scanner, "has_uncommitted_changes", lambda _path: False)
 
     captured = {}
 
@@ -404,11 +1337,12 @@ def test_ensure_vulnerability_profile_uses_source_repos_root_for_vuln_loading(mo
     monkeypatch.setattr(
         batch_scanner,
         "run_vulnerability_profile_generation",
-        lambda *, repo_path, output_dir, llm_client, repo_profile, vuln_entry: captured.update(
+        lambda *, repo_path, output_dir, llm_client, repo_profile, vuln_entry, force_regenerate: captured.update(
             {
                 "output_dir": output_dir,
                 "vuln_entry_cve": vuln_entry.cve_id,
                 "repo_path": str(repo_path),
+                "force_regenerate": force_regenerate,
             }
         ),
     )
@@ -436,6 +1370,114 @@ def test_ensure_vulnerability_profile_uses_source_repos_root_for_vuln_loading(mo
     assert captured["vuln_json_path"] == str(tmp_path / "vuln.json")
     assert captured["repo_path"] == str(source_repos_root / repo_name)
     assert captured["vuln_entry_cve"] == cve_id
+    assert captured["force_regenerate"] is False
+
+
+def test_ensure_software_profile_force_regenerate_preserves_existing_profile_until_success(
+    monkeypatch,
+    tmp_path,
+):
+    repo_name = "demo"
+    commit_hash = "a" * 40
+    repo_profiles_dir = tmp_path / "profiles" / "soft"
+    profile_path = repo_profiles_dir / repo_name / commit_hash / "software_profile.json"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(json.dumps({"marker": "old"}), encoding="utf-8")
+    repos_root = tmp_path / "repos"
+    (repos_root / repo_name).mkdir(parents=True)
+
+    def fake_load(repo_name_arg, commit_hash_arg, base_dir):
+        if profile_path.exists():
+            return {"marker": json.loads(profile_path.read_text(encoding="utf-8"))["marker"]}
+        return None
+
+    captured = {}
+
+    def fake_generate(**kwargs):
+        captured["profile_exists_during_regen"] = profile_path.exists()
+
+    monkeypatch.setattr(batch_scanner, "load_software_profile", fake_load)
+    monkeypatch.setattr(batch_scanner, "run_software_profile_generation", fake_generate)
+
+    profile = batch_scanner._ensure_software_profile(
+        repo_name=repo_name,
+        commit_hash=commit_hash,
+        repos_root=repos_root,
+        repo_profiles_dir=repo_profiles_dir,
+        llm_client=None,
+        force_regenerate=True,
+        cache={},
+        regenerated_keys=set(),
+    )
+
+    assert captured["profile_exists_during_regen"] is True
+    assert profile == {"marker": "old"}
+    assert json.loads(profile_path.read_text(encoding="utf-8"))["marker"] == "old"
+
+
+def test_ensure_vulnerability_profile_force_regenerate_preserves_existing_profile_until_success(
+    monkeypatch,
+    tmp_path,
+):
+    repo_name = "demo"
+    commit_hash = "a" * 40
+    cve_id = "CVE-2026-0001"
+    vuln_profiles_dir = tmp_path / "profiles" / "vuln"
+    profile_path = vuln_profiles_dir / repo_name / cve_id / "vulnerability_profile.json"
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(json.dumps({"marker": "old"}), encoding="utf-8")
+    repos_root = tmp_path / "repos"
+    (repos_root / repo_name).mkdir(parents=True)
+
+    def fake_load(repo_name_arg, cve_id_arg, base_dir):
+        if profile_path.exists():
+            return {"marker": json.loads(profile_path.read_text(encoding="utf-8"))["marker"]}
+        return None
+
+    monkeypatch.setattr(batch_scanner, "load_vulnerability_profile", fake_load)
+    monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: object())
+    monkeypatch.setattr(batch_scanner, "has_uncommitted_changes", lambda _path: False)
+    monkeypatch.setattr(
+        batch_scanner,
+        "read_vuln_data",
+        lambda *args, **kwargs: [
+            {
+                "repo_name": repo_name,
+                "commit": commit_hash,
+                "call_chain": [{"vuln_sink": "eval"}],
+                "payload": "payload",
+                "cve_id": cve_id,
+            }
+        ],
+    )
+    monkeypatch.setattr(batch_scanner, "build_vulnerability_entry", lambda vuln_data: object())
+    captured = {}
+
+    def fake_generate(**kwargs):
+        captured["profile_exists_during_regen"] = profile_path.exists()
+
+    monkeypatch.setattr(batch_scanner, "run_vulnerability_profile_generation", fake_generate)
+
+    profile = batch_scanner._ensure_vulnerability_profile(
+        vuln_index=0,
+        repo_name=repo_name,
+        commit_hash=commit_hash,
+        cve_id=cve_id,
+        repos_root=repos_root,
+        repo_profiles_dir=tmp_path / "profiles" / "soft",
+        vuln_profiles_dir=vuln_profiles_dir,
+        llm_client=None,
+        force_regenerate=True,
+        software_cache={},
+        regenerated_software_keys=set(),
+        cache={},
+        verbose=False,
+        vuln_json_path=str(tmp_path / "vuln.json"),
+    )
+
+    assert captured["profile_exists_during_regen"] is True
+    assert profile == {"marker": "old"}
+    assert json.loads(profile_path.read_text(encoding="utf-8"))["marker"] == "old"
 
 
 def test_build_batch_summary_records_run_selection_knobs(tmp_path):
@@ -450,6 +1492,7 @@ def test_build_batch_summary_records_run_selection_knobs(tmp_path):
         critical_stop_mode="min",
         force_regenerate_profiles=True,
         skip_existing_scans=False,
+        jobs=4,
         llm_provider="deepseek",
         llm_name="deepseek-chat",
     )
@@ -470,7 +1513,86 @@ def test_build_batch_summary_records_run_selection_knobs(tmp_path):
     assert summary["include_same_repo"] is True
     assert summary["limit"] == 5
     assert summary["force_regenerate_profiles"] is True
+    assert summary["jobs"] == 4
     assert summary["llm_name"] == "deepseek-chat"
+
+
+def test_run_selected_target_scans_preserves_target_order_with_parallel_workers(monkeypatch):
+    targets = [
+        SimilarProfileCandidate(
+            profile_ref=ProfileRef("target-a", "a" * 40, _mk_profile("target-a")),
+            metrics=ProfileSimilarityMetrics(0.9, 0.9, 0.9, 0.9, 0.9, 0.9),
+        ),
+        SimilarProfileCandidate(
+            profile_ref=ProfileRef("target-b", "b" * 40, _mk_profile("target-b")),
+            metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+        ),
+    ]
+
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+
+    def fake_run_task(*, batch_args, cve_id, vulnerability_profile, target):
+        if target.profile_ref.repo_name == "target-a":
+            slow_started.set()
+            assert release_slow.wait(timeout=1.0) is True
+        else:
+            assert slow_started.wait(timeout=1.0) is True
+            release_slow.set()
+        return {
+            "status": "ok" if target.profile_ref.repo_name == "target-a" else "failed",
+            "started_at": f"start-{target.profile_ref.repo_name}",
+            "finished_at": f"finish-{target.profile_ref.repo_name}",
+            "duration_seconds": 0.02,
+        }
+
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan_task", fake_run_task)
+
+    results = batch_scanner._run_selected_target_scans(
+        batch_args=Namespace(jobs=2),
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        similar_targets=targets,
+    )
+
+    assert [item["repo_name"] for item in results] == ["target-a", "target-b"]
+    assert [item["status"] for item in results] == ["ok", "failed"]
+    assert results[0]["started_at"] == "start-target-a"
+    assert results[1]["finished_at"] == "finish-target-b"
+
+
+def test_discover_latest_repo_refs_reads_head_under_repo_lock(monkeypatch, tmp_path):
+    repos_root = tmp_path / "repos"
+    repo_dir = repos_root / "demo-repo"
+    repo_dir.mkdir(parents=True)
+    captured = {}
+
+    @contextmanager
+    def fake_hold_repo_lock(repo_path, *, purpose, run_id=None, poll_interval_seconds=0.2):
+        captured["repo_path"] = repo_path
+        captured["purpose"] = purpose
+        yield
+
+    monkeypatch.setattr(batch_scanner, "hold_repo_lock", fake_hold_repo_lock)
+    monkeypatch.setattr(batch_scanner, "get_git_commit", lambda repo_path: "a" * 40)
+    monkeypatch.setattr(
+        batch_scanner,
+        "_ensure_software_profile",
+        lambda **kwargs: _mk_profile("demo-repo"),
+    )
+
+    refs = batch_scanner._discover_latest_repo_refs(
+        repos_root=repos_root,
+        repo_profiles_dir=tmp_path / "profiles" / "soft",
+        llm_client=None,
+        force_regenerate_profiles=False,
+        software_cache={},
+        regenerated_software_keys=set(),
+    )
+
+    assert "demo-repo" in refs
+    assert captured["repo_path"] == repo_dir
+    assert captured["purpose"] == "discover_latest_repo_ref"
 
 
 def test_main_uses_separate_source_and_target_roots_and_profile_dirs(monkeypatch, tmp_path):
@@ -516,7 +1638,21 @@ def test_main_uses_separate_source_and_target_roots_and_profile_dirs(monkeypatch
 
     monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
     monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
-    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+
+    def fake_create_profile_llm_client(provider, model):
+        captured["profile_llm"] = (provider, model)
+        return object()
+
+    monkeypatch.setattr(
+        batch_scanner,
+        "create_profile_llm_client",
+        fake_create_profile_llm_client,
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "create_llm_client",
+        lambda config: object(),
+    )
     monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
     monkeypatch.setattr(
         batch_scanner,
@@ -578,7 +1714,7 @@ def test_main_uses_separate_source_and_target_roots_and_profile_dirs(monkeypatch
     monkeypatch.setattr(batch_scanner, "_ensure_software_profile", fake_ensure_software_profile)
     monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", fake_ensure_vulnerability_profile)
     monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", lambda **kwargs: [target_candidate])
-    monkeypatch.setattr(batch_scanner, "_run_target_scan", lambda **kwargs: "ok")
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan", lambda **kwargs: "ok")
 
     exit_code = batch_scanner.main()
 
@@ -590,6 +1726,7 @@ def test_main_uses_separate_source_and_target_roots_and_profile_dirs(monkeypatch
     assert captured["vuln_source_repos_root"] == source_repos_root
     assert captured["vuln_source_repo_profiles_dir"] == tmp_path / "profiles" / "soft"
     assert captured["resolved_vuln_profiles_dir"] == tmp_path / "profiles" / "vuln"
+    assert captured["profile_llm"] == ("deepseek", None)
 
 
 def test_main_records_skipped_status_in_summary(monkeypatch, tmp_path):
@@ -633,7 +1770,7 @@ def test_main_records_skipped_status_in_summary(monkeypatch, tmp_path):
 
     monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
     monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
-    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
     monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
     monkeypatch.setattr(
         batch_scanner,
@@ -648,7 +1785,7 @@ def test_main_records_skipped_status_in_summary(monkeypatch, tmp_path):
     monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: _mk_profile("source"))
     monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
     monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", lambda **kwargs: [target_candidate])
-    monkeypatch.setattr(batch_scanner, "_run_target_scan", lambda **kwargs: "skipped")
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan", lambda **kwargs: "skipped")
 
     exit_code = batch_scanner.main()
 
@@ -658,7 +1795,12 @@ def test_main_records_skipped_status_in_summary(monkeypatch, tmp_path):
     summary = json.loads(summary_files[0].read_text(encoding="utf-8"))
     assert summary["successful_scans"] == 0
     assert summary["skipped_scans"] == 1
+    assert summary["incomplete_scans"] == 0
     assert summary["failed_scans"] == 0
+    assert summary["coverage_complete_scans"] == 0
+    assert summary["coverage_partial_scans"] == 0
+    assert summary["coverage_empty_scans"] == 0
+    assert summary["coverage_unknown_scans"] == 1
     assert summary["entries"][0]["scan_results"][0]["status"] == "skipped"
 
 
@@ -708,7 +1850,7 @@ def test_main_returns_failure_when_only_skipped_and_failed_scans_remain(monkeypa
 
     monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
     monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
-    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
     monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
     monkeypatch.setattr(
         batch_scanner,
@@ -726,7 +1868,7 @@ def test_main_returns_failure_when_only_skipped_and_failed_scans_remain(monkeypa
     monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: _mk_profile("source"))
     monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
     monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", lambda **kwargs: [target_a, target_b])
-    monkeypatch.setattr(batch_scanner, "_run_target_scan", lambda **kwargs: next(scan_results))
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan", lambda **kwargs: next(scan_results))
 
     exit_code = batch_scanner.main()
 
@@ -736,7 +1878,12 @@ def test_main_returns_failure_when_only_skipped_and_failed_scans_remain(monkeypa
     summary = json.loads(summary_files[0].read_text(encoding="utf-8"))
     assert summary["successful_scans"] == 0
     assert summary["skipped_scans"] == 1
+    assert summary["incomplete_scans"] == 0
     assert summary["failed_scans"] == 1
+    assert summary["coverage_complete_scans"] == 0
+    assert summary["coverage_partial_scans"] == 0
+    assert summary["coverage_empty_scans"] == 0
+    assert summary["coverage_unknown_scans"] == 2
     assert [item["status"] for item in summary["entries"][0]["scan_results"]] == ["skipped", "failed"]
 
 
@@ -781,7 +1928,7 @@ def test_main_returns_failure_when_skipped_scans_and_profile_generation_failure_
 
     monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
     monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
-    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
     monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
     monkeypatch.setattr(
         batch_scanner,
@@ -803,7 +1950,7 @@ def test_main_returns_failure_when_skipped_scans_and_profile_generation_failure_
 
     monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", fake_ensure_vulnerability_profile)
     monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", lambda **kwargs: [target_candidate])
-    monkeypatch.setattr(batch_scanner, "_run_target_scan", lambda **kwargs: "skipped")
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan", lambda **kwargs: "skipped")
 
     exit_code = batch_scanner.main()
 
@@ -814,13 +1961,90 @@ def test_main_returns_failure_when_skipped_scans_and_profile_generation_failure_
     assert summary["total_scans"] == 1
     assert summary["successful_scans"] == 0
     assert summary["skipped_scans"] == 1
+    assert summary["incomplete_scans"] == 0
     assert summary["failed_profile_generation"] == 1
     assert summary["failed_scans"] == 0
+    assert summary["coverage_complete_scans"] == 0
+    assert summary["coverage_partial_scans"] == 0
+    assert summary["coverage_empty_scans"] == 0
+    assert summary["coverage_unknown_scans"] == 1
     assert (
         summary["total_scans"]
-        == summary["successful_scans"] + summary["skipped_scans"] + summary["failed_scans"]
+        == summary["successful_scans"]
+        + summary["skipped_scans"]
+        + summary["incomplete_scans"]
+        + summary["failed_scans"]
     )
     assert summary["entries"][1]["status"] == "failed_profile_generation"
+
+
+def test_main_returns_failure_when_incomplete_scan_exists(monkeypatch, tmp_path):
+    vuln_json = tmp_path / "vuln.json"
+    vuln_json.write_text("[]", encoding="utf-8")
+    source_repos_root = tmp_path / "source-repos"
+    target_repos_root = tmp_path / "target-repos"
+    scan_output_dir = tmp_path / "scan-out"
+    source_repos_root.mkdir()
+    target_repos_root.mkdir()
+
+    args = Namespace(
+        vuln_json=str(vuln_json),
+        source_repos_root=str(source_repos_root),
+        target_repos_root=str(target_repos_root),
+        profile_base_path=str(tmp_path / "profiles"),
+        source_soft_profiles_dir="soft",
+        target_soft_profiles_dir="soft-nvidia",
+        vuln_profiles_dir="vuln",
+        scan_output_dir=str(scan_output_dir),
+        similarity_threshold=0.7,
+        max_targets=5,
+        fallback_top_n=5,
+        include_same_repo=False,
+        similarity_model_name="stub-model",
+        similarity_device="cpu",
+        llm_provider="deepseek",
+        llm_name=None,
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        force_regenerate_profiles=False,
+        skip_existing_scans=False,
+        limit=None,
+        verbose=False,
+    )
+    target_candidate = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "b" * 40, _mk_profile("target")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+
+    monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
+    monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
+    monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
+    monkeypatch.setattr(
+        batch_scanner,
+        "_load_vuln_entries",
+        lambda vuln_json, limit=None: [(0, {"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"})],
+    )
+    monkeypatch.setattr(
+        batch_scanner,
+        "_discover_latest_repo_refs",
+        lambda **kwargs: {"target-repo": target_candidate.profile_ref},
+    )
+    monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: _mk_profile("source"))
+    monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
+    monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", lambda **kwargs: [target_candidate])
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan", lambda **kwargs: "incomplete")
+
+    exit_code = batch_scanner.main()
+
+    assert exit_code == 1
+    summary_files = sorted(scan_output_dir.glob("batch-summary-*.json"))
+    summary = json.loads(summary_files[0].read_text(encoding="utf-8"))
+    assert summary["successful_scans"] == 0
+    assert summary["skipped_scans"] == 0
+    assert summary["incomplete_scans"] == 1
+    assert summary["failed_scans"] == 0
 
 
 def test_main_excludes_same_named_cross_root_target_when_same_repo_not_included(monkeypatch, tmp_path):
@@ -868,7 +2092,7 @@ def test_main_excludes_same_named_cross_root_target_when_same_repo_not_included(
 
     monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
     monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
-    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
     monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
     monkeypatch.setattr(
         batch_scanner,
@@ -891,7 +2115,7 @@ def test_main_excludes_same_named_cross_root_target_when_same_repo_not_included(
         return [other_target]
 
     monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", fake_rank_similar_candidates)
-    monkeypatch.setattr(batch_scanner, "_run_target_scan", lambda **kwargs: "ok")
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan", lambda **kwargs: "ok")
 
     exit_code = batch_scanner.main()
 
@@ -940,7 +2164,7 @@ def test_main_reuses_target_profile_state_for_source_when_paths_match(monkeypatc
 
     monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
     monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
-    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
     monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
     monkeypatch.setattr(
         batch_scanner,
@@ -987,7 +2211,7 @@ def test_main_reuses_target_profile_state_for_source_when_paths_match(monkeypatc
     monkeypatch.setattr(batch_scanner, "_ensure_software_profile", fake_ensure_software_profile)
     monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
     monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", lambda **kwargs: [other_target])
-    monkeypatch.setattr(batch_scanner, "_run_target_scan", lambda **kwargs: "ok")
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan", lambda **kwargs: "ok")
 
     exit_code = batch_scanner.main()
 
@@ -1043,7 +2267,7 @@ def test_main_allows_missing_source_root_when_cached_profiles_are_reused(monkeyp
 
     monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
     monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
-    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
     monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
     monkeypatch.setattr(
         batch_scanner,
@@ -1058,7 +2282,7 @@ def test_main_allows_missing_source_root_when_cached_profiles_are_reused(monkeyp
     monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: _mk_profile("source"))
     monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
     monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", lambda **kwargs: [target_candidate])
-    monkeypatch.setattr(batch_scanner, "_run_target_scan", lambda **kwargs: "ok")
+    monkeypatch.setattr(batch_scanner_execution, "_run_target_scan", lambda **kwargs: "ok")
 
     exit_code = batch_scanner.main()
 
@@ -1110,8 +2334,8 @@ def test_main_rejects_missing_source_root_when_cached_vulnerability_profile_is_m
     )
     monkeypatch.setattr(
         batch_scanner,
-        "create_llm_client",
-        lambda config: (_ for _ in ()).throw(AssertionError("should fail before creating llm clients")),
+        "create_profile_llm_client",
+        lambda provider, model: (_ for _ in ()).throw(AssertionError("should fail before creating llm clients")),
     )
 
     exit_code = batch_scanner.main()

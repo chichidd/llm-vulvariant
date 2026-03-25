@@ -1,5 +1,6 @@
 import os
-from pathlib import Path
+
+import pytest
 
 from profiler.software.models import ModuleInfo, SoftwareProfile
 from scanner.similarity.retriever import (
@@ -143,7 +144,7 @@ def test_compute_profile_similarity_when_weights_non_positive_uses_average():
     assert metrics.overall_sim == expected_avg
 
 
-def test_text_similarity_uses_retriever_and_falls_back_to_jaccard_on_error():
+def test_text_similarity_uses_retriever_and_falls_back_on_error():
     class DummyRetriever:
         def similarity(self, left, right):
             return 0.88
@@ -154,8 +155,23 @@ def test_text_similarity_uses_retriever_and_falls_back_to_jaccard_on_error():
         def similarity(self, left, right):
             raise RuntimeError("boom")
 
-    # lexical jaccard: {alpha,beta} vs {alpha,gamma} = 1/3
-    assert _text_similarity("alpha beta", "alpha gamma", text_retriever=BrokenRetriever()) == 1 / 3
+    assert _text_similarity("alpha beta", "alpha gamma", text_retriever=BrokenRetriever()) == pytest.approx(1 / 3)
+
+
+def test_compute_profile_similarity_falls_back_to_lexical_when_embedding_similarity_fails():
+    source = _mk_profile("a", "alpha beta", [ModuleInfo(name="m")], apps=["gpu training"], users=["ml engineer"])
+    target = _mk_profile("b", "alpha gamma", [ModuleInfo(name="m")], apps=["gpu serving"], users=["platform engineer"])
+
+    class BrokenRetriever:
+        def similarity(self, left, right):
+            raise RuntimeError("backend boom")
+
+    metrics = compute_profile_similarity(source, target, text_retriever=BrokenRetriever())
+
+    assert 0.0 <= metrics.description_sim <= 1.0
+    assert 0.0 <= metrics.target_application_sim <= 1.0
+    assert 0.0 <= metrics.target_user_sim <= 1.0
+    assert 0.0 <= metrics.overall_sim <= 1.0
 
 
 def test_rank_similar_profiles_excludes_same_repo_and_uses_tie_break(monkeypatch):
@@ -241,15 +257,30 @@ def test_load_all_profiles_and_commit_resolution(tmp_path):
     repo2_missing.mkdir(parents=True)
     os.utime(repo2_commit_old / "software_profile.json", (10, 10))
     os.utime(repo2_commit_new / "software_profile.json", (20, 20))
+    os.utime(good_dir / "software_profile.json", (10, 10))
+    os.utime(bad_dir / "software_profile.json", (30, 30))
 
     refs = load_all_software_profiles(repo_profiles_dir)
     assert len(refs) == 3
-    assert refs[0].repo_name == "repo1"
-    assert refs[0].label.startswith("repo1-")
+    assert {ref.repo_name for ref in refs} == {"repo1", "repo2"}
+    assert resolve_profile_commit(repo_profiles_dir, "repo1") == "abc123456789"
+    selected_repo1 = select_profile_ref(refs, "repo1")
+    assert selected_repo1 is not None and selected_repo1.commit_hash == "abc123456789"
 
     assert resolve_profile_commit(repo_profiles_dir, "repo2") == "000000000001"
     assert resolve_profile_commit(repo_profiles_dir, "repo2", "00000000000") == "000000000001"
     assert resolve_profile_commit(repo_profiles_dir, "repo2", "does-not-exist") is None
+
+
+def test_resolve_profile_commit_rejects_unparseable_selected_profile(tmp_path):
+    repo_profiles_dir = tmp_path / "soft"
+    repo_dir = repo_profiles_dir / "repo1"
+    broken_dir = repo_dir / "abc123456789"
+    broken_dir.mkdir(parents=True)
+    (broken_dir / "software_profile.json").write_text("{not-json", encoding="utf-8")
+
+    assert resolve_profile_commit(repo_profiles_dir, "repo1") is None
+    assert resolve_profile_commit(repo_profiles_dir, "repo1", "abc123456789") is None
 
 
 def test_select_profile_ref_with_commit_hint(tmp_path):

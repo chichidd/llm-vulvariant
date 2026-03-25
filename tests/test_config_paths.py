@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import config as config_module
 
 

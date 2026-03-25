@@ -92,6 +92,7 @@ def run_vulnerability_profile_generation(
     llm_client: Any,
     repo_profile: SoftwareProfile,
     vuln_entry: VulnEntry,
+    force_regenerate: bool = False,
 ) -> VulnerabilityProfile:
     """Run vulnerability profile generation for one vuln.json entry.
 
@@ -101,6 +102,7 @@ def run_vulnerability_profile_generation(
         llm_client: Initialized LLM client.
         repo_profile: Preloaded software profile for the source repository.
         vuln_entry: Vulnerability record to profile.
+        force_regenerate: Whether to bypass cached final vulnerability profiles.
 
     Returns:
         Generated vulnerability profile.
@@ -111,4 +113,8 @@ def run_vulnerability_profile_generation(
         vuln_entry=vuln_entry,
         output_dir=str(output_dir),
     )
-    return profiler.generate_vulnerability_profile(str(repo_path), save_results=True)
+    return profiler.generate_vulnerability_profile(
+        str(repo_path),
+        save_results=True,
+        force_regenerate=force_regenerate,
+    )

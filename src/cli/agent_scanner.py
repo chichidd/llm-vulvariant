@@ -12,10 +12,11 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from config import (
     DEFAULT_SOFTWARE_PROFILE_DIRNAME,
@@ -23,8 +24,10 @@ from config import (
     _path_config,
 )
 from llm import LLMConfig, create_llm_client
+from profiler.fingerprint import extract_profile_fingerprint, stable_data_hash
 from scanner.agent import AgenticVulnFinder, load_software_profile, load_vulnerability_profile
 from scanner.agent.utils import make_serializable
+from scanner.similarity.embedding import DEFAULT_EMBEDDING_MODEL_NAME
 from scanner.similarity import (
     SimilarProfileCandidate,
     build_text_retriever,
@@ -43,12 +46,14 @@ from utils.git_utils import (
 )
 from utils.language import dedupe_languages as _dedupe_languages, detect_languages as detect_repo_languages
 from utils.logger import get_logger
+from utils.repo_lock import acquire_repo_lock, hold_repo_lock, release_repo_lock
 try:
     from cli.common import resolve_cli_path, resolve_profile_dirs, setup_logging
 except ImportError:  # pragma: no cover - direct script execution fallback
     from common import resolve_cli_path, resolve_profile_dirs, setup_logging
 
 logger = get_logger(__name__)
+SCAN_FINGERPRINT_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -89,6 +94,11 @@ def _resolve_codeql_database_names(
     software_profile,
 ) -> Dict[str, str]:
     repo_analysis = _extract_repo_analysis(software_profile)
+    metadata = getattr(software_profile, "metadata", {}) if hasattr(software_profile, "metadata") else {}
+    if not isinstance(metadata, dict) and isinstance(software_profile, dict):
+        metadata = software_profile.get("metadata", {})
+    profile_repo_path = str(metadata.get("profile_repo_path", "") or "").strip() if isinstance(metadata, dict) else ""
+    repo_path_hash = stable_data_hash(profile_repo_path)[:12] if profile_repo_path else ""
     codeql_languages: List[str] = []
 
     configured_codeql_languages = repo_analysis.get("codeql_languages", [])
@@ -97,7 +107,12 @@ def _resolve_codeql_database_names(
 
     active_languages = codeql_languages or _dedupe_languages(scan_languages)
     return {
-        lang: f"{target.repo_name}-{target.commit_hash[:8]}-{lang}"
+        # Match the path-sensitive CodeQL DB identity emitted during repo analysis.
+        lang: (
+            f"{target.repo_name}-{repo_path_hash}-{target.commit_hash[:8]}-{lang}"
+            if repo_path_hash
+            else f"{target.repo_name}-{target.commit_hash[:8]}-{lang}"
+        )
         for lang in active_languages
     }
 
@@ -153,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--similarity-model-name",
         type=str,
-        default="BAAI--bge-large-en-v1.5",
+        default=DEFAULT_EMBEDDING_MODEL_NAME,
         help="Embedding model name under paths.embedding_model_path for text similarity",
     )
     parser.add_argument(
@@ -191,7 +206,7 @@ def parse_args() -> argparse.Namespace:
         "--llm-provider",
         type=str,
         default="deepseek",
-        help="LLM provider (deepseek, openai)",
+        help="LLM provider (deepseek, openai, lab)",
     )
     parser.add_argument(
         "--llm-name",
@@ -212,11 +227,21 @@ def parse_args() -> argparse.Namespace:
         "--critical-stop-mode",
         type=str,
         choices=["min", "max"],
-        default="min",
+        default="max",
         help=(
             "When --stop-when-critical-complete is enabled: "
             "min => stop at min(max-iterations, X); "
-            "max => stop at max(max-iterations, X). Default: min"
+            "max => stop at max(max-iterations, X). Default: max"
+        ),
+    )
+    parser.add_argument(
+        "--critical-stop-max-priority",
+        type=int,
+        choices=[1, 2],
+        default=2,
+        help=(
+            "Highest module priority included in critical-stop completion checks. "
+            "1 => affected only; 2 => affected + related. Default: 2"
         ),
     )
     parser.add_argument("--output", type=str, default=None, help="Output base directory")
@@ -292,7 +317,8 @@ def _resolve_manual_targets(
         if not repo_base_path.is_absolute():
             repo_base_path = _path_config["repo_root"] / repo_base_path
         repo_path = repo_base_path / repo_name
-        commit_hint = get_git_commit(str(repo_path))
+        with hold_repo_lock(repo_path, purpose="resolve_manual_target_commit"):
+            commit_hint = get_git_commit(str(repo_path))
 
     resolved_commit = resolve_profile_commit(repo_profiles_dir, repo_name, commit_hint)
     if not resolved_commit:
@@ -379,11 +405,16 @@ def _save_scan_outputs(
     finder: AgenticVulnFinder,
     results: Dict[str, object],
     target: ScanTarget,
+    scan_fingerprint: Optional[Dict[str, Any]] = None,
 ) -> None:
+    results_payload: Dict[str, Any] = dict(results)
+    results_payload.update(_build_scan_quality_metadata(finder))
+    if scan_fingerprint:
+        results_payload["scan_fingerprint"] = scan_fingerprint
     output_path = output_dir / "agentic_vuln_findings.json"
     write_atomic_text(
         output_path,
-        json.dumps(results, indent=2, ensure_ascii=False),
+        json.dumps(results_payload, indent=2, ensure_ascii=False),
     )
 
     conversation_path = output_dir / "conversation_history.json"
@@ -401,6 +432,125 @@ def _save_scan_outputs(
 
     logger.info(f"Results saved to: {output_path}")
     logger.info(f"Conversation history saved to: {conversation_path}")
+
+
+def _hash_scan_source_file(path: Path) -> str:
+    """Hash one source file that materially affects scan outputs."""
+    if not path.exists():
+        return ""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _profile_hash(profile: Any) -> str:
+    """Prefer persisted profile fingerprints; fall back to a stable profile hash."""
+    persisted_fingerprint = extract_profile_fingerprint(profile)
+    persisted_hash = str(persisted_fingerprint.get("hash", "")).strip()
+    if persisted_hash:
+        return persisted_hash
+    profile_payload = profile.to_dict() if hasattr(profile, "to_dict") else profile
+    return stable_data_hash(profile_payload)
+
+
+def build_scan_fingerprint(
+    *,
+    vulnerability_profile: Any,
+    software_profile: Any,
+    llm_client: Any,
+    max_iterations: int,
+    stop_when_critical_complete: bool,
+    critical_stop_mode: str,
+    critical_stop_max_priority: int,
+    scan_languages: List[str],
+    codeql_database_names: Dict[str, str],
+) -> Dict[str, Any]:
+    """Build a reproducibility fingerprint for one target scan result."""
+    llm_config = getattr(llm_client, "config", None)
+    cli_root = Path(__file__).resolve().parent
+    agent_root = cli_root.parent / "scanner" / "agent"
+    payload = {
+        "schema_version": SCAN_FINGERPRINT_SCHEMA_VERSION,
+        "kind": "scan_result",
+        "vulnerability_profile_hash": _profile_hash(vulnerability_profile),
+        "target_software_profile_hash": _profile_hash(software_profile),
+        "llm": {
+            "provider": getattr(llm_config, "provider", ""),
+            "model": getattr(llm_config, "model", ""),
+            "base_url": getattr(llm_config, "base_url", ""),
+            "temperature": getattr(llm_config, "temperature", None),
+            "top_p": getattr(llm_config, "top_p", None),
+            "max_tokens": getattr(llm_config, "max_tokens", None),
+            "enable_thinking": getattr(llm_config, "enable_thinking", None),
+        },
+        "scan_config": {
+            "max_iterations": int(max_iterations),
+            "stop_when_critical_complete": bool(stop_when_critical_complete),
+            "critical_stop_mode": str(critical_stop_mode),
+            "critical_stop_max_priority": int(critical_stop_max_priority),
+            "scan_languages": list(scan_languages or []),
+            "codeql_database_names": dict(codeql_database_names or {}),
+        },
+        "source_hashes": {
+            "cli/agent_scanner.py": _hash_scan_source_file(cli_root / "agent_scanner.py"),
+            "scanner/agent/finder.py": _hash_scan_source_file(agent_root / "finder.py"),
+            "scanner/agent/memory.py": _hash_scan_source_file(agent_root / "memory.py"),
+            "scanner/agent/priority.py": _hash_scan_source_file(agent_root / "priority.py"),
+            "scanner/agent/prompts.py": _hash_scan_source_file(agent_root / "prompts.py"),
+            "scanner/agent/utils.py": _hash_scan_source_file(agent_root / "utils.py"),
+            "scanner/agent/toolkit.py": _hash_scan_source_file(agent_root / "toolkit.py"),
+            "utils/codeql_native.py": _hash_scan_source_file(cli_root.parent / "utils" / "codeql_native.py"),
+        },
+    }
+    return {
+        **payload,
+        "hash": stable_data_hash(payload),
+    }
+
+
+def _build_scan_quality_metadata(finder: AgenticVulnFinder) -> Dict[str, Any]:
+    """Summarize scan coverage quality for result files and batch summaries."""
+    memory = getattr(finder, "memory", None)
+    if memory is None:
+        return {
+            "coverage_status": "unknown",
+            "critical_scope_present": False,
+            "critical_complete": False,
+            "critical_scope_total_files": 0,
+            "critical_scope_completed_files": 0,
+            "scan_progress": {},
+        }
+
+    progress = memory.get_progress()
+    priority_1 = progress.get("priority_1", {})
+    priority_2 = progress.get("priority_2", {})
+    critical_stop_max_priority = int(getattr(finder, "critical_stop_max_priority", 2))
+    if critical_stop_max_priority not in {1, 2}:
+        critical_stop_max_priority = 2
+    critical_scope_total = int(priority_1.get("total", 0))
+    critical_scope_completed = int(priority_1.get("completed", 0))
+    if critical_stop_max_priority >= 2:
+        critical_scope_total += int(priority_2.get("total", 0))
+        critical_scope_completed += int(priority_2.get("completed", 0))
+    completed_files = int(progress.get("completed", 0))
+    findings = int(progress.get("findings", 0))
+    critical_complete = bool(memory.is_critical_complete(max_priority=critical_stop_max_priority))
+
+    # Coverage status should reflect the configured critical scan scope rather
+    # than all lower-priority pending files.
+    if critical_complete:
+        coverage_status = "complete"
+    elif completed_files > 0 or findings > 0:
+        coverage_status = "partial"
+    else:
+        coverage_status = "empty"
+
+    return {
+        "coverage_status": coverage_status,
+        "critical_scope_present": critical_scope_total > 0,
+        "critical_complete": critical_complete,
+        "critical_scope_total_files": critical_scope_total,
+        "critical_scope_completed_files": critical_scope_completed,
+        "scan_progress": progress,
+    }
 
 
 def _resolve_soft_profiles_dir_for_scan(
@@ -425,7 +575,8 @@ def run_single_target_scan(
     target: ScanTarget,
     verbose: bool = False,
     stop_when_critical_complete: bool = False,
-    critical_stop_mode: str = "min",
+    critical_stop_mode: str = "max",
+    critical_stop_max_priority: int = 2,
     profile_base_path: Optional[str] = None,
     software_profile_dirname: Optional[str] = None,
 ) -> bool:
@@ -438,106 +589,175 @@ def run_single_target_scan(
         logger.error(f"Repository not found: {target_repo_path}")
         return False
 
-    original_commit = get_git_commit(str(target_repo_path))
-    original_restore_target = get_git_restore_target(str(target_repo_path))
-    changed_commit = False
+    lock_purpose = f"agent_scan:{cve_id}:{target.commit_hash[:12]}"
+    with hold_repo_lock(target_repo_path, purpose=lock_purpose):
+        original_commit = get_git_commit(str(target_repo_path))
+        original_restore_target = get_git_restore_target(str(target_repo_path))
+        changed_commit = False
+        scan_succeeded = False
+        restore_failed = False
+        repo_is_clean: Optional[bool] = None
 
-    try:
-        if original_commit and original_commit != target.commit_hash:
-            if has_uncommitted_changes(str(target_repo_path)):
+        try:
+            needs_checkout = original_commit != target.commit_hash
+            if needs_checkout and not original_restore_target:
                 logger.error(
-                    "Repository has local changes, refuse commit switch for %s. "
-                    "Please clean/stash and retry.",
+                    "Unable to resolve original git position for %s; refuse commit switch to %s",
+                    target.repo_name,
+                    target.commit_hash[:12],
+                )
+            else:
+                repo_is_clean = not has_uncommitted_changes(str(target_repo_path))
+            if needs_checkout and original_restore_target and repo_is_clean:
+                logger.info(f"Checking out {target.repo_name} to {target.commit_hash[:12]}...")
+                if not checkout_commit(str(target_repo_path), target.commit_hash):
+                    logger.error(f"Failed to checkout to {target.commit_hash}")
+                else:
+                    changed_commit = True
+            elif repo_is_clean is False:
+                logger.error(
+                    "Repository %s has local changes; scan requires a clean working tree.",
                     target.repo_name,
                 )
-                return False
-            logger.info(f"Checking out {target.repo_name} to {target.commit_hash[:12]}...")
-            if not checkout_commit(str(target_repo_path), target.commit_hash):
-                logger.error(f"Failed to checkout to {target.commit_hash}")
-                return False
-            changed_commit = True
 
-        logger.info(f"Loading software profile: {target.repo_name}@{target.commit_hash[:12]}...")
-        soft_profiles_dir = _resolve_soft_profiles_dir_for_scan(
-            profile_base_path=profile_base_path,
-            software_profile_dirname=software_profile_dirname,
-        )
-        software_profile = load_software_profile(
-            target.repo_name,
-            target.commit_hash,
-            base_dir=soft_profiles_dir,
-        )
-        if not software_profile:
-            logger.error(
-                f"Failed to load software profile for {target.repo_name}@{target.commit_hash[:12]}"
-            )
-            return False
+            if (
+                (not needs_checkout or changed_commit)
+                and repo_is_clean is True
+                and (not needs_checkout or original_restore_target)
+            ):
+                logger.info(f"Loading software profile: {target.repo_name}@{target.commit_hash[:12]}...")
+                soft_profiles_dir = _resolve_soft_profiles_dir_for_scan(
+                    profile_base_path=profile_base_path,
+                    software_profile_dirname=software_profile_dirname,
+                )
+                software_profile = load_software_profile(
+                    target.repo_name,
+                    target.commit_hash,
+                    base_dir=soft_profiles_dir,
+                )
+                if not software_profile:
+                    logger.error(
+                        f"Failed to load software profile for {target.repo_name}@{target.commit_hash[:12]}"
+                    )
+                else:
+                    target_output_dir = resolve_output_dir(
+                        cve_id=cve_id,
+                        target_repo=target.repo_name,
+                        target_commit=target.commit_hash,
+                        output_base=output_base,
+                    )
+                    target_output_dir.mkdir(parents=True, exist_ok=True)
 
-        target_output_dir = resolve_output_dir(
-            cve_id=cve_id,
-            target_repo=target.repo_name,
-            target_commit=target.commit_hash,
-            output_base=output_base,
-        )
-        target_output_dir.mkdir(parents=True, exist_ok=True)
+                    scan_languages = _resolve_scan_languages(target_repo_path, software_profile)
+                    codeql_database_names = _resolve_codeql_database_names(
+                        target,
+                        scan_languages,
+                        software_profile,
+                    )
 
-        scan_languages = _resolve_scan_languages(target_repo_path, software_profile)
-        codeql_database_names = _resolve_codeql_database_names(target, scan_languages, software_profile)
+                    logger.info(
+                        "Target languages: %s",
+                        ", ".join(scan_languages) if scan_languages else "none",
+                    )
+                    if codeql_database_names:
+                        logger.info(
+                            "CodeQL databases: %s",
+                            ", ".join(
+                                f"{lang}={db_name}"
+                                for lang, db_name in sorted(codeql_database_names.items())
+                            ),
+                        )
+                    else:
+                        logger.info("CodeQL databases: none (CodeQL tools may be unavailable)")
 
-        logger.info(
-            "Target languages: %s",
-            ", ".join(scan_languages) if scan_languages else "none",
-        )
-        if codeql_database_names:
-            logger.info(
-                "CodeQL databases: %s",
-                ", ".join(
-                    f"{lang}={db_name}"
-                    for lang, db_name in sorted(codeql_database_names.items())
-                ),
-            )
-        else:
-            logger.info("CodeQL databases: none (CodeQL tools may be unavailable)")
+                    output_lock_info = None
+                    output_lock_purpose = f"scan_output:{cve_id}:{target.repo_name}:{target.commit_hash[:12]}"
+                    try:
+                        # Serialize finder lifecycle for a shared output directory, since finder
+                        # initialization and run both write scan_memory.json.
+                        output_lock_info = acquire_repo_lock(
+                            target_output_dir,
+                            purpose=output_lock_purpose,
+                        )
+                        finder = AgenticVulnFinder(
+                            llm_client=llm_client,
+                            repo_path=target_repo_path,
+                            software_profile=software_profile,
+                            vulnerability_profile=vulnerability_profile,
+                            max_iterations=max_iterations,
+                            stop_when_critical_complete=stop_when_critical_complete,
+                            critical_stop_mode=critical_stop_mode,
+                            critical_stop_max_priority=critical_stop_max_priority,
+                            verbose=verbose,
+                            output_dir=target_output_dir,
+                            languages=scan_languages,
+                            codeql_database_names=codeql_database_names,
+                        )
+                        scan_fingerprint = build_scan_fingerprint(
+                            vulnerability_profile=vulnerability_profile,
+                            software_profile=software_profile,
+                            llm_client=llm_client,
+                            max_iterations=max_iterations,
+                            stop_when_critical_complete=stop_when_critical_complete,
+                            critical_stop_mode=critical_stop_mode,
+                            critical_stop_max_priority=critical_stop_max_priority,
+                            scan_languages=scan_languages,
+                            codeql_database_names=codeql_database_names,
+                        )
+                        results = finder.run()
+                        _save_scan_outputs(
+                            target_output_dir,
+                            finder,
+                            results,
+                            target,
+                            scan_fingerprint=scan_fingerprint,
+                        )
+                    finally:
+                        release_repo_lock(
+                            output_lock_info,
+                            target_output_dir,
+                            output_lock_purpose,
+                        )
 
-        finder = AgenticVulnFinder(
-            llm_client=llm_client,
-            repo_path=target_repo_path,
-            software_profile=software_profile,
-            vulnerability_profile=vulnerability_profile,
-            max_iterations=max_iterations,
-            stop_when_critical_complete=stop_when_critical_complete,
-            critical_stop_mode=critical_stop_mode,
-            verbose=verbose,
-            output_dir=target_output_dir,
-            languages=scan_languages,
-            codeql_database_names=codeql_database_names,
-        )
-        results = finder.run()
-        _save_scan_outputs(target_output_dir, finder, results, target)
-
-        vulnerabilities = results.get("vulnerabilities", []) if isinstance(results, dict) else []
-        logger.info(
-            f"Target {target.repo_name}@{target.commit_hash[:12]} finished: "
-            f"{len(vulnerabilities)} potential vulnerabilities"
-        )
-        return True
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error(f"Scan failed for {target.repo_name}@{target.commit_hash[:12]}: {exc}")
-        return False
-    finally:
-        if changed_commit and original_restore_target:
-            logger.info(
-                "Restoring %s to original position %s...",
-                target.repo_name,
-                original_restore_target,
-            )
-            restored = restore_git_position(str(target_repo_path), original_restore_target)
-            if not restored:
-                logger.error(
-                    "Failed to restore %s to original position %s",
+                    vulnerabilities = results.get("vulnerabilities", []) if isinstance(results, dict) else []
+                    quality = _build_scan_quality_metadata(finder)
+                    logger.info(
+                        f"Target {target.repo_name}@{target.commit_hash[:12]} finished: "
+                        f"{len(vulnerabilities)} potential vulnerabilities, "
+                        f"coverage={quality['coverage_status']}, "
+                        f"critical={quality['critical_scope_completed_files']}/"
+                        f"{quality['critical_scope_total_files']}"
+                    )
+                    if quality["coverage_status"] != "complete":
+                        logger.error(
+                            "Target %s@%s did not finish with complete coverage (%s)",
+                            target.repo_name,
+                            target.commit_hash[:12],
+                            quality["coverage_status"],
+                        )
+                    else:
+                        scan_succeeded = True
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error(f"Scan failed for {target.repo_name}@{target.commit_hash[:12]}: {exc}")
+            scan_succeeded = False
+        finally:
+            if changed_commit and original_restore_target:
+                logger.info(
+                    "Restoring %s to original position %s...",
                     target.repo_name,
                     original_restore_target,
                 )
+                restored = restore_git_position(str(target_repo_path), original_restore_target)
+                if not restored:
+                    logger.error(
+                        "Failed to restore %s to original position %s",
+                        target.repo_name,
+                        original_restore_target,
+                    )
+                    restore_failed = True
+        if restore_failed:
+            return False
+        return scan_succeeded
 
 
 def main() -> int:
@@ -591,7 +811,8 @@ def main() -> int:
             target=target,
             verbose=args.verbose,
             stop_when_critical_complete=getattr(args, "stop_when_critical_complete", False),
-            critical_stop_mode=getattr(args, "critical_stop_mode", "min"),
+            critical_stop_mode=getattr(args, "critical_stop_mode", "max"),
+            critical_stop_max_priority=getattr(args, "critical_stop_max_priority", 2),
             profile_base_path=getattr(args, "profile_base_path", None),
             software_profile_dirname=getattr(args, "software_profile_dirname", None),
         )

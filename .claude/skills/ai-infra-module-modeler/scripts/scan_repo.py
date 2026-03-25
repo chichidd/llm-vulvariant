@@ -30,26 +30,50 @@ from ai_infra_taxonomy import AI_INFRA_TAXONOMY, taxonomy_to_markdown
 
 LLMConfig = None
 create_llm_client = None
+capture_llm_usage_snapshot = None
+aggregate_llm_usage_since = None
+aggregate_usage_summaries = None
 
 
 def _ensure_llm_import() -> bool:
     """Load llm client from installed package or repo source."""
-    global LLMConfig, create_llm_client
-    if LLMConfig and create_llm_client:
+    global LLMConfig, create_llm_client, capture_llm_usage_snapshot, aggregate_llm_usage_since, aggregate_usage_summaries
+    if (
+        LLMConfig
+        and create_llm_client
+        and capture_llm_usage_snapshot
+        and aggregate_llm_usage_since
+        and aggregate_usage_summaries
+    ):
         return True
     try:
-        from llm import LLMConfig as _LLMConfig, create_llm_client as _create_llm_client
+        from llm import (
+            LLMConfig as _LLMConfig,
+            aggregate_llm_usage_since as _aggregate_llm_usage_since,
+            capture_llm_usage_snapshot as _capture_llm_usage_snapshot,
+            create_llm_client as _create_llm_client,
+        )
+        from utils.claude_cli import aggregate_usage_summaries as _aggregate_usage_summaries
     except Exception:
         project_root = Path(__file__).resolve().parents[4]
         src_root = project_root / "src"
         if src_root.exists() and str(src_root) not in sys.path:
             sys.path.insert(0, str(src_root))
         try:
-            from llm import LLMConfig as _LLMConfig, create_llm_client as _create_llm_client
+            from llm import (
+                LLMConfig as _LLMConfig,
+                aggregate_llm_usage_since as _aggregate_llm_usage_since,
+                capture_llm_usage_snapshot as _capture_llm_usage_snapshot,
+                create_llm_client as _create_llm_client,
+            )
+            from utils.claude_cli import aggregate_usage_summaries as _aggregate_usage_summaries
         except Exception:
             return False
     LLMConfig = _LLMConfig
     create_llm_client = _create_llm_client
+    capture_llm_usage_snapshot = _capture_llm_usage_snapshot
+    aggregate_llm_usage_since = _aggregate_llm_usage_since
+    aggregate_usage_summaries = _aggregate_usage_summaries
     return True
 
 
@@ -98,6 +122,7 @@ TEXT_EXTS = {
     ".sh", ".bash", ".ps1", ".go", ".rs", ".java", ".kt", ".scala", ".c", ".cc", ".cpp",
     ".h", ".hpp", ".cu", ".cuh", ".cmake", ".gradle", ".dockerfile",
     ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".vue", ".svelte",
+    ".cs", ".csproj",
 }
 
 # A small set of "high-signal" files to read even if extension is unknown.
@@ -126,6 +151,10 @@ class Signals:
     group_depth: int
     llm_provider: str
     llm_model: str
+    llm_temperature: float
+    max_workers: int
+    analysis_mode: str
+    llm_usage_summary: Dict[str, Any]
     group_assignments: Dict[str, str]
 
 
@@ -369,23 +398,29 @@ def _process_batch_worker(
     taxonomy_ref: str,
     llm_config: Any,
     require_llm: bool,
-) -> Tuple[int, Dict[str, str]]:
+) -> Tuple[int, Dict[str, str], Dict[str, Any]]:
     """Worker function to process a single batch in a separate process."""
     # Import here to avoid serialization issues
     if not _ensure_llm_import():
         if require_llm:
             raise RuntimeError("LLM client not available in worker")
-        return batch_index, {}
+        return batch_index, {}, {}
     
     # Create LLM client in this process
     llm_client = create_llm_client(llm_config) if llm_config else None
     if not llm_client:
         if require_llm:
             raise RuntimeError("Failed to create LLM client in worker")
-        return batch_index, {}
-    
+        return batch_index, {}, {}
+
     assignments: Dict[str, str] = {}
+    usage_summary: Dict[str, Any] = {}
     prompt = _prompt_for_groups(batch, taxonomy_ref)
+    usage_snapshot = (
+        capture_llm_usage_snapshot(llm_client)
+        if callable(capture_llm_usage_snapshot)
+        else None
+    )
     
     try:
         response = llm_client.chat([
@@ -394,7 +429,7 @@ def _process_batch_worker(
         ])
         content = _response_content(response)
         payload = _parse_json_payload(content)
-        
+
         if payload:
             items = payload.get("assignments", [])
             for item in items:
@@ -408,8 +443,15 @@ def _process_batch_worker(
         print(f"Error processing batch {batch_index}: {e}")
         if require_llm:
             raise
-    
-    return batch_index, assignments
+    finally:
+        if callable(aggregate_llm_usage_since):
+            usage_summary = aggregate_llm_usage_since(llm_client, usage_snapshot) or {}
+        else:
+            get_last_usage_summary = getattr(llm_client, "get_last_usage_summary", None)
+            if callable(get_last_usage_summary):
+                usage_summary = get_last_usage_summary() or {}
+
+    return batch_index, assignments, usage_summary
 
 
 def classify_groups_with_llm(
@@ -419,7 +461,7 @@ def classify_groups_with_llm(
     taxonomy_ref: str,
     require_llm: bool,
     max_workers: int = 4,
-) -> Dict[str, str]:
+) -> Tuple[Dict[str, str], Dict[str, Any]]:
     """Classify groups using LLM with multiprocessing.
     
     Args:
@@ -434,11 +476,11 @@ def classify_groups_with_llm(
         Dictionary mapping group names to module assignments
     """
     if not group_summaries:
-        return {}
+        return {}, {}
     if not llm_client:
         if require_llm:
             raise RuntimeError("LLM client not available")
-        return {}
+        return {}, {}
 
     # Get LLM config for workers
     llm_config = getattr(llm_client, 'config', None)
@@ -450,8 +492,9 @@ def classify_groups_with_llm(
         batches.append((i, batch))
     
     print(f"Processing {len(batches)} batches with {max_workers} workers...")
-    
+
     assignments: Dict[str, str] = {}
+    usage_summaries: List[Dict[str, Any]] = []
     
     # Process batches in parallel
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -472,15 +515,21 @@ def classify_groups_with_llm(
         for future in as_completed(futures):
             batch_idx = futures[future]
             try:
-                returned_idx, batch_assignments = future.result()
+                returned_idx, batch_assignments, batch_usage = future.result()
                 print(f"Completed batch {returned_idx} (groups {returned_idx}-{returned_idx + batch_size})")
                 assignments.update(batch_assignments)
+                if isinstance(batch_usage, dict) and batch_usage:
+                    usage_summaries.append(batch_usage)
             except Exception as e:
                 print(f"Error in batch {batch_idx}: {e}")
                 if require_llm:
                     raise
-    
-    return assignments
+
+    requested_model = getattr(llm_config, "model", "") if llm_config is not None else ""
+    usage_summary = aggregate_usage_summaries(usage_summaries, selected_model=requested_model)
+    usage_summary["source"] = "llm_client"
+    usage_summary["provider"] = getattr(llm_config, "provider", "") if llm_config is not None else ""
+    return assignments, usage_summary
 
 
 def build_module_profile(file_index: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -569,12 +618,14 @@ def scan(
     require_llm: bool,
     file_list: Optional[List[str]] = None,
     max_workers: int = 4,
+    analysis_mode: str = "scan_repo",
 ) -> Tuple[Signals, Dict[str, Evidence], Dict[str, str]]:
     scan_files, all_files, total_files = iter_files(repo, exclude_dirs, max_files)
     if file_list:
         file_paths = [str(p).replace("\\", "/") for p in file_list]
     else:
-        file_paths = [str(p.relative_to(repo)).replace("\\", "/") for p in all_files]
+        # Respect max_files for actual module classification, not just for metrics.
+        file_paths = [str(p.relative_to(repo)).replace("\\", "/") for p in scan_files]
         file_paths = sorted(file_paths)
 
     group_to_files = group_files(file_paths, group_depth)
@@ -589,7 +640,7 @@ def scan(
     )
 
     taxonomy_ref = load_taxonomy_reference()
-    assignments = classify_groups_with_llm(
+    assignments, llm_usage_summary = classify_groups_with_llm(
         group_summaries=group_summaries,
         llm_client=llm_client,
         batch_size=batch_size,
@@ -616,6 +667,10 @@ def scan(
         group_depth=group_depth,
         llm_provider=getattr(getattr(llm_client, "config", None), "provider", ""),
         llm_model=getattr(getattr(llm_client, "config", None), "model", ""),
+        llm_temperature=float(getattr(getattr(llm_client, "config", None), "temperature", 0.0) or 0.0),
+        max_workers=max_workers,
+        analysis_mode=analysis_mode,
+        llm_usage_summary=llm_usage_summary,
         group_assignments=assignments,
     )
     return signals, evidences, file_index
@@ -688,6 +743,8 @@ def main() -> int:
     ap.add_argument("--min-file-score", type=int, default=1, help="Minimum file score for module inclusion")
     ap.add_argument("--llm-provider", default="deepseek", help="LLM provider (openai, deepseek)")
     ap.add_argument("--llm-model", default="", help="LLM model name (optional)")
+    ap.add_argument("--llm-temperature", type=float, default=0.1, help="LLM temperature")
+    ap.add_argument("--analysis-mode", default="scan_repo", help="Label written into signals.json for provenance")
     ap.add_argument("--require-llm", action="store_true", help="Fail if LLM is unavailable or returns invalid JSON")
     ap.add_argument("--file-list", default=None, help="Optional JSON file with relative paths to include in module mapping")
     args = ap.parse_args()
@@ -701,6 +758,8 @@ def main() -> int:
         raise SystemExit("group-depth must be >= 1")
     if args.snippet_bytes < 1:
         raise SystemExit("snippet-bytes must be >= 1")
+    if args.max_workers < 1:
+        raise SystemExit("max-workers must be >= 1")
 
     if not _ensure_llm_import():
         raise SystemExit("LLM client is unavailable. Install dependencies or use the editable install.")
@@ -716,7 +775,11 @@ def main() -> int:
             if not isinstance(file_list, list):
                 raise SystemExit(f"file-list must be a JSON list: {file_list_path}")
 
-    llm_config = LLMConfig(provider=args.llm_provider, model=args.llm_model)
+    llm_config = LLMConfig(
+        provider=args.llm_provider,
+        model=args.llm_model,
+        temperature=args.llm_temperature,
+    )
     llm_client = create_llm_client(llm_config)
 
     signals, evidences, file_index = scan(
@@ -733,6 +796,7 @@ def main() -> int:
         require_llm=args.require_llm,
         file_list=file_list,
         max_workers=args.max_workers,
+        analysis_mode=args.analysis_mode,
     )
     write_outputs(out_dir, signals, evidences, file_index, min_file_score=args.min_file_score)
     print(f"Wrote: {out_dir / 'module_map.json'}")

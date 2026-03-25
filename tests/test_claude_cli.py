@@ -522,6 +522,49 @@ def test_aggregate_usage_summaries_preserves_selected_model_for_top_level_usage(
     assert aggregate["output_tokens"] == 8
 
 
+def test_aggregate_usage_summaries_preserves_explicit_call_totals_for_retried_raw_summary():
+    aggregate = aggregate_usage_summaries(
+        [
+            {
+                "sessions_total": 2,
+                "calls_total": 2,
+                "selected_model_usage": {
+                    "model": "deepseek-chat",
+                    "input_tokens": 7,
+                    "output_tokens": 8,
+                    "cost_usd": 0.4,
+                },
+                "total_cost_usd": 0.4,
+            }
+        ]
+    )
+
+    assert aggregate["sessions_total"] == 2
+    assert aggregate["calls_total"] == 2
+    assert aggregate["calls_with_selected_model_usage"] == 1
+
+
+def test_aggregate_usage_summaries_preserves_fallback_metadata():
+    aggregate = aggregate_usage_summaries(
+        [
+            {
+                "source": "llm_client",
+                "provider": "deepseek",
+                "selected_model": "deepseek-chat",
+                "selected_models": ["deepseek-chat"],
+                "calls_total": 1,
+                "fallback_used": True,
+                "fallback_from_provider": "lab",
+                "fallback_to_provider": "deepseek",
+            }
+        ]
+    )
+
+    assert aggregate["fallback_used"] is True
+    assert aggregate["fallback_from_provider"] == "lab"
+    assert aggregate["fallback_to_provider"] == "deepseek"
+
+
 def test_merge_aggregated_usage_summaries_combines_totals():
     merged = merge_aggregated_usage_summaries(
         [
@@ -573,6 +616,27 @@ def test_merge_aggregated_usage_summaries_combines_totals():
     assert merged["input_tokens"] == 11
     assert merged["cost_usd"] == 0.75
     assert merged["request_cost_usd"] == 0.9
+
+
+def test_merge_aggregated_usage_summaries_preserves_fallback_metadata():
+    merged = merge_aggregated_usage_summaries(
+        [
+            {
+                "source": "llm_client",
+                "provider": "deepseek",
+                "selected_model": "deepseek-chat",
+                "selected_models": ["deepseek-chat"],
+                "calls_total": 1,
+                "fallback_used": True,
+                "fallback_from_provider": "lab",
+                "fallback_to_provider": "deepseek",
+            }
+        ]
+    )
+
+    assert merged["fallback_used"] is True
+    assert merged["fallback_from_provider"] == "lab"
+    assert merged["fallback_to_provider"] == "deepseek"
 
 
 def test_merge_aggregated_usage_summaries_does_not_carry_provider_into_mixed_sources():
@@ -659,41 +723,6 @@ def test_merge_aggregated_usage_summaries_preserves_mixed_requested_model():
     assert merged["provider"] == "deepseek"
     assert merged["requested_model"] == "mixed"
     assert merged["selected_model"] == "mixed"
-
-
-def test_merge_aggregated_usage_summaries_preserves_fallback_provenance():
-    merged = merge_aggregated_usage_summaries(
-        [
-            {
-                "source": "llm_client",
-                "provider": "lab",
-                "requested_model": "DeepSeek-V3.2",
-                "selected_model": "deepseek-chat",
-                "selected_models": ["deepseek-chat"],
-                "fallback_used": True,
-                "fallback_from_provider": "lab",
-                "fallback_to_provider": "deepseek",
-                "calls_total": 1,
-                "sessions_total": 1,
-            },
-            {
-                "source": "llm_client",
-                "provider": "lab",
-                "requested_model": "DeepSeek-V3.2",
-                "selected_model": "deepseek-chat",
-                "selected_models": ["deepseek-chat"],
-                "fallback_used": True,
-                "fallback_from_provider": "lab",
-                "fallback_to_provider": "deepseek",
-                "calls_total": 2,
-                "sessions_total": 2,
-            },
-        ]
-    )
-
-    assert merged["fallback_used"] is True
-    assert merged["fallback_from_provider"] == "lab"
-    assert merged["fallback_to_provider"] == "deepseek"
 
 
 def test_coerce_aggregated_usage_summary_preserves_zero_call_raw_usage():
@@ -861,9 +890,6 @@ def test_coerce_aggregated_usage_summary_preserves_explicit_top_level_fallback_p
             "source": "claude_cli",
             "sessions_total": 2,
             "calls_total": 2,
-            "fallback_used": True,
-            "fallback_from_provider": "lab",
-            "fallback_to_provider": "deepseek",
             "calls_with_session_usage": 0,
             "calls_with_top_level_usage_fallback": 2,
             "calls_missing_usage": 0,
@@ -885,9 +911,6 @@ def test_coerce_aggregated_usage_summary_preserves_explicit_top_level_fallback_p
     )
 
     assert summary["calls_total"] == 2
-    assert summary["fallback_used"] is True
-    assert summary["fallback_from_provider"] == "lab"
-    assert summary["fallback_to_provider"] == "deepseek"
     assert summary["calls_with_session_usage"] == 0
     assert summary["calls_with_top_level_usage_fallback"] == 2
     assert summary["calls_with_selected_model_usage_session_fallback"] == 0
@@ -1145,6 +1168,44 @@ def test_run_claude_cli_falls_back_to_plain_text_when_json_output_is_unsupported
     assert saved_record["fallback_from_json_output"] is True
     assert saved_record["prior_attempts"][0]["output_format"] == "json"
     assert saved_record["prior_attempts"][0]["command"][-1].startswith("<prompt-redacted:")
+
+
+def test_run_claude_cli_counts_failed_plain_text_fallback_attempt(monkeypatch, tmp_path):
+    record_path = tmp_path / "claude_cli_invocation.json"
+    commands = []
+
+    class _JsonUnsupportedResult:
+        returncode = 2
+        stdout = ""
+        stderr = "error: unexpected argument '--output-format' found"
+
+    class _PlainTextFailureResult:
+        returncode = 1
+        stdout = ""
+        stderr = "plain text fallback failed"
+
+    results = [_JsonUnsupportedResult(), _PlainTextFailureResult()]
+
+    def _fake_run(cmd, *args, **kwargs):
+        commands.append(cmd)
+        return results.pop(0)
+
+    monkeypatch.setattr("utils.claude_cli.subprocess.run", _fake_run)
+
+    response = run_claude_cli(
+        prompt="fallback failure",
+        cwd=str(tmp_path),
+        record_path=record_path,
+        allow_plain_text_fallback=True,
+    )
+
+    assert response.success is False
+    assert response.output_format == "text"
+    assert response.fallback_from_json_output is True
+    assert len(response.prior_attempts or []) == 1
+    assert len(commands) == 2
+    assert response.usage_summary["sessions_total"] == 2
+    assert response.usage_summary["calls_total"] == 2
 
 
 def test_run_claude_cli_marks_zero_exit_non_json_as_success(monkeypatch, tmp_path):

@@ -74,8 +74,8 @@ class ProfileStorageManager:
             write_atomic_json(path, data)
             return True
         except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(f"Failed to write JSON file {path}: {exc}")
-            return False
+            logger.error(f"Failed to write JSON file {path}: {exc}")
+            raise RuntimeError(f"Failed to write JSON file {path}") from exc
 
     def _read_text(self, path: Path) -> Optional[str]:
         """Read text file content."""
@@ -91,8 +91,8 @@ class ProfileStorageManager:
             write_atomic_text(path, content)
             return True
         except Exception as exc:  # pylint: disable=broad-except
-            logger.warning(f"Failed to write text file {path}: {exc}")
-            return False
+            logger.error(f"Failed to write text file {path}: {exc}")
+            raise RuntimeError(f"Failed to write text file {path}") from exc
     
     # ==================== Metadata management ====================
     

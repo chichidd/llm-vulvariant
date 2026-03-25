@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from scanner.checker.skill_checker import (
     SkillExploitabilityChecker,
@@ -273,7 +274,11 @@ def test_build_prompt_uses_ny_api_key_when_openai_proxy_env_is_set(monkeypatch, 
         repo_path=tmp_path,
     )
 
-    assert "API_KEY: ny-proxy-key" in prompt
+    assert "NY_API_KEY" in prompt
+    assert "-e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY" in prompt
+    assert 'DEEPSEEK_API_KEY="<API_KEY>"' not in prompt
+    assert 'OPENAI_API_KEY="<API_KEY>"' not in prompt
+    assert "ny-proxy-key" not in prompt
 
 
 def test_strip_inline_json_objects_removes_nested_payload_once():
@@ -446,6 +451,40 @@ def test_analyze_single_vuln_ignores_stale_output_file(monkeypatch, tmp_path):
     assert result["claude_cli_record_path"].endswith("claude_cli_invocation.json")
 
 
+def test_analyze_single_vuln_fails_closed_when_result_path_prep_fails(monkeypatch, tmp_path):
+    checker = _checker()
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    (evidence_dir / "analysis_output.json").write_text(
+        json.dumps({"verdict": "EXPLOITABLE", "confidence": "high"}),
+        encoding="utf-8",
+    )
+
+    claude_calls = []
+
+    def _raise_prepare_error(result_json_path: Path) -> None:
+        claude_calls.append(str(result_json_path))
+        raise RuntimeError("Failed to prepare result file")
+
+    def _unexpected_run(prompt, record_path=None):
+        raise AssertionError("Claude should not run when result path preparation fails")
+
+    monkeypatch.setattr(checker, "_prepare_result_json_path", _raise_prepare_error)
+    monkeypatch.setattr(checker, "_run_claude", _unexpected_run)
+
+    result = checker._analyze_single_vuln(
+        vuln={"file_path": "x.py", "vulnerability_type": "x"},
+        finding_id="vuln_000",
+        repo_path=tmp_path,
+        evidence_dir=evidence_dir,
+    )
+
+    assert claude_calls == [str(evidence_dir / "analysis_output.json")]
+    assert result["verdict"] == "ERROR"
+    assert "Failed to prepare result file" in result.get("error", "")
+    assert result["claude_cli_record_path"].endswith("claude_cli_invocation.json")
+
+
 def test_run_claude_prefers_observed_model_usage_over_hint(monkeypatch, tmp_path):
     checker = _checker()
 
@@ -507,7 +546,7 @@ def test_run_claude_json_output_flag_error_counts_zero_llm_calls(monkeypatch, tm
     assert success is False
     assert payload is None
     assert len(commands) == 1
-    assert llm_usage["calls_total"] == 0
+    assert llm_usage["calls_total"] == 1
 
 
 def test_run_claude_preserves_zero_calls_for_pre_spawn_failure(monkeypatch, tmp_path):
@@ -921,6 +960,27 @@ def test_init_or_load_results_refreshes_total_vulnerabilities_for_changed_findin
 
     assert loaded["metadata"]["total_vulnerabilities"] == 2
     assert loaded["metadata"]["completed_at"] is None
+
+
+def test_init_or_load_results_reinitializes_on_corrupt_existing_output(tmp_path):
+    checker = _checker()
+    output_path = tmp_path / "exploitability.json"
+    output_path.write_text("{not-json", encoding="utf-8")
+    current_findings, findings_signature = _findings_context([{"file_path": "a.py"}])
+
+    loaded = checker._init_or_load_results(
+        output_path=output_path,
+        findings_path=tmp_path / "findings.json",
+        repo_path=tmp_path,
+        software_profile_path=None,
+        total_vulns=1,
+        current_findings=current_findings,
+        findings_signature=findings_signature,
+    )
+
+    assert loaded["metadata"]["total_vulnerabilities"] == 1
+    assert loaded["metadata"]["completed_at"] is None
+    assert loaded["results"] == []
 
 
 def test_get_exploitability_output_state_for_findings_downgrades_changed_signature(tmp_path):

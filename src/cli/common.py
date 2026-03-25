@@ -29,6 +29,7 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stderr,
+        force=True,
     )
     set_global_log_level(level)
 

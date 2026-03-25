@@ -7,8 +7,10 @@ Software Profile Generator (Refactored)
 import yaml
 import json
 import re
+import shutil
 import threading
 import hashlib
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -23,8 +25,11 @@ from utils.git_utils import (
     has_uncommitted_changes,
     restore_git_position,
 )
+from utils.io_utils import write_atomic_text
 from utils.logger import get_logger
+from utils.repo_lock import hold_repo_lock
 from utils.claude_cli import coerce_aggregated_usage_summary, merge_aggregated_usage_summaries
+from profiler.fingerprint import build_software_profile_fingerprint, profile_fingerprint_matches
 
 from .models import (
     DEFAULT_FILE_EXTENSIONS,
@@ -46,6 +51,7 @@ class SoftwareProfiler:
     
     _detection_rules_cache: Dict[tuple[Path, str], Dict[str, Any]] = {}
     _rules_lock = threading.Lock()
+    _RESUME_STATE_FILENAME = "software_profile_resume_state.json"
     _C_API_ALIASES = {
         "open": {"fopen"},
         "read": {"fread"},
@@ -215,27 +221,25 @@ class SoftwareProfiler:
     @classmethod
     def _load_detection_rules(cls, rules_path: Path = None, output_dir: Path = None) -> Dict[str, Any]:
         """加载检测规则配置文件"""
-        _empty_rule = {'data_sources': {}, 'data_formats': {}, 'processing_operations': {}}
+        _ = output_dir
         resolved_rules_path = rules_path
         if resolved_rules_path is None:
             resolved_rules_path = _path_config['repo_root'] / "config" / "software_profile_rule.yaml"
-            if output_dir and Path(output_dir).exists():
-                save_config_path = Path(output_dir) / "software_profile_rule.yaml"
-                if save_config_path.exists():
-                    logger.info(f"Loading saved config from: {save_config_path}")
-                    resolved_rules_path = save_config_path
         resolved_rules_path = Path(resolved_rules_path).expanduser()
-        resolved_cache_path = resolved_rules_path.resolve()
+        if not resolved_rules_path.exists():
+            raise FileNotFoundError(f"Detection rules file not found: {resolved_rules_path}")
 
         try:
-            raw_rules_text = (
-                resolved_rules_path.read_text(encoding='utf-8')
-                if resolved_rules_path.exists()
-                else ""
-            )
-        except Exception as e:
-            logger.error(f"Failed to read detection rules: {e}")
-            raw_rules_text = ""
+            resolved_cache_path = resolved_rules_path.resolve()
+            raw_rules_text = resolved_rules_path.read_text(encoding='utf-8')
+        except OSError as exc:
+            raise RuntimeError(
+                f"Failed to read detection rules file {resolved_rules_path}: {exc}"
+            ) from exc
+
+        if not raw_rules_text.strip():
+            raise RuntimeError(f"Detection rules file is empty: {resolved_rules_path}")
+
         cache_key = (
             resolved_cache_path,
             hashlib.sha1(raw_rules_text.encode('utf-8')).hexdigest(),
@@ -245,36 +249,193 @@ class SoftwareProfiler:
             if cache_key in cls._detection_rules_cache:
                 return cls._detection_rules_cache[cache_key]
             try:
-                if raw_rules_text:
-                    loaded_rules = yaml.safe_load(raw_rules_text)
-                    if not isinstance(loaded_rules, dict):
-                        loaded_rules = _empty_rule
-                    logger.info(f"Loaded detection rules from {resolved_rules_path}")
-                else:
-                    logger.warning(f"Detection rules file not found: {resolved_rules_path}")
-                    loaded_rules = _empty_rule
-            except Exception as e:
-                logger.error(f"Failed to load detection rules: {e}")
-                loaded_rules = _empty_rule
+                loaded_rules = yaml.safe_load(raw_rules_text)
+            except yaml.YAMLError as exc:
+                raise RuntimeError(
+                    f"Failed to parse detection rules file {resolved_rules_path}: {exc}"
+                ) from exc
+            if not isinstance(loaded_rules, dict):
+                raise RuntimeError(
+                    f"Detection rules file must contain a YAML mapping: {resolved_rules_path}"
+                )
+            logger.info(f"Loaded detection rules from {resolved_rules_path}")
             cls._detection_rules_cache[cache_key] = loaded_rules
             return loaded_rules
     
     def _save_config_to_output_dir(self):
         """将当前配置保存到输出目录"""
-        if not self.output_dir:
+        if not self.output_dir or not self.storage_manager:
             return
-        
+        path_parts = getattr(self, "_current_profile_path_parts", None)
+        if not path_parts:
+            return
+
         try:
-            config_save_path = self.output_dir / "software_profile_rule.yaml"
-            # 直接保存完整的配置，确保所有内容都被保存
-            config_save_path.write_text(
-                yaml.dump(self._detection_rules, allow_unicode=True, default_flow_style=False),
-                encoding='utf-8',
+            config_save_path = (
+                self.storage_manager._get_profile_dir(*path_parts)  # pylint: disable=protected-access
+                / "software_profile_rule.yaml"
             )
-            
+            write_atomic_text(
+                config_save_path,
+                yaml.dump(self._detection_rules, allow_unicode=True, default_flow_style=False),
+            )
             logger.info(f"Saved configuration to: {config_save_path}")
         except Exception as e:
             logger.warning(f"Failed to save config: {e}")
+
+    @staticmethod
+    def _has_valid_modules(modules_result: Optional[Dict[str, Any]]) -> bool:
+        """Return whether module analysis produced a reusable non-empty module list."""
+        return (
+            isinstance(modules_result, dict)
+            and isinstance(modules_result.get("modules"), list)
+            and bool(modules_result.get("modules"))
+        )
+
+    def _build_profile_fingerprint(self) -> Dict[str, Any]:
+        """Build the cache invalidation fingerprint for software profiles."""
+        readme_files = getattr(
+            self,
+            "readme_files",
+            ["README.md", "README.rst", "README.txt", "README"],
+        )
+        dependency_files = getattr(
+            self,
+            "dependency_files",
+            ["pyproject.toml", "setup.py", "setup.cfg", "package.json"],
+        )
+        return build_software_profile_fingerprint(
+            detection_rules=self._detection_rules,
+            repo_analyzer_config=self.repo_analyzer_config,
+            module_analyzer_config=self.module_analyzer_config,
+            file_extensions=self.file_extensions,
+            exclude_dirs=self.exclude_dirs,
+            readme_files=readme_files,
+            dependency_files=dependency_files,
+            llm_client=self.llm_client,
+            repo_path=getattr(self, "_current_fingerprint_repo_path", None),
+            repo_version=getattr(self, "_current_fingerprint_repo_version", None),
+        )
+
+    def _load_cached_profile_if_compatible(
+        self,
+        *,
+        path_parts: tuple,
+        expected_fingerprint: Dict[str, Any],
+    ) -> Optional[SoftwareProfile]:
+        """Load a cached final profile only when it is complete and fingerprint-compatible."""
+        if not self.storage_manager:
+            return None
+        existing_profile_json = self.storage_manager.load_final_result(
+            "software_profile.json",
+            *path_parts,
+        )
+        if not existing_profile_json:
+            return None
+        try:
+            cached_profile = SoftwareProfile.from_dict(json.loads(existing_profile_json))
+        except Exception as exc:
+            logger.warning(f"Failed to parse cached software profile for {path_parts}: {exc}")
+            return None
+        if not getattr(cached_profile, "modules", []):
+            logger.info("Cached software profile is empty, regenerating...")
+            return None
+        if profile_fingerprint_matches(cached_profile, expected_fingerprint):
+            logger.info("Found completed profile with matching fingerprint, loading from cache...")
+            return cached_profile
+        logger.info("Cached software profile fingerprint is stale, regenerating...")
+        return None
+
+    def _resume_state_path(self) -> Optional[Path]:
+        """Return the current resume-state path when output storage is enabled."""
+        if not self.storage_manager:
+            return None
+        path_parts = getattr(self, "_current_profile_path_parts", None)
+        if not path_parts:
+            return None
+        return self.storage_manager._get_profile_dir(*path_parts) / self._RESUME_STATE_FILENAME  # pylint: disable=protected-access
+
+    def _load_resume_state_fingerprint(self) -> Optional[Dict[str, Any]]:
+        """Load the last saved resume-state fingerprint for the current profile path."""
+        if not self.storage_manager:
+            return None
+        path_parts = getattr(self, "_current_profile_path_parts", None)
+        if not path_parts:
+            return None
+        raw_state = self.storage_manager.load_final_result(self._RESUME_STATE_FILENAME, *path_parts)
+        if not raw_state:
+            return None
+        try:
+            state = json.loads(raw_state)
+        except Exception as exc:
+            logger.warning(f"Failed to parse resume state for {path_parts}: {exc}")
+            return None
+        fingerprint = state.get("profile_fingerprint", {}) if isinstance(state, dict) else {}
+        return fingerprint if isinstance(fingerprint, dict) else None
+
+    def _save_resume_state_fingerprint(self, expected_fingerprint: Dict[str, Any]) -> None:
+        """Persist the active fingerprint so stale checkpoints trigger full regeneration."""
+        if not self.storage_manager:
+            return
+        path_parts = getattr(self, "_current_profile_path_parts", None)
+        if not path_parts:
+            return
+        payload = {
+            "profile_fingerprint": expected_fingerprint,
+        }
+        self.storage_manager.save_final_result(
+            self._RESUME_STATE_FILENAME,
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            *path_parts,
+        )
+
+    def _clear_incompatible_resume_artifacts(self) -> None:
+        """Remove stale intermediate artifacts before starting a fresh compatible run."""
+        if not self.storage_manager:
+            return
+        path_parts = getattr(self, "_current_profile_path_parts", None)
+        if not path_parts:
+            return
+
+        clear_hook = getattr(self.storage_manager, "clear_profile_state", None)
+        if callable(clear_hook):
+            clear_hook(*path_parts)
+            return
+
+        profile_dir = self.storage_manager._get_profile_dir(*path_parts)  # pylint: disable=protected-access
+        if not profile_dir:
+            return
+
+        for directory_name in ("checkpoints", "conversations"):
+            artifact_dir = profile_dir / directory_name
+            if artifact_dir.exists():
+                try:
+                    shutil.rmtree(artifact_dir)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"Failed to clear stale profile state: {artifact_dir}"
+                    ) from exc
+
+        stale_profile_path = profile_dir / "software_profile.json"
+        if stale_profile_path.exists():
+            try:
+                stale_profile_path.unlink()
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Failed to clear stale final profile: {stale_profile_path}"
+                ) from exc
+
+    @staticmethod
+    def _resume_state_matches(
+        saved_fingerprint: Optional[Dict[str, Any]],
+        expected_fingerprint: Dict[str, Any],
+    ) -> bool:
+        """Return whether saved resume-state fingerprint still matches current inputs."""
+        if not isinstance(saved_fingerprint, dict):
+            return False
+        saved_hash = str(saved_fingerprint.get("hash", "")).strip()
+        expected_hash = str(expected_fingerprint.get("hash", "")).strip()
+        return bool(saved_hash) and bool(expected_hash) and saved_hash == expected_hash
     
     def __init__(
         self,
@@ -364,6 +525,9 @@ class SoftwareProfiler:
                 excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,
                 code_extensions=self.module_analyzer_config.get('code_extensions') or None,
                 max_key_functions=self.module_analyzer_config.get('skill_max_key_functions', 12),
+                validation_mode=self.module_analyzer_config.get('validation_mode', False),
+                validation_temperature=self.module_analyzer_config.get('validation_temperature', 0.0),
+                validation_max_workers=self.module_analyzer_config.get('validation_max_workers', 1),
             )
         else:  # 'agent' or default
             logger.info("Using agent-based module analyzer")
@@ -382,29 +546,15 @@ class SoftwareProfiler:
         """生成完整的软件画像"""
         repo_path = Path(repo_path)
         repo_name = repo_path.name
+        lock_purpose = f"software_profile:{(target_version or 'current')[:12]}"
         
         logger.info(f"Starting profile generation for: {repo_name}")
-        self._save_config_to_output_dir()
-
-        if target_version and has_uncommitted_changes(str(repo_path)):
-            raise RuntimeError(
-                f"Repository {repo_name} has local changes; please clean/stash before profiling {target_version[:8]}"
-            )
-        
-        # 获取版本信息
-        original_version = get_git_commit(str(repo_path))
-        original_restore_target = get_git_restore_target(str(repo_path))
-        changed_commit = False
-        if target_version:
-            logger.info(f"Target version: {target_version[:8]}...")
-            if original_version != target_version:
-                logger.info(f"Checking out to target version...")
-                if not checkout_commit(str(repo_path), target_version):
-                    raise RuntimeError(f"Failed to checkout to: {target_version}")
-                changed_commit = True
-        try:
+        with hold_repo_lock(repo_path, purpose=lock_purpose):
+            original_version = get_git_commit(str(repo_path))
+            original_restore_target = get_git_restore_target(str(repo_path))
+            changed_commit = False
             version = target_version if target_version else original_version
-            
+
             if version:
                 logger.info(f"Git commit hash: {version[:8]}...")
             else:
@@ -412,29 +562,80 @@ class SoftwareProfiler:
                 version = "unknown"
 
             path_parts = (repo_name, version) if version else (repo_name,)
-            if self.storage_manager and not force_regenerate:
-                existing_profile_json = self.storage_manager.load_final_result("software_profile.json", *path_parts)
-                if existing_profile_json:
-                    logger.info("Found completed profile, loading from cache...")
-                    return SoftwareProfile.from_dict(json.loads(existing_profile_json))
-
-            logger.info("Performing full analysis...")
-            profile = self._generate_profile_full(
-                repo_path,
-                repo_name,
-                version,
-                force_regenerate=force_regenerate,
+            self._current_profile_path_parts = path_parts
+            if has_uncommitted_changes(str(repo_path)):
+                raise RuntimeError(
+                    f"Repository {repo_name} has local changes; please clean/stash before profiling"
+                )
+            if target_version:
+                logger.info(f"Target version: {target_version[:8]}...")
+                needs_checkout = original_version != target_version
+                if needs_checkout and not original_restore_target:
+                    raise RuntimeError(
+                        f"Unable to resolve original git position for {repo_name}; "
+                        f"refuse commit switch to {target_version[:8]}"
+                    )
+                if needs_checkout:
+                    logger.info("Checking out to target version...")
+                    if not checkout_commit(str(repo_path), target_version):
+                        raise RuntimeError(f"Failed to checkout to: {target_version}")
+                    changed_commit = True
+            self._current_fingerprint_repo_path = repo_path
+            self._current_fingerprint_repo_version = get_git_commit(str(repo_path)) or version
+            expected_fingerprint = self._build_profile_fingerprint()
+            storage_lock_path = (
+                self.storage_manager._get_profile_dir(*path_parts)  # pylint: disable=protected-access
+                if self.storage_manager
+                else repo_path
             )
+            storage_lock_purpose = f"software_profile_storage:{repo_name}:{version[:12]}"
+            storage_lock_context = (
+                nullcontext()
+                if Path(storage_lock_path).resolve() == repo_path.resolve()
+                else hold_repo_lock(storage_lock_path, purpose=storage_lock_purpose)
+            )
+            try:
+                with storage_lock_context:
+                    if self.storage_manager and not force_regenerate:
+                        cached_profile = self._load_cached_profile_if_compatible(
+                            path_parts=path_parts,
+                            expected_fingerprint=expected_fingerprint,
+                        )
+                        if cached_profile is not None:
+                            return cached_profile
 
-            logger.info(f"Profile generation completed for: {repo_name}")
-            return profile
-        finally:
-            if changed_commit and original_restore_target:
-                restored = restore_git_position(str(repo_path), original_restore_target)
-                if restored:
-                    logger.info(f"Restored repository to original position: {original_restore_target}")
-                else:
-                    logger.error(f"Failed to restore repository to original position: {original_restore_target}")
+                    resume_state = self._load_resume_state_fingerprint()
+                    self._save_config_to_output_dir()
+                    should_force_full_regeneration = force_regenerate or not self._resume_state_matches(
+                        resume_state,
+                        expected_fingerprint,
+                    )
+                    if should_force_full_regeneration:
+                        # Clear stale checkpoints before persisting the new fingerprint so retries
+                        # only see artifacts produced by the current regeneration attempt.
+                        self._clear_incompatible_resume_artifacts()
+                        self._save_resume_state_fingerprint(expected_fingerprint)
+
+                    logger.info("Performing full analysis...")
+                    profile = self._generate_profile_full(
+                        repo_path,
+                        repo_name,
+                        version,
+                        force_regenerate=should_force_full_regeneration,
+                    )
+                    logger.info(f"Profile generation completed for: {repo_name}")
+                    return profile
+            finally:
+                self._current_fingerprint_repo_path = None
+                self._current_fingerprint_repo_version = None
+                if changed_commit and original_restore_target:
+                    restored = restore_git_position(str(repo_path), original_restore_target)
+                    if restored:
+                        logger.info(f"Restored repository to original position: {original_restore_target}")
+                    else:
+                        raise RuntimeError(
+                            f"Failed to restore repository to original position: {original_restore_target}"
+                        )
     
     def _generate_profile_full(
         self,
@@ -493,16 +694,16 @@ class SoftwareProfiler:
         previous_modules_checkpoint = (
             modules_result
             if isinstance(self.module_analyzer, ModuleAnalyzer)
-            and isinstance(modules_result, dict)
-            and not modules_result.get('modules')
+            and self._has_valid_modules(modules_result)
             else None
         )
         
-        if modules_result and modules_result.get('modules'):
+        has_modules_checkpoint = self._has_valid_modules(modules_result)
+        if has_modules_checkpoint:
             logger.info("Loaded modules from checkpoint")
         else:
-            if modules_result and not modules_result.get('modules'):
-                logger.warning("Loaded modules checkpoint is empty, re-analyzing...")
+            if modules_result is not None:
+                logger.warning("Loaded modules checkpoint is empty or incomplete, re-analyzing...")
             module_analyze_kwargs = {
                 "repo_info": repo_info,
                 "repo_path": repo_path,
@@ -543,8 +744,25 @@ class SoftwareProfiler:
                     previous_llm_calls=prior_module_llm_calls,
                 )
             
-            if self.storage_manager:
+            if self.storage_manager and self._has_valid_modules(modules_result):
                 self.storage_manager.save_checkpoint("modules", modules_result, *path_parts)
+            elif self.storage_manager:
+                logger.warning("Module analysis produced no modules; skipping checkpoint save.")
+
+        analysis_completed = bool(
+            (modules_result or {}).get(
+                "analysis_completed",
+                self._has_valid_modules(modules_result),
+            )
+        )
+        has_module_list = (
+            isinstance(modules_result, dict)
+            and isinstance(modules_result.get("modules"), list)
+        )
+        if not analysis_completed or not has_module_list:
+            raise RuntimeError(
+                f"Module analysis did not produce a valid result for {repo_name}@{version[:12]}"
+            )
             
         # Step 4: 构建软件画像
         logger.info("Step 4/4: Building software profile...")
@@ -578,6 +796,7 @@ class SoftwareProfiler:
             [basic_info_usage_summary, modules_usage_summary]
         )
         llm_usage_summary["source"] = "llm_usage"
+        profile_fingerprint = self._build_profile_fingerprint()
         profile = SoftwareProfile(
             name=repo_name,
             version=version,
@@ -595,7 +814,13 @@ class SoftwareProfiler:
                     "module_analysis": modules_usage_summary,
                 },
                 "llm_usage_summary": llm_usage_summary,
-                "module_analysis_record_path": (modules_result or {}).get("claude_cli_record_path"),
+                "module_analysis_record_path": (
+                    (modules_result or {}).get("module_analysis_record_path")
+                    or (modules_result or {}).get("claude_cli_record_path")
+                ),
+                "module_analysis_mode": (modules_result or {}).get("module_analysis_mode"),
+                "profile_repo_path": str(repo_path.resolve()),
+                "profile_fingerprint": profile_fingerprint,
             },
         )
         

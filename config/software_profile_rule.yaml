@@ -211,6 +211,12 @@ module_analyzer_config:
   # Skill-based analyzer scanning limits
   # - max_key_functions: 模块关键函数数量上限
   skill_max_key_functions: 12
+
+  # 验证模式会绕开 Claude CLI，直接执行 scan_repo.py，并固定低温/低并发参数。
+  # 适合做结果复现、profile 对比和评测；日常 profiling 保持 false。
+  validation_mode: false
+  validation_temperature: 0.0
+  validation_max_workers: 1
   
   # 是否跳过空文件夹
   skip_empty_folders: true

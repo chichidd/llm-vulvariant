@@ -27,6 +27,8 @@ from config import _path_config
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_EMBEDDING_MODEL_NAME = "jinaai--jina-code-embeddings-1.5b"
+
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
 	"""Cosine similarity between two vectors."""
@@ -39,7 +41,7 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
 
 @dataclass
 class EmbeddingRetrievalConfig:
-	model_name: Optional[str] = 'jinaai--jina-code-embeddings-1.5b'
+	model_name: Optional[str] = DEFAULT_EMBEDDING_MODEL_NAME
 	device: Optional[str] = 'cpu'
 	batch_size: int = 32
 	max_length: int = 65536
@@ -55,7 +57,22 @@ class EmbeddingRetriever:
 		config: Optional[EmbeddingRetrievalConfig] = None,
 	):
 		self.config = config or EmbeddingRetrievalConfig()
-		self.model_path = Path(_path_config['embedding_model_path']) / self.config.model_name
+		requested_model_name = self.config.model_name
+		model_name = requested_model_name or DEFAULT_EMBEDDING_MODEL_NAME
+		self.config.model_name = model_name
+		base_model_path = Path(_path_config['embedding_model_path'])
+		direct_model_markers = ("config.json", "tokenizer.json", "modules.json")
+		if base_model_path.is_dir() and any((base_model_path / marker).exists() for marker in direct_model_markers):
+			# A concrete model directory acts as the default model location, but an
+			# explicit non-default override should still select a sibling model directory.
+			if base_model_path.name == model_name:
+				self.model_path = base_model_path
+			elif requested_model_name and model_name != DEFAULT_EMBEDDING_MODEL_NAME:
+				self.model_path = base_model_path.parent / model_name
+			else:
+				self.model_path = base_model_path
+		else:
+			self.model_path = base_model_path / model_name
 
 		if not self.model_path.exists():
 			raise FileNotFoundError(

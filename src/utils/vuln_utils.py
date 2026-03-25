@@ -15,6 +15,7 @@ from .git_utils import (
     restore_git_position,
 )
 from .logger import get_logger
+from .repo_lock import hold_repo_lock
 from utils.llm_utils import extract_function_snippet_based_on_name_with_ast
 
 logger = get_logger(__name__)
@@ -29,6 +30,18 @@ def _resolve_repo_relative_path(
     if not resolved_path.is_absolute():
         resolved_path = _path_config["repo_root"] / resolved_path
     return resolved_path
+
+
+def _resolve_call_chain_source_path(repo_path: Path, file_relative_path: str) -> Path:
+    """Resolve one call-chain source path and keep it inside the repository."""
+    candidate = (repo_path / Path(file_relative_path).expanduser()).resolve(strict=False)
+    try:
+        candidate.relative_to(repo_path.resolve(strict=False))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Call chain file path escapes repository root: {file_relative_path}"
+        ) from exc
+    return candidate
 
 
 def normalize_cve_id(cve_id: Any, index: int | None = None) -> str:
@@ -89,63 +102,92 @@ def read_vuln_data(
         data['commit'] = entry['commit']
         data['cve_id'] = normalize_cve_id(entry.get('cve_id'), entry_index)
         repo_path = resolved_repo_base_path / data['repo_name']
-        restore_target = get_git_restore_target(str(repo_path))
-        switched_commit = False
-        if verbose:
-            logger.info(f"Processing repository: {data['repo_name']} at commit {data['commit']}")
-        try:
-            current_commit = get_git_commit(repo_path)
-            if current_commit != data['commit']:
-                if has_uncommitted_changes(repo_path):
-                    raise RuntimeError(
-                        f"Repository {data['repo_name']} has local changes; "
-                        f"refuse commit switch to {data['commit']}"
-                    )
-                if verbose:
-                    logger.info(
-                        f"Checking out {data['repo_name']} to commit {data['commit']} "
-                        f"(current: {current_commit})"
-                    )
-                if not checkout_commit(repo_path, data['commit']):
-                    raise RuntimeError(
-                        f"Failed to checkout {data['repo_name']} to commit {data['commit']}"
-                    )
-                switched_commit = True
-            else:
-                if verbose:
-                    logger.info(f"{data['repo_name']} is already at commit {data['commit']}")
-
-            call_chain_records: List[Dict[str, Any]] = []
-            for callsite in entry['call_chain']:
-                if '#' in callsite:
-                    file_relative_path, function_name = callsite.split('#', 1)
-
-                    code_content = (repo_path / file_relative_path).read_text(encoding='utf-8', errors='ignore')
-                    snippet = extract_function_snippet_based_on_name_with_ast(
-                            code_content,
-                            function_name,
-                            with_line_numbers=True,
-                            line_number_format="standard"
+        lock_purpose = f"read_vuln_data:{data['commit'][:12]}"
+        with hold_repo_lock(repo_path, purpose=lock_purpose):
+            restore_target = get_git_restore_target(str(repo_path))
+            switched_commit = False
+            analysis_error: Exception | None = None
+            restore_error: RuntimeError | None = None
+            if verbose:
+                logger.info(f"Processing repository: {data['repo_name']} at commit {data['commit']}")
+            try:
+                current_commit = get_git_commit(repo_path)
+                if current_commit != data['commit']:
+                    if not restore_target:
+                        raise RuntimeError(
+                            f"Unable to resolve original git position for {data['repo_name']}; "
+                            f"refuse commit switch to {data['commit']}"
+                        )
+                    if has_uncommitted_changes(repo_path):
+                        raise RuntimeError(
+                            f"Repository {data['repo_name']} has local changes; "
+                            f"refuse commit switch to {data['commit']}"
                         )
                     if verbose:
-                        logger.info(f"\n{'-'*40}\nFile: {file_relative_path}, Function: {function_name}\n{'-'*40}")
-                        logger.info(snippet)
-                    call_chain_records.append(
-                        {
-                            'file_path': file_relative_path,
-                            'function_name': function_name,
-                            'file_content': code_content,
-                            'code_snippet': snippet,
-                        }
-                    )
+                        logger.info(
+                            f"Checking out {data['repo_name']} to commit {data['commit']} "
+                            f"(current: {current_commit})"
+                        )
+                    if not checkout_commit(repo_path, data['commit']):
+                        raise RuntimeError(
+                            f"Failed to checkout {data['repo_name']} to commit {data['commit']}"
+                        )
+                    switched_commit = True
                 else:
-                    call_chain_records.append({'vuln_sink': callsite})
-            data['call_chain'] = call_chain_records
-            data['payload'] = entry.get('payload')
-            resolved_entries.append(data)
-        finally:
-            # Restore the repository even when snippet extraction fails so later
-            # pipeline stages do not inherit a detached or stale checkout.
-            if switched_commit and restore_target:
-                restore_git_position(repo_path, restore_target)
+                    if verbose:
+                        logger.info(f"{data['repo_name']} is already at commit {data['commit']}")
+
+                call_chain_records: List[Dict[str, Any]] = []
+                for callsite in entry['call_chain']:
+                    if '#' in callsite:
+                        file_relative_path, function_name = callsite.split('#', 1)
+
+                        source_path = _resolve_call_chain_source_path(repo_path, file_relative_path)
+                        code_content = source_path.read_text(encoding='utf-8', errors='ignore')
+                        snippet = extract_function_snippet_based_on_name_with_ast(
+                                code_content,
+                                function_name,
+                                with_line_numbers=True,
+                                line_number_format="standard"
+                            )
+                        if verbose:
+                            logger.info(f"\n{'-'*40}\nFile: {file_relative_path}, Function: {function_name}\n{'-'*40}")
+                            logger.info(snippet)
+                        call_chain_records.append(
+                            {
+                                'file_path': file_relative_path,
+                                'function_name': function_name,
+                                'file_content': code_content,
+                                'code_snippet': snippet,
+                            }
+                        )
+                    else:
+                        call_chain_records.append({'vuln_sink': callsite})
+                data['call_chain'] = call_chain_records
+                data['payload'] = entry.get('payload')
+                resolved_entries.append(data)
+            except Exception as exc:
+                analysis_error = exc
+            finally:
+                # Restore the repository even when snippet extraction fails so later
+                # pipeline stages do not inherit a detached or stale checkout.
+                if switched_commit and restore_target:
+                    try:
+                        restored = restore_git_position(repo_path, restore_target)
+                    except Exception as exc:
+                        restore_error = RuntimeError(
+                            f"Failed to restore {data['repo_name']} to {restore_target} after reading vulnerability data: {exc}"
+                        )
+                    else:
+                        if not restored:
+                            restore_error = RuntimeError(
+                                f"Failed to restore {data['repo_name']} to {restore_target} after reading vulnerability data"
+                            )
+            # Surface restore failures even when the analysis body already failed.
+            if restore_error is not None:
+                if analysis_error is not None:
+                    raise restore_error from analysis_error
+                raise restore_error
+            if analysis_error is not None:
+                raise analysis_error.with_traceback(analysis_error.__traceback__)
     return resolved_entries

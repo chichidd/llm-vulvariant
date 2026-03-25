@@ -595,8 +595,8 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
             f"This report presents the security analysis of **{self.repo_name}** at commit "
             f"`{self.commit_hash[:12]}`. The analysis identified the following:",
             "",
-            f"| Verdict | Count |",
-            f"|---------|-------|",
+            "| Verdict | Count |",
+            "|---------|-------|",
             f"| Exploitable | {summary_counts.get('exploitable', 0)} |",
             f"| Conditionally Exploitable | {summary_counts.get('conditionally_exploitable', 0)} |",
             f"| Library Risk | {summary_counts.get('library_risk', 0)} |",
@@ -615,8 +615,8 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
             lines.extend([
                 "### Docker Verification Results",
                 "",
-                f"| Result | Count |",
-                f"|--------|-------|",
+                "| Result | Count |",
+                "|--------|-------|",
                 f"| Verified Exploitable | {docker_summary.get('verified_exploitable', 0)} |",
                 f"| Partial Verification | {docker_summary.get('partial_verification', 0)} |",
                 f"| Verification Failed | {docker_summary.get('verification_failed', 0)} |",
@@ -638,14 +638,14 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
             "### Setup Steps",
             "",
             "```bash",
-            f"# 1. Clone the repository",
+            "# 1. Clone the repository",
             f"git clone {self.repo_url}.git",
             f"cd {self.repo_name}",
             "",
-            f"# 2. Checkout the vulnerable commit",
+            "# 2. Checkout the vulnerable commit",
             f"git checkout {self.commit_hash}",
             "",
-            f"# 3. Build Docker image",
+            "# 3. Build Docker image",
             f"docker build -t vuln-{self.repo_name.lower()} .",
             "```",
             "",
@@ -697,7 +697,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
             f"- **Analysis started**: {metadata.get('started_at', 'N/A')}",
             f"- **Analysis completed**: {metadata.get('completed_at', 'N/A')}",
             f"- **Total findings analyzed**: {metadata.get('total_vulnerabilities', 0)}",
-            f"- **Tool**: LLM-VulVariant (automated vulnerability variant detection)",
+            "- **Tool**: LLM-VulVariant (automated vulnerability variant detection)",
             "",
             "### Methodology",
             "",
@@ -982,7 +982,7 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         vuln_type_norm = str(vuln_type or "unknown").lower()
         steps = [
             f"1. Open the vulnerable file: `{file_path}`",
-            f"2. Locate the vulnerable code pattern described in the evidence above.",
+            "2. Locate the vulnerable code pattern described in the evidence above.",
         ]
 
         if vuln_type_norm == "deserialization":

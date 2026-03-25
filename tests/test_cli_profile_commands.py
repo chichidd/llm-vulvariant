@@ -165,6 +165,7 @@ def test_vulnerability_main_uses_shared_generation_helper(monkeypatch, tmp_path)
             output_dir=None,
             soft_profile_dir=None,
             repo_base_path=str(repo_root),
+            force_regenerate=False,
             verbose=False,
         ),
     )
@@ -193,13 +194,14 @@ def test_vulnerability_main_uses_shared_generation_helper(monkeypatch, tmp_path)
     monkeypatch.setattr(
         cli_vulnerability,
         "run_vulnerability_profile_generation",
-        lambda *, repo_path, output_dir, llm_client, repo_profile, vuln_entry: captured.update(
+        lambda *, repo_path, output_dir, llm_client, repo_profile, vuln_entry, force_regenerate: captured.update(
             {
                 "repo_path": repo_path,
                 "output_dir": output_dir,
                 "llm_client": llm_client,
                 "repo_profile": repo_profile,
                 "vuln_entry": vuln_entry,
+                "force_regenerate": force_regenerate,
             }
         )
         or fake_profile,
@@ -212,6 +214,7 @@ def test_vulnerability_main_uses_shared_generation_helper(monkeypatch, tmp_path)
     assert captured["vuln_entry"].repo_name == "demo"
     assert captured["vuln_entry"].commit == "abc123"
     assert captured["vuln_entry"].call_chain_str == "src/a.py#entry"
+    assert captured["force_regenerate"] is False
     assert captured["profile"] is fake_profile
 
 
@@ -236,6 +239,7 @@ def test_vulnerability_main_resolves_relative_override_dirs_against_repo_root(mo
             output_dir="results/vuln-out",
             soft_profile_dir="profiles/soft-custom",
             repo_base_path="repos",
+            force_regenerate=False,
             verbose=False,
         ),
     )
@@ -268,10 +272,11 @@ def test_vulnerability_main_resolves_relative_override_dirs_against_repo_root(mo
     monkeypatch.setattr(
         cli_vulnerability,
         "run_vulnerability_profile_generation",
-        lambda *, repo_path, output_dir, llm_client, repo_profile, vuln_entry: captured.update(
+        lambda *, repo_path, output_dir, llm_client, repo_profile, vuln_entry, force_regenerate: captured.update(
             {
                 "repo_path": repo_path,
                 "output_dir": output_dir,
+                "force_regenerate": force_regenerate,
             }
         )
         or fake_profile,
@@ -281,6 +286,7 @@ def test_vulnerability_main_resolves_relative_override_dirs_against_repo_root(mo
     assert captured["base_dir"] == repo_root / "profiles" / "soft-custom"
     assert captured["repo_path"] == repo_root / "repos" / "demo"
     assert captured["output_dir"] == repo_root / "results" / "vuln-out"
+    assert captured["force_regenerate"] is False
 
 
 def test_vulnerability_main_returns_error_when_software_profile_is_missing(monkeypatch, tmp_path) -> None:
@@ -294,6 +300,61 @@ def test_vulnerability_main_returns_error_when_software_profile_is_missing(monke
         "parse_args",
         lambda: Namespace(
             vuln_index=1,
+            vuln_json=str(tmp_path / "vuln.json"),
+            llm_provider="deepseek",
+            llm_name="deepseek-chat",
+            profile_base_path=str(tmp_path / "profiles"),
+            software_profile_dirname="soft",
+            vuln_profile_dirname="vuln",
+            output_dir=None,
+            soft_profile_dir=None,
+            repo_base_path=str(repo_root),
+            force_regenerate=False,
+            verbose=False,
+        ),
+    )
+    monkeypatch.setattr(cli_vulnerability, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "resolve_profile_dirs",
+        lambda **kwargs: (repo_profile_dir, vuln_profile_dir),
+    )
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "read_vuln_data",
+        lambda **kwargs: [
+            {
+                "repo_name": "demo",
+                "commit": "abc123",
+                "call_chain": [{"file_path": "src/a.py", "function_name": "entry"}],
+                "payload": "payload",
+                "cve_id": "CVE-2026-0001",
+            }
+        ],
+    )
+    monkeypatch.setattr(cli_vulnerability, "load_software_profile", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "run_vulnerability_profile_generation",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not run without software profile")),
+    )
+
+    assert cli_vulnerability.main() == 1
+
+
+def test_vulnerability_main_defaults_missing_force_regenerate_to_false(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "repos"
+    (repo_root / "demo").mkdir(parents=True)
+    repo_profile_dir = tmp_path / "profiles" / "soft"
+    vuln_profile_dir = tmp_path / "profiles" / "vuln"
+    captured = {}
+    fake_profile = SimpleNamespace(repo_name="demo")
+
+    monkeypatch.setattr(
+        cli_vulnerability,
+        "parse_args",
+        lambda: Namespace(
+            vuln_index=4,
             vuln_json=str(tmp_path / "vuln.json"),
             llm_provider="deepseek",
             llm_name="deepseek-chat",
@@ -325,14 +386,26 @@ def test_vulnerability_main_returns_error_when_software_profile_is_missing(monke
             }
         ],
     )
-    monkeypatch.setattr(cli_vulnerability, "load_software_profile", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_vulnerability, "load_software_profile", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli_vulnerability, "create_profile_llm_client", lambda provider, model: "llm")
+    monkeypatch.setattr(cli_vulnerability, "display_vulnerability_profile", lambda profile: None)
     monkeypatch.setattr(
         cli_vulnerability,
         "run_vulnerability_profile_generation",
-        lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not run without software profile")),
+        lambda *, repo_path, output_dir, llm_client, repo_profile, vuln_entry, force_regenerate: captured.update(
+            {
+                "repo_path": repo_path,
+                "output_dir": output_dir,
+                "force_regenerate": force_regenerate,
+            }
+        )
+        or fake_profile,
     )
 
-    assert cli_vulnerability.main() == 1
+    assert cli_vulnerability.main() == 0
+    assert captured["repo_path"] == repo_root / "demo"
+    assert captured["output_dir"] == vuln_profile_dir
+    assert captured["force_regenerate"] is False
 
 
 def test_display_vulnerability_profile_handles_non_dict_call_path_steps() -> None:

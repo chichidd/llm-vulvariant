@@ -33,11 +33,16 @@ LLM 驱动的漏洞变种发现与可利用性验证框架。
   │  │   └── software_       │   │  │   ├── agentic_vuln_findings.json             │
   │  │       profile.json    │   │  │   ├── conversation_history.json              │
   │  └── vuln/<repo>/<cve>/  │   │  │   ├── exploitability.json                    │
-  │      └── vulnerability_  │   │  │   ├── reports/security_report.md             │
+  │      └── vulnerability_  │   │  │   ├── reports/security_report.md*            │
   │          profile.json    │   │  │   └── evidence/<finding>/                    │
-  │                          │   │  └── exploitable_findings_<run-id>.*            │
+  │                          │   │  └── <submission-output-dir>/<prefix>_<run-id>[_strict].* │
   └──────────────────────────┘   └──────────────────────────────────────────────────┘
 ```
+
+说明：
+- `reports/*.md` 仅在 `cli.exploitability --generate-report` 时生成
+- `<submission-output-dir>/<prefix>_<run-id>[_strict].*` 仅在设置 `--submission-output-dir` 时写出
+- 使用 `--report-only-exploitable` 时，聚合提交文件名会追加 `_strict`
 
 ### 各阶段说明
 
@@ -113,6 +118,7 @@ pip install transformers sentence-transformers torch
 |------|------|
 | `DEEPSEEK_API_KEY` | Deepseek provider API 密钥 |
 | `NY_API_KEY` | OpenAI provider API 密钥（当前配置） |
+| `LAB_LLM_API_KEY` | `lab` provider API 密钥，对应 `https://hkucvm.dynv6.net/v1` |
 
 ---
 
@@ -135,13 +141,16 @@ pip install transformers sentence-transformers torch
 
 ### LLM 配置 — `llm_config.yaml`
 
-支持的 provider：`deepseek`、`openai`。配置包含温度、重试策略、最大 token 数等。
+支持的 provider：`deepseek`、`openai`、`lab`。其中 `lab` 默认使用 `https://hkucvm.dynv6.net/v1` 和 `LAB_LLM_API_KEY`。配置包含温度、重试策略、最大 token 数等。
 
 ### 软件画像规则 — `software_profile_rule.yaml`
 
 | 配置项 | 说明 |
 |--------|------|
 | `module_analyzer_config.analyzer_type` | `skill`（使用 Claude Skill）或 `agent` |
+| `module_analyzer_config.validation_mode` | `true` 时直接运行 `scan_repo.py`，固定验证参数，适合复现 |
+| `module_analyzer_config.validation_temperature` | 验证模式下 module analyzer 的温度 |
+| `module_analyzer_config.validation_max_workers` | 验证模式下 module analyzer 的并发 worker 数 |
 | `repo_analyzer_config.languages` | `"auto"` 或语言列表 |
 | `excluded_folders` / `code_extensions` | 文件扫描范围控制 |
 
@@ -225,6 +234,9 @@ python -m cli.exploitability \
 `results/exploitability/exploitable_findings_demo-001_strict.csv`、
 `results/exploitability/exploitable_findings_demo-001_strict_submission_index.json` 和
 `results/exploitability/exploitable_findings_demo-001_strict_exploitable_security_report.md`。
+如果不使用 `--report-only-exploitable`，相同文件名不会带 `_strict` 后缀。
+
+如果你要使用新增的 `lab` provider，只需要把命令里的 `--llm-provider deepseek` 改成 `--llm-provider lab`，并提前导出 `LAB_LLM_API_KEY`。
 
 ### 6.2 自动目标选择扫描
 
@@ -256,8 +268,7 @@ batch-scanner \
   --scan-output-dir results/full-batch-scan \
   --similarity-threshold 0.70 \
   --fallback-top-n 3 \
-  --max-workers 8 \
-  --scan-workers 4 \
+  --jobs 4 \
   --max-iterations-cap 10 \
   --llm-provider deepseek
 ```
@@ -274,18 +285,18 @@ python -m cli.exploitability \
   --scan-results-dir results/full-batch-scan \
   --soft-profile-dir ~/vuln/profiles/soft \
   --repo-base-path ~/vuln/data/repos \
+  --jobs 4 \
   --generate-report \
   --report-only-exploitable \
   --submission-output-dir results/full-batch-exploitability \
   --submission-prefix exploitable_findings \
   --claude-runtime-root results/claude-runtime \
   --claude-runtime-mode folder \
-  --max-workers 4 \
   --run-id run-20260303-001 \
   --timeout 1800
 ```
 
-说明：`exploitability` 当前只在 `folder` runtime 下对 folder 切片并发，`--max-workers` 为并发上限；`run/shared` 目前保持串行。
+当 `cli.exploitability` 使用 `--jobs > 1` 时，必须同时使用 `--claude-runtime-mode folder`，否则不同任务会竞争同一个 Claude runtime。
 
 ### 6.4 一键全流水线脚本
 
@@ -326,7 +337,7 @@ bash scripts/run_nvidia_full_pipeline.sh
 | `report_finding` | 上报发现的漏洞 |
 
 Agent 特性：
-- 最大 300 轮迭代，自动检测 context limit 并优雅退出
+- `AgenticVulnFinder` 实现上支持最多 300 轮迭代；`scanner` CLI 的默认 `--max-iterations` 是 3，可按需覆盖
 - **Priority-1 提前停止**：当高优先级发现完成时可提前结束（支持 `min` / `max` 策略）
 - **模块优先级排序**：根据漏洞画像自动计算目标模块的扫描优先级
 - **可恢复**：`AgentMemoryManager` 跟踪已处理文件/模块，支持断点续扫
@@ -339,8 +350,8 @@ Agent 特性：
 |------|----------|
 | 画像生成 | `ProfileStorageManager` 使用 checkpoint 文件，中断后从上次断点继续 |
 | Agentic 扫描 | `AgentMemoryManager` 记录 pending files / processed modules / findings cache |
-| 批量扫描 | `--skip-existing-scans` 跳过已存在 `agentic_vuln_findings.json` 的目标 |
-| 可利用性检查 | `--skip-existing` 跳过已完成的判定；同目录重复执行自动续做 |
+| 批量扫描 | `--skip-existing-scans` 仅在已有结果具备完整覆盖率元数据且 fingerprint 匹配时跳过，否则重扫 |
+| 可利用性检查 | `--skip-existing` 仅跳过完整的 `exploitability.json`；不完整或过期输出会自动续做 |
 
 ### 7.4 Claude Runtime 布局
 
@@ -352,12 +363,98 @@ Agent 特性：
 | `run` | `<root>/<run-id>/` | 单次批量运行 |
 | `folder` | `<root>/<run-id>/<cve>/<target>/` | 并行批处理（推荐） |
 
-### 7.5 `check-exploitability` 输出规范（防幻觉约束）
+### 7.5 并发与线程模型
 
-- `exploitability` 仅在 stdout 能解析到合法 JSON 对象时才会直接采用结果。
-- 如果 stdout 不是有效的 `verdict/confidence` 结构化结果，系统会降级到读取 `evidence/analysis_output.json`，若仍失败则判为 `ERROR`。
-- `check-exploitability` 的提示词要求只输出一个 JSON 对象，无额外文本；缺证据时用保守判断并给低置信度。
-- 该约束用于减少模型幻觉对最终 verdict 的影响。
+当前版本的并发增强主要集中在 3 个层面：批量扫描、可利用性验证、以及所有会临时切换 git commit 的安全协调。
+
+#### 1. `batch-scanner` 的并发能力
+
+`batch-scanner` 通过 `--jobs` 控制并发度，但并发粒度不是“一个漏洞内部的 Agent 回合”，而是“同一个漏洞条目下多个 target 仓库的扫描任务”。
+
+也就是说，以下步骤仍然是串行的：
+- 读取 `vuln.json`
+- 确保 source software profile 存在
+- 确保 vulnerability profile 存在
+- 计算相似度并选出目标仓库
+
+真正并发的是最后一步：
+- 对筛选出来的多个 target 执行 `run_single_target_scan()`
+
+实现特点：
+- 每个 worker 自己创建独立的 LLM client，避免线程之间共享客户端状态
+- 结果收集时保留 target 的原始排序
+- summary 中会记录 `jobs`、每个 target 的 `started_at`、`finished_at`、`duration_seconds`
+
+这部分适合提升“一个漏洞同时扫多个候选仓库”的吞吐量，但**不会并行化单个 target 内部的 Agent 行为**。
+
+#### 2. `cli.exploitability` 的并发能力
+
+`python -m cli.exploitability` 同样通过 `--jobs` 控制并发，但并发粒度是“多个 scan result folder”。
+
+也就是说，以下步骤会并发：
+- `results/<scan-dir>/<cve>/<repo>-<commit12>/` 这些 folder 的 exploitability 检查
+
+实现特点：
+- 每个 worker 自己创建独立的 `SkillExploitabilityChecker`
+- 每个 worker 使用独立的 Claude runtime 目录
+- 聚合 JSON / CSV / submission index / markdown 报告仍然在主线程串行写入，避免并发写同一份提交产物
+
+约束：
+- 当 `--jobs > 1` 时，必须使用 `--claude-runtime-mode folder`
+- `shared` / `run` 只适合串行执行，因为它们会共享 Claude runtime
+
+#### 3. repo 锁：保证并发下的 git checkout 安全
+
+真正决定当前并发能否安全运行的，不是线程池本身，而是 repo 级锁。
+
+以下路径在运行时都可能临时切换仓库 commit：
+- `read_vuln_data()` 抽取 `vuln.json` 对应代码片段
+- software profile 生成
+- vulnerability profile 生成
+- 单目标 `agent_scanner` 扫描
+- 脚本中解析仓库当前 `HEAD` 的逻辑
+
+这些路径现在都会先拿 repo 锁，再执行 `get_git_commit()` / `checkout_commit()` / `restore_git_position()`。
+
+repo 锁的行为：
+- 同一个 repo path 同一时刻只允许一个任务切 commit
+- 不同 repo path 可以并发
+- 锁是阻塞等待，不是冲突即失败
+- 锁文件带 heartbeat，进程异常退出后可以识别并清理 stale lock
+- 日志会打印等待、拿到、释放 repo 锁的状态
+
+这意味着当前系统已经支持“多线程 + 共享工作树”的安全运行，但安全边界是：
+- **同一个 repo 的 commit 切换仍然串行**
+- **同一个 scan 输出目录（同一 `CVE/target`）的 Finder 生命周期与结果写入也会串行**
+- **不同 repo 且不同 scan 输出目录之间可以并发**
+
+#### 4. 哪些地方目前没有并发
+
+下面这些部分当前仍然是串行的，属于有意设计，不是遗漏：
+- 单个 `AgenticVulnFinder` 内部的多轮对话
+- Agent 的 tool call 执行顺序
+- software profile 内部 4 个分析步骤
+- vulnerability profile 内部 Source / Sink / Flow / 描述提取
+- 单个 exploitability folder 内部的逐条 finding 判定
+
+这样做的原因是这几层都直接依赖共享上下文、临时文件或推理状态；先保证可重复性和结果稳定，再在更外层做安全并发。
+
+#### 5. 脚本层怎么用并发
+
+`scripts/run_nvidia_full_pipeline.sh` 已经接入并发参数：
+
+- `SCAN_JOBS`
+  - 传给 `batch-scanner --jobs`
+- `EXPLOITABILITY_JOBS`
+  - 传给 `cli.exploitability --jobs`
+- `EXPLOITABILITY_RUNTIME_MODE`
+  - 默认 `run`
+  - 如果 `EXPLOITABILITY_JOBS > 1`，脚本会自动强制切到 `folder`
+
+推荐：
+- 批量扫描并发时，优先提升 `SCAN_JOBS`
+- exploitability 并发时，必须配合 `folder` runtime
+- 如果多个任务会同时访问同一批 repo，吞吐量最终会受 repo 锁限制，这是当前版本的安全设计
 
 ---
 
@@ -369,7 +466,9 @@ Agent 特性：
 |------|------|
 | `<scan-dir>/<cve>/<repo>-<commit12>/agentic_vuln_findings.json` | 扫描原始发现 |
 | `.../conversation_history.json` | Agent 对话历史 |
-| `.../target_similarity.json` | 目标选择时的相似度详情 |
+| `.../scan_memory.json` | 扫描续跑状态 |
+| `.../target_similarity.json` | 目标选择时的相似度详情，仅在目标由相似度检索/排序选出时生成 |
+| `<scan-dir>/batch-summary-<timestamp>.json` | 批量扫描汇总信息（jobs、target 时序、覆盖率统计等） |
 
 ### 可利用性验证阶段
 
@@ -377,17 +476,17 @@ Agent 特性：
 |------|------|
 | `.../exploitability.json` | 每条 finding 的可利用性判定 |
 | `.../evidence/<finding_id>/` | Docker PoC 证据（脚本、构建日志、执行输出） |
-| `.../reports/security_report.md` | 汇总安全研究报告 |
-| `.../reports/ghsa_*.md` | GHSA 格式漏洞报告 |
+| `.../reports/security_report.md` | 汇总安全研究报告，仅在 `--generate-report` 时生成 |
+| `.../reports/ghsa_*.md` | GHSA 格式漏洞报告，仅在 `--generate-report` 时生成 |
 
 ### 聚合提交产物
 
 | 路径 | 说明 |
 |------|------|
-| `<prefix>_<run-id>[_strict].json` | `--report-only-exploitable` 时附加 `_strict` |
-| `<prefix>_<run-id>[_strict].csv` | `--report-only-exploitable` 时附加 `_strict` |
-| `<prefix>_<run-id>[_strict]_submission_index.json` | `--report-only-exploitable` 时附加 `_strict` |
-| `<prefix>_<run-id>[_strict]_exploitable_security_report.md` | `--report-only-exploitable` 时附加 `_strict` |
+| `<submission-output-dir>/<prefix>_<run-id>[_strict].json` | 所有可利用发现的聚合 JSON；仅在设置 `--submission-output-dir` 时生成 |
+| `<submission-output-dir>/<prefix>_<run-id>[_strict].csv` | 聚合 CSV（表格化）；仅在设置 `--submission-output-dir` 时生成 |
+| `<submission-output-dir>/<prefix>_<run-id>[_strict]_submission_index.json` | 按 CVE 分组的提交索引；仅在设置 `--submission-output-dir` 时生成 |
+| `<submission-output-dir>/<prefix>_<run-id>[_strict]_exploitable_security_report.md` | 聚合提交报告；仅在设置 `--submission-output-dir` 时生成 |
 
 ---
 
@@ -427,7 +526,8 @@ pytest -q tests/test_profile_models_and_storage.py
 
 **Software profile not found**
 - 确认 `profiles/soft/<repo>/<commit>/software_profile.json` 已存在
-- 检查 `--source-soft-profiles-dir` 和 `--target-soft-profiles-dir` 是否指向正确目录
+- `batch-scanner` 使用 `--source-soft-profiles-dir` 和 `--target-soft-profiles-dir`
+- `scanner` / `cli.exploitability` 使用 `--software-profile-dirname` 或 `--soft-profile-dir`
 
 **Vulnerability profile not found**
 - 先执行 `vuln-profile` 生成
