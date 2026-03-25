@@ -743,6 +743,26 @@ class AgenticToolkit(
                         if not self._normalize_tool_type(item, item_type):
                             return f"Invalid item type in parameter {key}: expected {item_type}"
 
+        for path_field, kind in (("file_path", "file"), ("folder_path", "folder")):
+            if path_field not in parameters:
+                continue
+            raw_path = str(parameters.get(path_field, "") or "").strip()
+            if Path(raw_path).is_absolute() or ".." in Path(raw_path).parts:
+                return self._invalid_path_error(path_field, raw_path)
+            if path_field == "folder_path":
+                resolved_path, error = self._resolve_repo_path(raw_path, kind=kind)
+                if error:
+                    return self._invalid_path_error(path_field, raw_path)
+                if resolved_path is not None and resolved_path.exists() and not resolved_path.is_dir():
+                    return f"Not a folder: {raw_path}"
+
+        file_paths = parameters.get("file_paths")
+        if isinstance(file_paths, list):
+            for raw_path in file_paths:
+                normalized = str(raw_path or "").strip()
+                if Path(normalized).is_absolute() or ".." in Path(normalized).parts:
+                    return self._invalid_path_error("file_path", normalized)
+
         if "start_line" in parameters or "end_line" in parameters:
             start_line = parameters.get("start_line")
             end_line = parameters.get("end_line")
