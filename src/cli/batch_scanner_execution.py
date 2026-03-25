@@ -306,6 +306,9 @@ def _run_target_scan(
     return "failed"
 
 
+_DEFAULT_RUN_TARGET_SCAN = _run_target_scan
+
+
 def _run_target_scan_task(
     *,
     batch_args: argparse.Namespace,
@@ -334,7 +337,22 @@ def _run_target_scan_task(
     )
     try:
         llm_client = create_llm_client(LLMConfig(provider=batch_args.llm_provider, model=batch_args.llm_name))
-        status = _run_target_scan(
+        run_target_scan = _run_target_scan
+        try:
+            from cli import batch_scanner as batch_scanner_module
+        except ImportError:  # pragma: no cover - direct script execution fallback
+            batch_scanner_module = None
+        if run_target_scan is not _DEFAULT_RUN_TARGET_SCAN:
+            pass
+        elif batch_scanner_module is not None:
+            candidate_run_target_scan = getattr(
+                batch_scanner_module,
+                "_run_target_scan",
+                _DEFAULT_RUN_TARGET_SCAN,
+            )
+            if candidate_run_target_scan is not _DEFAULT_RUN_TARGET_SCAN:
+                run_target_scan = candidate_run_target_scan
+        status = run_target_scan(
             batch_args=batch_args,
             cve_id=cve_id,
             vulnerability_profile=vulnerability_profile,
@@ -391,10 +409,21 @@ def _run_selected_target_scans(
     if not similar_targets:
         return []
 
-    ordered_results: List[Optional[Dict[str, object]]] = [None] * len(similar_targets)
+    deduplicated_targets: List[SimilarProfileCandidate] = []
+    seen_target_ids = set()
+    for candidate in similar_targets:
+        target_id = (
+            f"{cve_id}:{candidate.profile_ref.repo_name}:{candidate.profile_ref.commit_hash}"
+        )
+        if target_id in seen_target_ids:
+            continue
+        seen_target_ids.add(target_id)
+        deduplicated_targets.append(candidate)
+
+    ordered_results: List[Optional[Dict[str, object]]] = [None] * len(deduplicated_targets)
 
     def _build_record(index: int, task_result: Dict[str, object]) -> Dict[str, object]:
-        candidate = similar_targets[index]
+        candidate = deduplicated_targets[index]
         return {
             "repo_name": candidate.profile_ref.repo_name,
             "commit_hash": candidate.profile_ref.commit_hash,
@@ -413,8 +442,8 @@ def _run_selected_target_scans(
 
     worker_count = max(1, int(getattr(batch_args, "jobs", 1)))
 
-    if worker_count == 1 or len(similar_targets) == 1:
-        for index, candidate in enumerate(similar_targets):
+    if worker_count == 1 or len(deduplicated_targets) == 1:
+        for index, candidate in enumerate(deduplicated_targets):
             ordered_results[index] = _build_record(
                 index,
                 _run_target_scan_task(
@@ -435,7 +464,7 @@ def _run_selected_target_scans(
                 vulnerability_profile=vulnerability_profile,
                 target=candidate,
             ): index
-            for index, candidate in enumerate(similar_targets)
+            for index, candidate in enumerate(deduplicated_targets)
         }
         for future in as_completed(future_to_index):
             index = future_to_index[future]

@@ -8,9 +8,10 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config
+from llm import LLMConfig, create_llm_client
 from scanner.agent import load_software_profile, load_vulnerability_profile
 from scanner.similarity.embedding import DEFAULT_EMBEDDING_MODEL_NAME
 from scanner.similarity import (
@@ -19,12 +20,14 @@ from scanner.similarity import (
     build_text_retriever,
     compute_profile_similarity,
 )
+from utils.concurrency import RepoPathLockManager, run_thread_pool_tasks
 from utils.git_utils import (
     get_git_commit,
     has_uncommitted_changes,
 )
 from utils.io_utils import write_atomic_text
 from utils.logger import get_logger
+from utils.number_utils import to_int
 from utils.repo_lock import hold_repo_lock
 from utils.vuln_utils import normalize_cve_id, read_vuln_data
 
@@ -48,6 +51,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
 
 try:
+    from cli import batch_scanner_execution as batch_scanner_execution_module
     from cli.batch_scanner_cache import (
         _cached_vulnerability_profile_matches_current_inputs,
         _cached_vulnerability_profile_matches_missing_repo_inputs,
@@ -62,6 +66,7 @@ try:
         _run_target_scan,
     )
 except ImportError:  # pragma: no cover - direct script execution fallback
+    import batch_scanner_execution as batch_scanner_execution_module
     from batch_scanner_cache import (
         _cached_vulnerability_profile_matches_current_inputs,
         _cached_vulnerability_profile_matches_missing_repo_inputs,
@@ -77,6 +82,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
 
 logger = get_logger(__name__)
+_IMPORTED_RUN_TARGET_SCAN = _run_target_scan
 
 __all__ = [
     "agent_scanner",
@@ -536,6 +542,30 @@ def _run_target_scan_task(
     }
 
 
+def _build_scan_tasks(
+    cve_id: str,
+    similar_targets: Sequence[SimilarProfileCandidate],
+    vulnerability_profile: object,
+) -> List[Dict[str, Any]]:
+    """Build deduplicated scan tasks for one vulnerability entry."""
+    tasks: List[Dict[str, Any]] = []
+    seen_task_ids: Set[str] = set()
+    for candidate in similar_targets:
+        task_id = _build_scan_task_id(cve_id, candidate)
+        if task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(task_id)
+        tasks.append(
+            {
+                "task_id": task_id,
+                "cve_id": cve_id,
+                "vulnerability_profile": vulnerability_profile,
+                "target": candidate,
+            }
+        )
+    return tasks
+
+
 def _paths_resolve_equal(left: Path, right: Path) -> bool:
     """Compare paths after normalization so shared source/target inputs can reuse state."""
     return left.resolve() == right.resolve()
@@ -922,6 +952,11 @@ def main() -> int:
     scan_workers = _resolve_scan_workers(args)
     scan_task_lock_manager = RepoPathLockManager()
 
+    # Keep local monkeypatches of _run_target_scan effective when tests or callers
+    # replace the re-export on this module instead of the split execution module.
+    if _run_target_scan is not _IMPORTED_RUN_TARGET_SCAN:
+        batch_scanner_execution_module._run_target_scan = _run_target_scan
+
     summary = _build_batch_summary(args, paths)
 
     total_scans = 0
@@ -1038,24 +1073,55 @@ def main() -> int:
                 f"dep/import={candidate.metrics.module_dependency_import_sim:.4f})"
             )
 
+        deduplicated_targets: List[SimilarProfileCandidate] = []
+        seen_scan_task_ids: Set[str] = set()
+        for candidate in similar_targets:
+            task_id = _build_scan_task_id(cve_id, candidate)
+            if task_id in seen_scan_task_ids:
+                continue
+            seen_scan_task_ids.add(task_id)
+            deduplicated_targets.append(candidate)
+
         vuln_record = {
             "index": vuln_index,
             "repo_name": repo_name,
             "commit_hash": commit_hash,
             "cve_id": cve_id,
             "selection_mode": "fallback_top_n" if fallback_used else "threshold",
-            "selected_targets": [candidate.to_dict() for candidate in similar_targets],
-            "scan_results": _run_selected_target_scans(
-                batch_args=args,
-                cve_id=cve_id,
-                vulnerability_profile=vulnerability_profile,
-                similar_targets=similar_targets,
-            ),
+            "selected_targets": [candidate.to_dict() for candidate in deduplicated_targets],
+            "scan_results": [],
         }
 
-        for scan_result in vuln_record["scan_results"]:
-            total_scans += 1
-            scan_status = str(scan_result["status"])
+        scan_tasks = _build_scan_tasks(
+            cve_id=cve_id,
+            similar_targets=deduplicated_targets,
+            vulnerability_profile=vulnerability_profile,
+        )
+        total_scans += len(scan_tasks)
+        scan_results = run_thread_pool_tasks(
+            tasks=scan_tasks,
+            worker_fn=lambda task: _run_target_scan_task(
+                task=task,
+                batch_args=args,
+                target_repos_root=paths.target_repos_root,
+                repo_lock_manager=scan_task_lock_manager,
+            ),
+            max_workers=scan_workers,
+        )
+
+        for scan_result in scan_results:
+            payload = scan_result.payload or {}
+            if scan_result.status == "error":
+                logger.error(
+                    "Scan task failed: %s (%s)",
+                    payload.get("task_id", "unknown"),
+                    scan_result.error_message,
+                )
+            scan_status = (
+                str(payload.get("status", "failed"))
+                if scan_result.status == "success"
+                else "failed"
+            )
             if scan_status == "ok":
                 success_scans += 1
             elif scan_status == "skipped":
@@ -1065,7 +1131,7 @@ def main() -> int:
             else:
                 failed_scans += 1
 
-            coverage_status = str(scan_result.get("coverage_status", "unknown"))
+            coverage_status = str(payload.get("coverage_status", "unknown"))
             if coverage_status == "complete":
                 coverage_complete_scans += 1
             elif coverage_status == "partial":
@@ -1074,6 +1140,16 @@ def main() -> int:
                 coverage_empty_scans += 1
             else:
                 coverage_unknown_scans += 1
+
+            vuln_record["scan_results"].append(
+                {
+                    "repo_name": payload.get("repo_name", ""),
+                    "commit_hash": payload.get("commit_hash", ""),
+                    "overall_similarity": payload.get("overall_similarity", 0.0),
+                    "status": scan_status,
+                    "coverage_status": coverage_status,
+                }
+            )
 
         summary["entries"].append(vuln_record)
 

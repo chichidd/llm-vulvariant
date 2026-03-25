@@ -147,6 +147,8 @@ class ToolkitFSMixin:
             return ToolResult(success=False, content="", error=error)
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"Folder not found: {folder_path}")
+        if not full_path.is_dir():
+            return ToolResult(success=False, content="", error=f"Not a folder: {folder_path}")
         try:
             regex = re.compile(pattern, re.IGNORECASE)
             file_results: Dict[str, List[Any]] = {}
@@ -188,6 +190,8 @@ class ToolkitFSMixin:
             return ToolResult(success=False, content="", error=error)
         if not full_path.exists():
             return ToolResult(success=False, content="", error=f"Folder not found: {folder_path}")
+        if not full_path.is_dir():
+            return ToolResult(success=False, content="", error=f"Not a folder: {folder_path}")
         try:
             file_info: List[Any] = []
             total_size = 0

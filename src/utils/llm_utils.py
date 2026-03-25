@@ -807,14 +807,21 @@ def parse_llm_json(
     latest_text = response_str
     attempts = 0
     max_attempts = max(0, max_repair_attempts)
-    default_match_filter = lambda match, previous_match, text: not _looks_like_example_candidate(text, match)
+
+    def default_match_filter(
+        match: JsonObjectMatch,
+        previous_match: Optional[JsonObjectMatch],
+        text: str,
+    ) -> bool:
+        del previous_match
+        return not _looks_like_example_candidate(text, match)
 
     while True:
         last_error = "JSON parsing failed"
         parsed = extract_json_from_text(
             response_text=latest_text,
             required_keys=required_keys,
-            prefer_last=False,
+            prefer_last=True,
             match_filter=default_match_filter,
             validator=lambda payload: _validate_json_dict(
                 payload,
