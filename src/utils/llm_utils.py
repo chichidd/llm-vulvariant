@@ -185,15 +185,14 @@ def _looks_like_example_candidate(response_text: str, match: JsonObjectMatch) ->
     suffix = response_text[match.end : match.end + window_size].lower()
     if not _looks_like_example_context(prefix):
         return False
-    # If the payload contains pipe-separated placeholder values, it is very likely
-    # an enum/example snippet (e.g. "...|..."), which should be skipped.
     payload_text = response_text[match.start : match.end]
-    if not _looks_like_template_enumeration(payload_text):
-        return False
     # If the model explicitly indicates this is the final output, keep it.
     if _looks_like_final_output_marker(suffix):
         return False
-    return True
+    if _looks_like_template_enumeration(payload_text):
+        return True
+    trailing_text = response_text[match.end :]
+    return bool(extract_json_object_matches(trailing_text))
 
 
 def _format_snippet(

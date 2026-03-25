@@ -524,8 +524,10 @@ def _run_target_scan_task(
     scan_client = create_llm_client(
         LLMConfig(provider=batch_args.llm_provider, model=batch_args.llm_name)
     )
+    if _run_target_scan is not _IMPORTED_RUN_TARGET_SCAN:
+        batch_scanner_execution_module._run_target_scan = _run_target_scan
     with lock:
-        scan_status = _run_target_scan(
+        scan_status = batch_scanner_execution_module._run_target_scan(
             batch_args=batch_args,
             cve_id=cve_id,
             vulnerability_profile=vulnerability_profile,
