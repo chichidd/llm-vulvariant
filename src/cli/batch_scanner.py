@@ -357,9 +357,11 @@ def _resolve_scan_workers(args: argparse.Namespace) -> int:
     """Resolve scan worker count with default inheritance from --max-workers."""
     raw_scan_workers = getattr(args, "scan_workers", None)
     scan_workers = to_int(raw_scan_workers)
-    max_workers = to_int(getattr(args, "max_workers", 1))
+    max_workers = max(1, to_int(getattr(args, "max_workers", 1)))
     if raw_scan_workers is None:
-        return max(1, max_workers)
+        if max_workers != 1:
+            return max_workers
+        return max(1, to_int(getattr(args, "jobs", 1)))
     return max(1, scan_workers)
 
 
@@ -520,6 +522,15 @@ def _run_target_scan_task(
     vulnerability_profile = task["vulnerability_profile"]
     target_repo_path = target_repos_root / target.profile_ref.repo_name
     lock = repo_lock_manager.get_lock(target_repo_path)
+    output_base = getattr(batch_args, "scan_output_dir", None)
+    output_dir = None
+    if output_base is not None:
+        output_dir = agent_scanner.resolve_output_dir(
+            cve_id=cve_id,
+            target_repo=target.profile_ref.repo_name,
+            target_commit=target.profile_ref.commit_hash,
+            output_base=str(output_base),
+        )
 
     scan_client = create_llm_client(
         LLMConfig(provider=batch_args.llm_provider, model=batch_args.llm_name)
@@ -535,12 +546,24 @@ def _run_target_scan_task(
             target=target,
         )
 
+    saved_quality = (
+        _load_saved_scan_quality(output_dir)
+        if output_dir is not None and scan_status in {"ok", "skipped", "incomplete"}
+        else {}
+    )
+
     return {
         "task_id": task_id,
         "repo_name": target.profile_ref.repo_name,
         "commit_hash": target.profile_ref.commit_hash,
         "overall_similarity": target.metrics.overall_sim,
         "status": scan_status,
+        "coverage_status": saved_quality.get("coverage_status", "unknown"),
+        "critical_scope_present": saved_quality.get("critical_scope_present"),
+        "critical_complete": saved_quality.get("critical_complete"),
+        "critical_scope_total_files": saved_quality.get("critical_scope_total_files"),
+        "critical_scope_completed_files": saved_quality.get("critical_scope_completed_files"),
+        "scan_progress": saved_quality.get("scan_progress"),
     }
 
 

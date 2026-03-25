@@ -2458,6 +2458,157 @@ def test_run_target_scan_task_creates_independent_llm_client_per_worker(monkeypa
     assert second["status"] == "ok"
 
 
+def test_run_target_scan_task_includes_saved_coverage_metadata(monkeypatch, tmp_path):
+    task = {
+        "task_id": "CVE-2026-0001:target-repo:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cve_id": "CVE-2026-0001",
+        "vulnerability_profile": object(),
+        "target": SimilarProfileCandidate(
+            profile_ref=ProfileRef(
+                repo_name="target-repo",
+                commit_hash="b" * 40,
+                profile=_mk_profile("target"),
+            ),
+            metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+        ),
+    }
+    batch_args = Namespace(
+        llm_provider="deepseek",
+        llm_name=None,
+        scan_output_dir=tmp_path / "scan-out",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+    )
+
+    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+
+    def fake_run_target_scan(**kwargs):
+        output_dir = batch_scanner.agent_scanner.resolve_output_dir(
+            cve_id=kwargs["cve_id"],
+            target_repo=kwargs["target"].profile_ref.repo_name,
+            target_commit=kwargs["target"].profile_ref.commit_hash,
+            output_base=str(kwargs["batch_args"].scan_output_dir),
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "agentic_vuln_findings.json").write_text(
+            json.dumps(
+                {
+                    "coverage_status": "complete",
+                    "critical_scope_present": True,
+                    "critical_complete": True,
+                    "critical_scope_total_files": 2,
+                    "critical_scope_completed_files": 2,
+                    "scan_progress": {"completed": 2, "pending": 0},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return "skipped"
+
+    monkeypatch.setattr(batch_scanner, "_run_target_scan", fake_run_target_scan)
+
+    result = batch_scanner._run_target_scan_task(
+        task=task,
+        batch_args=batch_args,
+        target_repos_root=tmp_path,
+        repo_lock_manager=batch_scanner.RepoPathLockManager(),
+    )
+
+    assert result["status"] == "skipped"
+    assert result["coverage_status"] == "complete"
+    assert result["critical_scope_present"] is True
+    assert result["critical_complete"] is True
+    assert result["critical_scope_total_files"] == 2
+    assert result["critical_scope_completed_files"] == 2
+    assert result["scan_progress"] == {"completed": 2, "pending": 0}
+
+
+def test_main_uses_jobs_when_scan_worker_flags_are_unset(monkeypatch, tmp_path):
+    vuln_json = tmp_path / "vuln.json"
+    vuln_json.write_text("[]", encoding="utf-8")
+    target_repos_root = tmp_path / "target-repos"
+    target_repos_root.mkdir()
+    scan_output_dir = tmp_path / "scan-out"
+    captured = {}
+    target_candidate = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "b" * 40, _mk_profile("target")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    args = Namespace(
+        vuln_json=str(vuln_json),
+        source_repos_root=str(tmp_path / "source-repos"),
+        target_repos_root=str(target_repos_root),
+        profile_base_path=str(tmp_path / "profiles"),
+        source_soft_profiles_dir="soft",
+        target_soft_profiles_dir="soft-nvidia",
+        vuln_profiles_dir="vuln",
+        scan_output_dir=str(scan_output_dir),
+        similarity_threshold=0.7,
+        max_targets=5,
+        fallback_top_n=5,
+        include_same_repo=False,
+        similarity_model_name="stub-model",
+        similarity_device="cpu",
+        llm_provider="deepseek",
+        llm_name=None,
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        force_regenerate_profiles=False,
+        skip_existing_scans=True,
+        limit=None,
+        verbose=False,
+        jobs=4,
+        max_workers=1,
+        scan_workers=None,
+    )
+
+    monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
+    monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
+    monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
+    monkeypatch.setattr(
+        batch_scanner,
+        "_load_vuln_entries",
+        lambda vuln_json, limit=None: [(0, {"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"})],
+    )
+    monkeypatch.setattr(batch_scanner, "_ensure_source_inputs_available", lambda **kwargs: True)
+    monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: _mk_profile("source"))
+    monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
+    monkeypatch.setattr(
+        batch_scanner,
+        "_discover_latest_repo_refs",
+        lambda **kwargs: {"target-repo": target_candidate.profile_ref},
+    )
+    monkeypatch.setattr(batch_scanner, "_select_similar_targets", lambda **kwargs: ([target_candidate], False))
+
+    def fake_run_thread_pool_tasks(*, tasks, worker_fn, max_workers):
+        del tasks, worker_fn
+        captured["max_workers"] = max_workers
+        return [
+            Namespace(
+                status="success",
+                payload={
+                    "repo_name": "target-repo",
+                    "commit_hash": "b" * 40,
+                    "overall_similarity": 0.8,
+                    "status": "ok",
+                    "coverage_status": "complete",
+                },
+                error_message="",
+            )
+        ]
+
+    monkeypatch.setattr(batch_scanner, "run_thread_pool_tasks", fake_run_thread_pool_tasks)
+
+    exit_code = batch_scanner.main()
+
+    assert exit_code == 0
+    assert captured["max_workers"] == 4
+
+
 def test_main_summary_counts_are_aggregated_after_scan_task_dedup(monkeypatch, tmp_path):
     vuln_json = tmp_path / "vuln.json"
     vuln_json.write_text(
