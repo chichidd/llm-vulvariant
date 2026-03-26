@@ -640,7 +640,7 @@ def test_run_turn_uses_api_usage_to_stop_before_next_request(monkeypatch):
     assert finder.conversation_history[-1]["role"] == "tool"
 
 
-def test_run_turn_reserves_completion_budget_when_context_limit_matches_max_tokens(monkeypatch):
+def test_run_turn_continues_when_actual_usage_is_well_below_context_limit(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
     finder.max_tokens = 65536
     finder.llm_client = _UsageDrivenLLM(
@@ -649,9 +649,14 @@ def test_run_turn_reserves_completion_budget_when_context_limit_matches_max_toke
                 content="need tool",
                 reasoning_content=None,
                 tool_calls=[_tool_call()],
-            )
+            ),
+            SimpleNamespace(
+                content="done",
+                reasoning_content=None,
+                tool_calls=None,
+            ),
         ],
-        input_tokens=[128],
+        input_tokens=[128, 192],
         context_limit=65536,
         max_tokens=65536,
     )
@@ -663,11 +668,11 @@ def test_run_turn_reserves_completion_budget_when_context_limit_matches_max_toke
 
     sub_turns = finder._run_turn(iteration=0)
 
-    assert sub_turns == 1
-    assert finder.llm_client.chat_calls == 1
+    assert sub_turns == 2
+    assert finder.llm_client.chat_calls == 2
     assert finder.toolkit.executed == [("mock_tool", {})]
-    assert finder.conversation_history[-2].content == "need tool"
-    assert finder.conversation_history[-1]["role"] == "tool"
+    assert finder.conversation_history[-2]["role"] == "tool"
+    assert finder.conversation_history[-1].content == "done"
 
 
 def test_run_turn_commits_progress_when_next_request_hits_context_limit(monkeypatch):

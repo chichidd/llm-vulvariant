@@ -105,6 +105,11 @@ def _normalize_value_for_schema(
             coerced_items.append(coerced_item)
         return coerced_items, None
 
+    if schema_type == "integer" and isinstance(normalized_value, str):
+        stripped = normalized_value.strip()
+        if stripped and stripped.lstrip("+-").isdigit():
+            return int(stripped), None
+
     return normalized_value, None
 
 

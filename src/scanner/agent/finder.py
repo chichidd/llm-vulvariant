@@ -410,7 +410,10 @@ class AgenticVulnFinder:
             if self._is_near_context_limit(
                 request_input_tokens,
                 request_context_limit,
-                reserved_output_tokens=max(0, to_int(self.max_tokens)),
+                # Use actual output usage from the last request. Reserving the full configured
+                # max_tokens budget here can prematurely end every turn for providers whose
+                # max_tokens equals the context window.
+                reserved_output_tokens=request_output_tokens,
             ):
                 if self.verbose:
                     logger.info(

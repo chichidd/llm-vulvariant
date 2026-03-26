@@ -16,6 +16,16 @@ CHECK_FILE_STATUS_SCHEMA = {
     "required": ["file_paths"],
 }
 
+SEARCH_IN_FOLDER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "folder_path": {"type": "string"},
+        "pattern": {"type": "string"},
+        "max_results": {"type": "integer", "minimum": 1},
+    },
+    "required": ["folder_path", "pattern"],
+}
+
 
 FINALIZE_SCHEMA = {
     "type": "object",
@@ -83,6 +93,21 @@ def test_lab_provider_recursively_coerces_nested_stringified_arrays() -> None:
                 "dependencies": ["module.b"],
             }
         ]
+    }
+
+
+def test_lab_provider_coerces_stringified_integer_field() -> None:
+    parameters, error = normalize_tool_arguments(
+        raw_arguments='{"folder_path": ".", "pattern": "subprocess", "max_results": "100"}',
+        parameters_schema=SEARCH_IN_FOLDER_SCHEMA,
+        provider="lab",
+    )
+
+    assert error is None
+    assert parameters == {
+        "folder_path": ".",
+        "pattern": "subprocess",
+        "max_results": 100,
     }
 
 
