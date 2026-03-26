@@ -1,5 +1,7 @@
 """Prompt builders for the agentic vulnerability finder."""
 
+from __future__ import annotations
+
 import json
 from typing import Any, Dict, List
 
@@ -28,6 +30,17 @@ def build_system_prompt(vulnerability_profile: Any, toolkit) -> str:
             for t in toolkit.get_available_tools()
         ]
     )
+    tool_names = {
+        t.get("function", {}).get("name", t.get("name", "unknown"))
+        for t in toolkit.get_available_tools()
+        if isinstance(t, dict)
+    }
+    shared_memory_hint = (
+        "\n    - Use read_shared_public_memory when you want reusable observations from previous "
+        "scans of the same target repo"
+        if "read_shared_public_memory" in tool_names
+        else ""
+    )
 
     return f"""You are a security researcher specializing in source-code vulnerability hunting.
 Your task is to find vulnerabilities in other parts of the codebase that are "similar" to the known vulnerability.
@@ -44,7 +57,7 @@ A similar vulnerability means: the vulnerability type is the same, but the imple
 
 Key point: 
 1. What matters is the vulnerability "pattern", not a specific API name.
-2. Pay attention to the affected modules and common/similar modules in the target software.
+2. Pay attention to directly affected modules and embedding-similar modules in the target software.
 
 ## Available tools
 {tools_desc}
@@ -61,6 +74,7 @@ Key point:
     - Use search_in_folder to identify sources (config parsing, user input, file reads, etc.)
     - Use read_file or get_function_code to inspect suspicious code in depth
     - Use analyze_data_flow to trace data flow from source to sink
+{shared_memory_hint}
 
 3. Think about alternative implementations:
     - Different APIs for the same functionality
@@ -100,13 +114,13 @@ def build_initial_user_message(
         priority = module_priorities.get(name, 3)
         prioritized_modules.append((priority, module))
     
-    # Sort by priority (1=affected, 2=related, 3=other)
+    # Sort by priority (1=priority-1, 2=related, 3=other)
     prioritized_modules.sort(key=lambda x: x[0])
     
     # Build module info with priority labels
     key_modules = []
     for priority, module in prioritized_modules[:50]:
-        priority_label = {1: "🔴 AFFECTED", 2: "🟡 RELATED", 3: "⚪ OTHER"}.get(priority, "")
+        priority_label = {1: "🔴 PRIORITY-1", 2: "🟡 RELATED", 3: "⚪ OTHER"}.get(priority, "")
         key_modules.append({
             "name": module.get("name"),
             "priority": priority_label,
@@ -126,21 +140,21 @@ def build_initial_user_message(
     p2_count = sum(1 for p, _ in prioritized_modules if p == 2)
     related_scope_line = (
         "- 🟡 RELATED "
-        f"({p2_count} modules): Follow-up scope only after all AFFECTED files are complete"
+        f"({p2_count} modules): Follow-up scope only after all PRIORITY-1 files are complete"
         if normalized_max_priority == 1
-        else f"- 🟡 RELATED ({p2_count} modules): Calls or is called by affected modules - scan next"
+        else f"- 🟡 RELATED ({p2_count} modules): Calls or is called by priority-1 modules - scan next"
     )
     analysis_scope_line = (
-        "This run's critical scope is 🔴 AFFECTED modules only. "
+        "This run's critical scope is 🔴 PRIORITY-1 modules only. "
         "Do not spend analysis turns on 🟡 RELATED modules while any 🔴 file is still pending."
         if normalized_max_priority == 1
-        else "Do not skip any AFFECTED or RELATED modules."
+        else "Do not skip any PRIORITY-1 or RELATED modules."
     )
 
     return f"""Based on the project architecture and the known vulnerability pattern, search for similar vulnerabilities in the codebase.
 
 ## Module Priority Guide
-- 🔴 AFFECTED ({p1_count} modules): Same category as the known vulnerability - **MUST SCAN FIRST**
+- 🔴 PRIORITY-1 ({p1_count} modules): Directly affected or embedding-similar to the known vulnerable module - **MUST SCAN FIRST**
 {related_scope_line}
 - ⚪ OTHER: Lower priority
 
@@ -148,20 +162,20 @@ def build_initial_user_message(
 {json.dumps(project_info, indent=2, ensure_ascii=False)}
 
 ## Your Task
-1. **Start with AFFECTED modules**: These share the same functionality category as the known vulnerability
+1. **Start with PRIORITY-1 modules**: These are directly affected or embedding-similar to the known vulnerable module
 2. Understand the vulnerability pattern (SOURCE → FLOW → SINK)
 3. Use tools to deeply analyze code in priority order
 4. Report each finding with the report_vulnerability tool
 5. Mark each fully analyzed file with mark_file_completed, including files with no findings
 
 ## Analysis Strategy
-- For each AFFECTED module, scan ALL files for the vulnerability pattern
+- For each PRIORITY-1 module, scan ALL files for the vulnerability pattern
 - Look for alternative APIs that perform similar dangerous operations
 - Trace data flow from user input/config to dangerous sinks
 - {analysis_scope_line}
 - Keep scan progress accurate by calling mark_file_completed as soon as a file is fully analyzed
 
-Begin analysis now. Start with the 🔴 AFFECTED modules."""
+Begin analysis now. Start with the 🔴 PRIORITY-1 modules."""
 
 
 def build_intermediate_user_message(
@@ -174,13 +188,13 @@ def build_intermediate_user_message(
     normalized_max_priority = 1 if critical_stop_max_priority == 1 else 2
     if normalized_max_priority == 1:
         msg = """Continue your vulnerability analysis:
-1. Have you scanned ALL files in AFFECTED (🔴) modules?
-2. Do not spend turns on RELATED (🟡) modules while any AFFECTED file remains pending
+1. Have you scanned ALL files in PRIORITY-1 (🔴) modules?
+2. Do not spend turns on RELATED (🟡) modules while any PRIORITY-1 file remains pending
 3. Mark each fully analyzed file with mark_file_completed, even when it has no finding
 4. Do NOT repeat previous analysis - see scanned files and findings below."""
     else:
         msg = """Continue your vulnerability analysis:
-1. Have you scanned ALL files in AFFECTED (🔴) modules?
+1. Have you scanned ALL files in PRIORITY-1 (🔴) modules?
 2. Have you checked RELATED (🟡) modules?
 3. Mark each fully analyzed file with mark_file_completed, even when it has no finding
 4. Do NOT repeat previous analysis - see scanned files and findings below."""

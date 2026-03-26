@@ -117,6 +117,40 @@ class AgentMemoryManager:
             if lang_key and db_value:
                 normalized_codeql_database_names[lang_key] = db_value
 
+        module_similarity = scan_config.get("module_similarity", {})
+        if not isinstance(module_similarity, dict):
+            module_similarity = {}
+        try:
+            normalized_module_similarity_threshold = float(module_similarity.get("threshold", 0.8))
+        except (TypeError, ValueError):
+            normalized_module_similarity_threshold = 0.8
+        normalized_module_similarity = {
+            "threshold": normalized_module_similarity_threshold,
+            "model_name": str(module_similarity.get("model_name", "")).strip(),
+            "device": str(module_similarity.get("device", "cpu")).strip(),
+            "resolved_model_path": str(module_similarity.get("resolved_model_path", "")).strip(),
+            "artifact_hash": str(module_similarity.get("artifact_hash", "")).strip(),
+        }
+
+        shared_public_memory = scan_config.get("shared_public_memory", {})
+        if not isinstance(shared_public_memory, dict):
+            shared_public_memory = {}
+        normalized_shared_public_memory = {
+            "enabled": bool(shared_public_memory.get("enabled", False)),
+            "root_hash": str(shared_public_memory.get("root_hash", "")).strip(),
+            "scope_key": str(shared_public_memory.get("scope_key", "")).strip(),
+            "state_hash": str(shared_public_memory.get("state_hash", "")).strip(),
+        }
+
+        source_hashes = scan_signature.get("source_hashes", {})
+        if not isinstance(source_hashes, dict):
+            source_hashes = {}
+        normalized_source_hashes = {
+            str(label).strip(): str(file_hash).strip()
+            for label, file_hash in source_hashes.items()
+            if str(label).strip() and str(file_hash).strip()
+        }
+
         max_iterations = scan_config.get("max_iterations", 0)
         try:
             normalized_max_iterations = int(max_iterations)
@@ -140,6 +174,8 @@ class AgentMemoryManager:
                 "critical_stop_max_priority": normalized_critical_priority,
                 "scan_languages": normalized_languages,
                 "codeql_database_names": normalized_codeql_database_names,
+                "shared_public_memory": normalized_shared_public_memory,
+                "module_similarity": normalized_module_similarity,
             },
             "llm": {
                 "provider": str(llm_config.get("provider", "")).strip(),
@@ -150,6 +186,7 @@ class AgentMemoryManager:
                 "max_tokens": llm_config.get("max_tokens"),
                 "enable_thinking": llm_config.get("enable_thinking"),
             },
+            "source_hashes": normalized_source_hashes,
         }
         return normalized_scan_signature
 
@@ -435,9 +472,9 @@ Provide a concise technical summary."""
             self.memory.critical_stop_max_priority
         )
         critical_scope_label = (
-            "priority-1 (affected) only"
+            "priority-1 (directly affected or embedding-similar) only"
             if critical_stop_max_priority == 1
-            else "priority-1/2 (affected + related)"
+            else "priority-1/2 (directly affected or embedding-similar + related)"
         )
         
         lines = [
@@ -456,7 +493,10 @@ Provide a concise technical summary."""
             f"- Findings: {progress['findings']}",
             "",
             "### Priority Breakdown",
-            f"- Priority 1 (affected): {progress['priority_1']['completed']}/{progress['priority_1']['total']}",
+            (
+                f"- Priority 1 (directly affected or embedding-similar): "
+                f"{progress['priority_1']['completed']}/{progress['priority_1']['total']}"
+            ),
             f"- Priority 2 (related): {progress['priority_2']['completed']}/{progress['priority_2']['total']}",
             "",
         ]

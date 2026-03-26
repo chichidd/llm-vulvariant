@@ -22,6 +22,7 @@ class ToolResult:
     content: str
     error: Optional[str] = None
     truncated: bool = False
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class ToolkitFSMixin:
@@ -122,8 +123,15 @@ class ToolkitFSMixin:
             lines = content.split("\n")
             regex = re.compile(pattern, re.IGNORECASE)
             matches = []
+            match_summaries = []
             for index, line in enumerate(lines):
                 if regex.search(line):
+                    match_summaries.append(
+                        {
+                            "line_number": index + 1,
+                            "line_text": line.strip(),
+                        }
+                    )
                     start = max(0, index - context_lines)
                     end = min(len(lines), index + context_lines + 1)
                     context = []
@@ -131,12 +139,22 @@ class ToolkitFSMixin:
                         prefix = ">>> " if context_index == index else "    "
                         context.append(f"{prefix}{context_index + 1}: {lines[context_index]}")
                     matches.append("\n".join(context))
+            metadata = {
+                "file_path": str(full_path.relative_to(self.repo_path)),
+                "pattern": pattern,
+                "match_count": len(match_summaries),
+                "matches": match_summaries[:20],
+            }
             if not matches:
-                return ToolResult(success=True, content=f"No matches found for pattern: {pattern}")
+                return ToolResult(
+                    success=True,
+                    content=f"No matches found for pattern: {pattern}",
+                    metadata=metadata,
+                )
             result = f"Found {len(matches)} matches:\n\n" + "\n\n---\n\n".join(matches[:20])
             if len(matches) > 20:
                 result += f"\n\n... and {len(matches) - 20} more matches"
-            return ToolResult(success=True, content=result)
+            return ToolResult(success=True, content=result, metadata=metadata)
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
 
@@ -153,6 +171,7 @@ class ToolkitFSMixin:
             regex = re.compile(pattern, re.IGNORECASE)
             file_results: Dict[str, List[Any]] = {}
             total_matches = 0
+            match_summaries = []
             for source_file in self._iter_source_files(full_path):
                 if total_matches >= max_results:
                     break
@@ -163,13 +182,31 @@ class ToolkitFSMixin:
                         if regex.search(line):
                             rel_path = str(source_file.relative_to(self.repo_path))
                             file_results.setdefault(rel_path, []).append((index + 1, line.strip()))
+                            match_summaries.append(
+                                {
+                                    "file_path": rel_path,
+                                    "line_number": index + 1,
+                                    "line_text": line.strip(),
+                                }
+                            )
                             total_matches += 1
                             if total_matches >= max_results:
                                 break
                 except Exception:  # pylint: disable=broad-except
                     continue
+            metadata = {
+                "folder_path": str(full_path.relative_to(self.repo_path)),
+                "pattern": pattern,
+                "match_count": total_matches,
+                "files": sorted(file_results.keys()),
+                "matches": match_summaries[:50],
+            }
             if not file_results:
-                return ToolResult(success=True, content=f"No matches found for pattern: {pattern}")
+                return ToolResult(
+                    success=True,
+                    content=f"No matches found for pattern: {pattern}",
+                    metadata=metadata,
+                )
             result_lines = [f"Found {total_matches} matches in {len(file_results)} files:\n"]
             for matched_file in sorted(file_results.keys()):
                 result_lines.append(f"\n{matched_file}:")
@@ -179,7 +216,7 @@ class ToolkitFSMixin:
                     result_lines.append(
                         f"  ... and {len(file_results[matched_file]) - 10} more matches in this file"
                     )
-            return ToolResult(success=True, content="\n".join(result_lines))
+            return ToolResult(success=True, content="\n".join(result_lines), metadata=metadata)
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
 
@@ -365,9 +402,13 @@ class ToolkitFSMixin:
                     if re.match(r"^(import |from |#include |require |use |extern crate )", stripped):
                         imports.append(stripped)
 
+            metadata = {
+                "file_path": str(full_path.relative_to(self.repo_path)),
+                "imports": imports[:50],
+            }
             if not imports:
-                return ToolResult(success=True, content="No imports found")
-            return ToolResult(success=True, content="\n".join(imports))
+                return ToolResult(success=True, content="No imports found", metadata=metadata)
+            return ToolResult(success=True, content="\n".join(imports), metadata=metadata)
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
 

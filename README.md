@@ -81,6 +81,7 @@ llm-vulvariant/
 │   ├── paths.yaml                      # 路径配置
 │   ├── llm_config.yaml                 # LLM provider 配置
 │   ├── codeql_config.yaml              # CodeQL 配置
+│   ├── scanner_config.yaml             # scanner 行为配置
 │   └── software_profile_rule.yaml      # 软件画像规则（模块分析器类型、语言、排除项）
 ├── scripts/                            # 端到端运行脚本
 ├── tests/                              # 30+ 测试文件
@@ -142,6 +143,14 @@ pip install transformers sentence-transformers torch
 ### LLM 配置 — `llm_config.yaml`
 
 支持的 provider：`deepseek`、`openai`、`lab`。其中 `lab` 默认使用 `https://hkucvm.dynv6.net/v1` 和 `LAB_LLM_API_KEY`。配置包含温度、重试策略、最大 token 数等。
+
+### Scanner 配置 — `scanner_config.yaml`
+
+| 配置项 | 说明 |
+|--------|------|
+| `module_similarity.threshold` | 模块语义 embedding 晋升到 `priority-1` 的阈值，默认 `0.8` |
+| `module_similarity.model_name` | 模块语义 embedding 使用的本地模型目录名 |
+| `module_similarity.device` | 模块语义 embedding 的执行设备，默认 `cpu` |
 
 ### 软件画像规则 — `software_profile_rule.yaml`
 
@@ -266,6 +275,7 @@ batch-scanner \
   --target-soft-profiles-dir ~/vuln/profiles/soft \
   --vuln-profiles-dir ~/vuln/profiles/vuln \
   --scan-output-dir results/full-batch-scan \
+  --run-id run-20260326-001 \
   --similarity-threshold 0.70 \
   --fallback-top-n 3 \
   --jobs 4 \
@@ -275,6 +285,7 @@ batch-scanner \
 
 说明：
 - `--max-workers` 是并发线程池总上限；
+- `--run-id` 用于隔离该次 batch run 的 shared public memory；省略时会自动生成；
 - `--scan-workers` 是 `batch_scanner` target scan 并发 worker 数；未设置时默认继承 `--max-workers`；
 - `batch_scanner` 的相似度筛选与 profile 构建仍是串行阶段。
 
@@ -468,6 +479,7 @@ repo 锁的行为：
 | `.../conversation_history.json` | Agent 对话历史 |
 | `.../scan_memory.json` | 扫描续跑状态 |
 | `.../target_similarity.json` | 目标选择时的相似度详情，仅在目标由相似度检索/排序选出时生成 |
+| `<scan-dir>/_runs/<run-id>/shared-public-memory/<repo>-<commit12>/observations/*.json` | 同一 batch run 内共享的公共 observation；agent 可按需读取，不影响私有 `scan_memory.json` |
 | `<scan-dir>/batch-summary-<timestamp>.json` | 批量扫描汇总信息（jobs、target 时序、覆盖率统计等） |
 
 ### 可利用性验证阶段

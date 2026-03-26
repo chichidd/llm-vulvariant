@@ -17,12 +17,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 import json
 import re
 
 from profiler.software.models import ModuleInfo, SoftwareProfile
-from scanner.similarity.embedding import DEFAULT_EMBEDDING_MODEL_NAME, EmbeddingRetrievalConfig, EmbeddingRetriever
+from scanner.similarity.embedding import (
+    DEFAULT_EMBEDDING_MODEL_NAME,
+    EmbeddingRetriever,
+    get_cached_embedding_retriever,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -248,16 +252,8 @@ def build_text_retriever(
     Returns ``None`` when the configured model path or backend cannot be
     loaded so callers can fall back to lexical similarity.
     """
-    config = EmbeddingRetrievalConfig(
-        model_name=model_name,
-        device=device,
-        batch_size=32,
-        normalize=True,
-    )
     try:
-        retriever = EmbeddingRetriever(config=config)
-        retriever._ensure_loaded()
-        return retriever
+        return get_cached_embedding_retriever(model_name=model_name, device=device)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning(
             "Failed to build embedding retriever for auto-target similarity; "
@@ -447,6 +443,23 @@ def _normalize_token(value: str) -> str:
     return normalized
 
 
+def _module_embedding_text(module: ModuleInfo | Dict[str, Any]) -> str:
+    """Build the v1 module text used for semantic embedding similarity."""
+    if isinstance(module, ModuleInfo):
+        module_data = module.to_dict()
+    elif isinstance(module, dict):
+        module_data = module
+    else:
+        return ""
+
+    parts = [
+        str(module_data.get("name", "") or "").strip(),
+        str(module_data.get("category", "") or "").strip(),
+        str(module_data.get("description", "") or "").strip(),
+    ]
+    return "\n".join(part for part in parts if part)
+
+
 def _tokenize_text(value: str) -> Set[str]:
     if not value:
         return set()
@@ -485,3 +498,22 @@ def _text_similarity(
             )
 
     return _jaccard_similarity(_tokenize_text(left), _tokenize_text(right))
+
+
+def _embedding_only_text_similarity(
+    left: str,
+    right: str,
+    *,
+    text_retriever: Optional[EmbeddingRetriever] = None,
+) -> float:
+    """Compute embedding similarity without lexical fallback."""
+    left = left or ""
+    right = right or ""
+    if not left.strip() or not right.strip() or text_retriever is None:
+        return 0.0
+
+    try:
+        return float(text_retriever.similarity(left, right))
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Embedding-only similarity failed at runtime; treating score as 0. error=%s", exc)
+        return 0.0

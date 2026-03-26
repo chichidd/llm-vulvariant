@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from config import DEFAULT_SOFTWARE_PROFILE_DIRNAME, DEFAULT_VULN_PROFILE_DIRNAME, _path_config
@@ -122,6 +123,42 @@ class BatchScanCaches:
     regenerated_target_software_keys: Set[Tuple[str, str]]
 
 
+def _sanitize_run_component(value: str) -> str:
+    """Sanitize one run-id component for filesystem use."""
+    sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip())
+    return sanitized.strip("-") or "run"
+
+
+def resolve_run_id(explicit_run_id: Optional[str]) -> str:
+    """Resolve the logical batch run id.
+
+    Args:
+        explicit_run_id: Optional caller-provided run id.
+
+    Returns:
+        Stable run id string for this batch invocation.
+    """
+    if explicit_run_id and explicit_run_id.strip():
+        return explicit_run_id.strip()
+    return f"run-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
+
+
+def resolve_shared_public_memory_dir(scan_output_dir: str | Path, run_id: str) -> Path:
+    """Resolve the run-scoped shared public memory root.
+
+    Args:
+        scan_output_dir: Batch scan output root.
+        run_id: Logical batch run id.
+
+    Returns:
+        Absolute shared public memory directory.
+    """
+    base_dir = Path(scan_output_dir).expanduser()
+    if not base_dir.is_absolute():
+        base_dir = _path_config["repo_root"] / base_dir
+    return base_dir / "_runs" / _sanitize_run_component(run_id) / "shared-public-memory"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -185,6 +222,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="scan-results-batch",
         help="Base output directory for scan results",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional batch run identifier used for run-scoped shared public memory",
     )
     parser.add_argument(
         "--similarity-threshold",
@@ -479,6 +522,13 @@ def _build_batch_summary(args: argparse.Namespace, paths: BatchScanPaths) -> Dic
     """Build the batch summary document header."""
     return {
         "started_at": datetime.now().isoformat(),
+        "run_id": getattr(args, "run_id", None),
+        "shared_public_memory_dir": str(
+            resolve_shared_public_memory_dir(
+                paths.scan_output_dir,
+                getattr(args, "run_id", None) or "run",
+            )
+        ),
         "vuln_json": str(paths.vuln_json),
         "source_repos_root": str(paths.source_repos_root),
         "target_repos_root": str(paths.target_repos_root),
@@ -537,6 +587,7 @@ def _run_target_scan_task(
     )
     if _run_target_scan is not _IMPORTED_RUN_TARGET_SCAN:
         batch_scanner_execution_module._run_target_scan = _run_target_scan
+    started_at = datetime.now()
     with lock:
         scan_status = batch_scanner_execution_module._run_target_scan(
             batch_args=batch_args,
@@ -545,6 +596,7 @@ def _run_target_scan_task(
             llm_client=scan_client,
             target=target,
         )
+    finished_at = datetime.now()
 
     saved_quality = (
         _load_saved_scan_quality(output_dir)
@@ -564,6 +616,9 @@ def _run_target_scan_task(
         "critical_scope_total_files": saved_quality.get("critical_scope_total_files"),
         "critical_scope_completed_files": saved_quality.get("critical_scope_completed_files"),
         "scan_progress": saved_quality.get("scan_progress"),
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_seconds": round((finished_at - started_at).total_seconds(), 6),
     }
 
 
@@ -946,6 +1001,10 @@ def main() -> int:
     if paths is None:
         return 1
     args.scan_output_dir = str(paths.scan_output_dir)
+    args.run_id = resolve_run_id(getattr(args, "run_id", None))
+    args.shared_public_memory_dir = str(
+        resolve_shared_public_memory_dir(paths.scan_output_dir, args.run_id)
+    )
 
     entries = _load_vuln_entries(paths.vuln_json, limit=args.limit)
     if not entries:
@@ -956,6 +1015,7 @@ def main() -> int:
         return 1
 
     logger.info(f"Loaded {len(entries)} vulnerabilities from {paths.vuln_json}")
+    logger.info("Batch run ID: %s", args.run_id)
     profile_llm = create_profile_llm_client(args.llm_provider, args.llm_name)
     text_retriever = build_text_retriever(
         model_name=args.similarity_model_name,
@@ -1173,6 +1233,14 @@ def main() -> int:
                     "overall_similarity": payload.get("overall_similarity", 0.0),
                     "status": scan_status,
                     "coverage_status": coverage_status,
+                    "critical_scope_present": payload.get("critical_scope_present"),
+                    "critical_complete": payload.get("critical_complete"),
+                    "critical_scope_total_files": payload.get("critical_scope_total_files"),
+                    "critical_scope_completed_files": payload.get("critical_scope_completed_files"),
+                    "scan_progress": payload.get("scan_progress"),
+                    "started_at": payload.get("started_at"),
+                    "finished_at": payload.get("finished_at"),
+                    "duration_seconds": payload.get("duration_seconds"),
                 }
             )
 

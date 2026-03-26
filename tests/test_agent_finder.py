@@ -114,6 +114,19 @@ def _make_finder(monkeypatch, tmp_path=None):
 def test_init_memory_tracks_scan_signature(monkeypatch, tmp_path):
     monkeypatch.setattr(finder_module, "AgenticToolkit", DummyToolkit)
     monkeypatch.setattr(finder_module, "AgentMemoryManager", _CaptureScanSignatureMemory)
+    monkeypatch.setattr(
+        finder_module,
+        "embedding_model_artifact_signature",
+        lambda model_name: {
+            "resolved_model_path": f"/models/{model_name or 'default'}",
+            "artifact_hash": "artifact-hash",
+        },
+    )
+    monkeypatch.setitem(
+        finder_module._scanner_config["module_similarity"],
+        "threshold",
+        0.8,
+    )
 
     finder = finder_module.AgenticVulnFinder(
         llm_client=_LLMWithFullConfig(),
@@ -146,10 +159,55 @@ def test_init_memory_tracks_scan_signature(monkeypatch, tmp_path):
         "python": "db-py",
         "java": "db-java",
     }
+    assert scan_config["shared_public_memory"] == {
+        "enabled": False,
+        "root_hash": "",
+        "scope_key": "",
+        "state_hash": "",
+    }
+    assert scan_config["module_similarity"] == {
+        "threshold": 0.8,
+        "model_name": "jinaai--jina-code-embeddings-1.5b",
+        "device": "cpu",
+        "resolved_model_path": "/models/jinaai--jina-code-embeddings-1.5b",
+        "artifact_hash": "artifact-hash",
+    }
+    assert "scanner/similarity/retriever.py" in signature["source_hashes"]
+    assert "scanner/similarity/embedding.py" in signature["source_hashes"]
+    assert "scanner/agent/utils.py" in signature["source_hashes"]
+    assert "config.py" in signature["source_hashes"]
+    assert "utils/codeql_native.py" in signature["source_hashes"]
     assert llm_config["provider"] == "provider-x"
     assert llm_config["model"] == "model-x"
     assert llm_config["base_url"] == "https://api.example.com"
     assert llm_config["temperature"] == 0.2
+
+
+def test_init_without_output_dir_still_calculates_module_priorities(monkeypatch):
+    monkeypatch.setattr(finder_module, "AgenticToolkit", DummyToolkit)
+    captured = {}
+
+    def fake_calculate_module_priorities(software_profile, vulnerability_profile):
+        captured["software_profile"] = software_profile
+        captured["vulnerability_profile"] = vulnerability_profile
+        return {"cliui": 1}, {"cli.py": "cliui"}
+
+    monkeypatch.setattr(finder_module, "calculate_module_priorities", fake_calculate_module_priorities)
+
+    finder = finder_module.AgenticVulnFinder(
+        llm_client=DummyLLM(),
+        repo_path=Path("/tmp/demo"),
+        software_profile=SimpleNamespace(version="target123", modules=[]),
+        vulnerability_profile=SimpleNamespace(cve_id="CVE-2025-0001"),
+        verbose=False,
+        output_dir=None,
+    )
+
+    assert captured["software_profile"] is finder.software_profile
+    assert captured["vulnerability_profile"] is finder.vulnerability_profile
+    assert finder.module_priorities == {"cliui": 1}
+    assert finder.file_to_module == {"cli.py": "cliui"}
+    assert finder.memory is None
 
 
 def test_extract_complementary_summary_structured(monkeypatch):
@@ -229,7 +287,7 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
     assert captured["findings"][0]["type"] == "cmd"
     assert captured["critical_stop_max_priority"] == 1
     assert "3/10 files scanned" in captured["progress_info"]
-    assert "Critical scope: priority-1 (AFFECTED) only." in captured["progress_info"]
+    assert "Critical scope: priority-1 modules only" in captured["progress_info"]
     assert pending_priorities == [1]
 
 

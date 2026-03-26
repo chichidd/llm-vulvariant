@@ -8,10 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 from config import _path_config
 from llm import LLMConfig, create_llm_client
+from profiler.fingerprint import stable_data_hash
+from scanner.agent.shared_memory import SharedPublicMemoryManager
 from scanner.similarity import SimilarProfileCandidate
 from utils.git_utils import (
     checkout_commit,
@@ -29,6 +32,59 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     import agent_scanner
 
 logger = get_logger(__name__)
+
+
+def _resolve_shared_public_memory_dir_from_args(
+    batch_args: argparse.Namespace,
+) -> Optional[Path]:
+    """Resolve the run-scoped shared public memory directory from batch args."""
+    configured_dir = getattr(batch_args, "shared_public_memory_dir", None)
+    if configured_dir:
+        path = Path(str(configured_dir)).expanduser()
+        return path if path.is_absolute() else _path_config["repo_root"] / path
+
+    run_id = str(getattr(batch_args, "run_id", "") or "").strip()
+    if not run_id:
+        return None
+
+    scan_output_dir = Path(str(getattr(batch_args, "scan_output_dir", ""))).expanduser()
+    if not scan_output_dir.is_absolute():
+        scan_output_dir = _path_config["repo_root"] / scan_output_dir
+    sanitized_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", run_id).strip("-") or "run"
+    return scan_output_dir / "_runs" / sanitized_run_id / "shared-public-memory"
+
+
+def _build_shared_public_memory_scope(
+    *,
+    batch_args: argparse.Namespace,
+    cve_id: str,
+    repo_path: Path,
+    repo_name: str,
+    repo_commit: str,
+) -> Dict[str, Any]:
+    """Build the shared-public-memory scope descriptor used by fingerprints."""
+    shared_public_memory_dir = _resolve_shared_public_memory_dir_from_args(batch_args)
+    if shared_public_memory_dir is None:
+        return {"enabled": False, "root_hash": "", "scope_key": "", "state_hash": ""}
+    manager = SharedPublicMemoryManager(
+        root_dir=shared_public_memory_dir,
+        repo_name=repo_name,
+        repo_commit=repo_commit,
+        repo_scope_key=stable_data_hash(str(repo_path.resolve()))[:12],
+        producer_id="",
+        visibility_scope_id=agent_scanner.build_shared_public_memory_visibility_scope_id(
+            cve_id=cve_id,
+            target_repo=repo_name,
+            target_commit=repo_commit,
+            target_output_dir=agent_scanner.resolve_output_dir(
+                cve_id=cve_id,
+                target_repo=repo_name,
+                target_commit=repo_commit,
+                output_base=str(getattr(batch_args, "scan_output_dir", "")),
+            ),
+        ),
+    )
+    return manager.describe_scope()
 
 
 def _resolve_software_profile_locator(
@@ -122,6 +178,13 @@ def _build_expected_scan_fingerprint_for_skip(
                 critical_stop_max_priority=getattr(batch_args, "critical_stop_max_priority", 2),
                 scan_languages=scan_languages,
                 codeql_database_names=codeql_database_names,
+                shared_public_memory_scope=_build_shared_public_memory_scope(
+                    batch_args=batch_args,
+                    cve_id=cve_id,
+                    repo_path=target_repo_path,
+                    repo_name=scan_target.repo_name,
+                    repo_commit=scan_target.commit_hash,
+                ),
             )
         finally:
             if changed_commit and original_restore_target:
@@ -139,6 +202,7 @@ def _build_expected_scan_fingerprint_for_skip(
 def _build_profile_based_scan_fingerprint_for_skip(
     *,
     batch_args: argparse.Namespace,
+    cve_id: str,
     vulnerability_profile: Any,
     llm_client: Any,
     target: SimilarProfileCandidate,
@@ -166,6 +230,12 @@ def _build_profile_based_scan_fingerprint_for_skip(
         profile_languages,
         target.profile_ref.profile,
     )
+    target_repos_root = Path(
+        str(getattr(batch_args, "target_repos_root", _path_config["repo_base_path"]))
+    ).expanduser()
+    if not target_repos_root.is_absolute():
+        target_repos_root = _path_config["repo_root"] / target_repos_root
+    target_repo_path = target_repos_root / scan_target.repo_name
     return agent_scanner.build_scan_fingerprint(
         vulnerability_profile=vulnerability_profile,
         software_profile=target.profile_ref.profile,
@@ -176,6 +246,13 @@ def _build_profile_based_scan_fingerprint_for_skip(
         critical_stop_max_priority=getattr(batch_args, "critical_stop_max_priority", 2),
         scan_languages=profile_languages,
         codeql_database_names=codeql_database_names,
+        shared_public_memory_scope=_build_shared_public_memory_scope(
+            batch_args=batch_args,
+            cve_id=cve_id,
+            repo_path=target_repo_path,
+            repo_name=scan_target.repo_name,
+            repo_commit=scan_target.commit_hash,
+        ),
     )
 
 
@@ -226,6 +303,7 @@ def _run_target_scan(
         if not isinstance(expected_scan_fingerprint, dict) and not target_repo_path.is_dir():
             expected_scan_fingerprint = _build_profile_based_scan_fingerprint_for_skip(
                 batch_args=batch_args,
+                cve_id=cve_id,
                 vulnerability_profile=vulnerability_profile,
                 llm_client=llm_client,
                 target=target,
@@ -292,6 +370,7 @@ def _run_target_scan(
         critical_stop_max_priority=getattr(batch_args, "critical_stop_max_priority", 2),
         profile_base_path=profile_base_path,
         software_profile_dirname=software_profile_dirname,
+        shared_public_memory_dir=_resolve_shared_public_memory_dir_from_args(batch_args),
     )
     if scan_succeeded:
         return "ok"

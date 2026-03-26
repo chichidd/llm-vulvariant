@@ -390,6 +390,12 @@ def test_build_scan_fingerprint_includes_scanner_and_codeql_sources():
     assert fingerprint["source_hashes"]["scanner/agent/utils.py"]
     assert "utils/codeql_native.py" in fingerprint["source_hashes"]
     assert fingerprint["source_hashes"]["utils/codeql_native.py"]
+    assert "scanner/agent/shared_memory.py" in fingerprint["source_hashes"]
+    assert "scanner/agent/toolkit_fs.py" in fingerprint["source_hashes"]
+    assert "scanner/agent/toolkit_codeql.py" in fingerprint["source_hashes"]
+    assert "scanner/similarity/retriever.py" in fingerprint["source_hashes"]
+    assert "scanner/similarity/embedding.py" in fingerprint["source_hashes"]
+    assert "config.py" in fingerprint["source_hashes"]
 
 
 def test_build_scan_fingerprint_changes_when_llm_thinking_settings_change():
@@ -496,6 +502,252 @@ def test_build_scan_fingerprint_changes_when_llm_base_url_changes():
     assert primary["hash"] != secondary["hash"]
 
 
+def test_build_scan_fingerprint_changes_when_module_similarity_config_changes(monkeypatch):
+    base_profile = SimpleNamespace(
+        cve_id="CVE-2026-0001",
+        to_dict=lambda: {"cve_id": "CVE-2026-0001"},
+    )
+    software_profile = _mk_profile("repo", version="abc")
+    llm_client = SimpleNamespace(
+        config=SimpleNamespace(
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://primary.example/v1",
+            temperature=0.1,
+            top_p=0.9,
+            max_tokens=4096,
+            enable_thinking=True,
+        )
+    )
+
+    monkeypatch.setitem(agent_scanner._scanner_config["module_similarity"], "threshold", 0.8)
+    primary = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+    )
+
+    monkeypatch.setitem(agent_scanner._scanner_config["module_similarity"], "threshold", 0.81)
+    secondary = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+    )
+
+    assert primary["hash"] != secondary["hash"]
+
+
+def test_build_scan_fingerprint_changes_when_shared_public_memory_is_enabled():
+    base_profile = SimpleNamespace(
+        cve_id="CVE-2026-0001",
+        to_dict=lambda: {"cve_id": "CVE-2026-0001"},
+    )
+    software_profile = _mk_profile("repo", version="abc")
+    llm_client = SimpleNamespace(
+        config=SimpleNamespace(
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://primary.example/v1",
+            temperature=0.1,
+            top_p=0.9,
+            max_tokens=4096,
+            enable_thinking=True,
+        )
+    )
+
+    disabled = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+        shared_public_memory_scope={"enabled": False, "root_hash": "", "scope_key": "", "state_hash": ""},
+    )
+    enabled = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+        shared_public_memory_scope={"enabled": True, "root_hash": "run-a", "scope_key": "repo-a", "state_hash": "scope-a"},
+    )
+
+    assert disabled["hash"] != enabled["hash"]
+
+
+def test_build_scan_fingerprint_changes_when_shared_public_memory_scope_changes():
+    base_profile = SimpleNamespace(
+        cve_id="CVE-2026-0001",
+        to_dict=lambda: {"cve_id": "CVE-2026-0001"},
+    )
+    software_profile = _mk_profile("repo", version="abc")
+    llm_client = SimpleNamespace(
+        config=SimpleNamespace(
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://primary.example/v1",
+            temperature=0.1,
+            top_p=0.9,
+            max_tokens=4096,
+            enable_thinking=True,
+        )
+    )
+
+    first = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+        shared_public_memory_scope={"enabled": True, "root_hash": "run-a", "scope_key": "repo-a", "state_hash": "scope-a"},
+    )
+    second = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+        shared_public_memory_scope={"enabled": True, "root_hash": "run-a", "scope_key": "repo-a", "state_hash": "scope-b"},
+    )
+
+    assert first["hash"] != second["hash"]
+
+
+def test_build_scan_fingerprint_changes_when_embedding_model_artifact_changes(monkeypatch):
+    base_profile = SimpleNamespace(
+        cve_id="CVE-2026-0001",
+        to_dict=lambda: {"cve_id": "CVE-2026-0001"},
+    )
+    software_profile = _mk_profile("repo", version="abc")
+    llm_client = SimpleNamespace(
+        config=SimpleNamespace(
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://primary.example/v1",
+            temperature=0.1,
+            top_p=0.9,
+            max_tokens=4096,
+            enable_thinking=True,
+        )
+    )
+
+    monkeypatch.setattr(
+        agent_scanner,
+        "embedding_model_artifact_signature",
+        lambda _model_name: {
+            "resolved_model_path": "/models/demo",
+            "artifact_hash": "hash-a",
+        },
+    )
+    primary = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+    )
+
+    monkeypatch.setattr(
+        agent_scanner,
+        "embedding_model_artifact_signature",
+        lambda _model_name: {
+            "resolved_model_path": "/models/demo",
+            "artifact_hash": "hash-b",
+        },
+    )
+    secondary = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+    )
+
+    assert primary["hash"] != secondary["hash"]
+
+
+def test_build_scan_fingerprint_changes_when_shared_public_memory_root_changes():
+    base_profile = SimpleNamespace(
+        cve_id="CVE-2026-0001",
+        to_dict=lambda: {"cve_id": "CVE-2026-0001"},
+    )
+    software_profile = _mk_profile("repo", version="abc")
+    llm_client = SimpleNamespace(
+        config=SimpleNamespace(
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://primary.example/v1",
+            temperature=0.1,
+            top_p=0.9,
+            max_tokens=4096,
+            enable_thinking=True,
+        )
+    )
+
+    first = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+        shared_public_memory_scope={"enabled": True, "root_hash": "run-a", "scope_key": "repo-a", "state_hash": ""},
+    )
+    second = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+        shared_public_memory_scope={"enabled": True, "root_hash": "run-b", "scope_key": "repo-a", "state_hash": ""},
+    )
+
+    assert first["hash"] != second["hash"]
+
+
 def test_resolve_scan_languages_returns_empty_for_removed_csharp_support(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -591,6 +843,70 @@ def test_run_single_target_scan_success_restores_original_commit(monkeypatch, tm
     assert captured_lock["purpose"] == "agent_scan:CVE-2025-0001:targethash12"
     assert checkout_calls[0] == "targethash1234"
     assert restore_calls == ["master"]
+
+
+def test_run_single_target_scan_uses_attempt_unique_shared_memory_producer_id(monkeypatch, tmp_path):
+    repo_base = tmp_path / "repos"
+    repo_dir = repo_base / "target-repo"
+    repo_dir.mkdir(parents=True)
+
+    monkeypatch.setitem(agent_scanner._path_config, "repo_base_path", repo_base)
+    monkeypatch.setitem(agent_scanner._path_config, "repo_root", tmp_path)
+    monkeypatch.setattr(agent_scanner, "get_git_commit", lambda repo_path: "origcommit9999")
+    monkeypatch.setattr(agent_scanner, "get_git_restore_target", lambda repo_path: "master")
+    monkeypatch.setattr(agent_scanner, "has_uncommitted_changes", lambda repo_path: False)
+    monkeypatch.setattr(agent_scanner, "restore_git_position", lambda repo_path, restore_target: True)
+    monkeypatch.setattr(agent_scanner, "checkout_commit", lambda repo_path, commit: True)
+
+    @contextmanager
+    def fake_hold_repo_lock(repo_path, *, purpose, run_id=None, poll_interval_seconds=0.2):
+        yield
+
+    monkeypatch.setattr(agent_scanner, "hold_repo_lock", fake_hold_repo_lock)
+    monkeypatch.setattr(
+        agent_scanner,
+        "load_software_profile",
+        lambda *args, **kwargs: _mk_profile("target-repo", "targethash"),
+    )
+    monkeypatch.setattr(agent_scanner, "detect_repo_languages", lambda repo_path: ["python"])
+
+    captured = {}
+
+    class DummySharedPublicMemoryManager:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def describe_scope(self):
+            return {"enabled": True, "scope_key": "scope", "state_hash": "state"}
+
+    class DummyFinder:
+        def __init__(self, **kwargs):
+            self.conversation_history = [{"role": "assistant", "content": "done"}]
+            self.memory = _mk_complete_finder_memory()
+
+        def run(self):
+            return {"vulnerabilities": [{"id": 1}]}
+
+    monkeypatch.setattr(agent_scanner, "SharedPublicMemoryManager", DummySharedPublicMemoryManager)
+    monkeypatch.setattr(agent_scanner, "AgenticVulnFinder", DummyFinder)
+
+    target = agent_scanner.ScanTarget(repo_name="target-repo", commit_hash="targethash1234")
+
+    ok = agent_scanner.run_single_target_scan(
+        cve_id="CVE-2025-0001",
+        output_base=tmp_path / "scan-out",
+        repo_base_path=repo_base,
+        max_iterations=1,
+        vulnerability_profile=SimpleNamespace(),
+        llm_client=object(),
+        target=target,
+        verbose=False,
+        shared_public_memory_dir=tmp_path / "scan-out" / "_runs" / "run-1" / "shared-public-memory",
+    )
+
+    assert ok is True
+    assert captured["producer_id"].startswith("CVE-2025-0001:")
+    assert captured["producer_id"] != "CVE-2025-0001"
 
 
 def test_run_single_target_scan_locks_scan_output_writes_between_concurrent_scans(monkeypatch, tmp_path):

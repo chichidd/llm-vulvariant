@@ -12,6 +12,7 @@ Modes:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 from dataclasses import dataclass
@@ -22,12 +23,17 @@ from config import (
     DEFAULT_SOFTWARE_PROFILE_DIRNAME,
     DEFAULT_VULN_PROFILE_DIRNAME,
     _path_config,
+    _scanner_config,
 )
 from llm import LLMConfig, create_llm_client
 from profiler.fingerprint import extract_profile_fingerprint, stable_data_hash
 from scanner.agent import AgenticVulnFinder, load_software_profile, load_vulnerability_profile
+from scanner.agent.shared_memory import SharedPublicMemoryManager
 from scanner.agent.utils import make_serializable
-from scanner.similarity.embedding import DEFAULT_EMBEDDING_MODEL_NAME
+from scanner.similarity.embedding import (
+    DEFAULT_EMBEDDING_MODEL_NAME,
+    embedding_model_artifact_signature,
+)
 from scanner.similarity import (
     SimilarProfileCandidate,
     build_text_retriever,
@@ -264,6 +270,23 @@ def resolve_output_dir(
     return output_root / folder_name
 
 
+def build_shared_public_memory_visibility_scope_id(
+    cve_id: str,
+    target_repo: str,
+    target_commit: str,
+    target_output_dir: Path,
+) -> str:
+    """Build the stable logical scan scope id used to hide self-produced shared memory."""
+    return stable_data_hash(
+        {
+            "cve_id": cve_id,
+            "target_repo": target_repo,
+            "target_commit": target_commit,
+            "target_output_dir": str(target_output_dir.resolve()),
+        }
+    )[:16]
+
+
 def _validate_args(args: argparse.Namespace) -> bool:
     if args.target_commit and not args.target_repo:
         logger.error("--target-commit requires --target-repo")
@@ -462,11 +485,14 @@ def build_scan_fingerprint(
     critical_stop_max_priority: int,
     scan_languages: List[str],
     codeql_database_names: Dict[str, str],
+    shared_public_memory_scope: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a reproducibility fingerprint for one target scan result."""
     llm_config = getattr(llm_client, "config", None)
     cli_root = Path(__file__).resolve().parent
     agent_root = cli_root.parent / "scanner" / "agent"
+    similarity_root = cli_root.parent / "scanner" / "similarity"
+    shared_memory_scope = shared_public_memory_scope or {}
     payload = {
         "schema_version": SCAN_FINGERPRINT_SCHEMA_VERSION,
         "kind": "scan_result",
@@ -488,6 +514,20 @@ def build_scan_fingerprint(
             "critical_stop_max_priority": int(critical_stop_max_priority),
             "scan_languages": list(scan_languages or []),
             "codeql_database_names": dict(codeql_database_names or {}),
+            "shared_public_memory": {
+                "enabled": bool(shared_memory_scope.get("enabled", False)),
+                "root_hash": str(shared_memory_scope.get("root_hash", "")).strip(),
+                "scope_key": str(shared_memory_scope.get("scope_key", "")).strip(),
+                "state_hash": str(shared_memory_scope.get("state_hash", "")).strip(),
+            },
+            "module_similarity": {
+                "threshold": float(_scanner_config.get("module_similarity", {}).get("threshold", 0.8)),
+                "model_name": str(_scanner_config.get("module_similarity", {}).get("model_name", "")).strip(),
+                "device": str(_scanner_config.get("module_similarity", {}).get("device", "cpu")).strip(),
+                **embedding_model_artifact_signature(
+                    str(_scanner_config.get("module_similarity", {}).get("model_name", "")).strip() or None
+                ),
+            },
         },
         "source_hashes": {
             "cli/agent_scanner.py": _hash_scan_source_file(cli_root / "agent_scanner.py"),
@@ -495,8 +535,14 @@ def build_scan_fingerprint(
             "scanner/agent/memory.py": _hash_scan_source_file(agent_root / "memory.py"),
             "scanner/agent/priority.py": _hash_scan_source_file(agent_root / "priority.py"),
             "scanner/agent/prompts.py": _hash_scan_source_file(agent_root / "prompts.py"),
+            "scanner/agent/shared_memory.py": _hash_scan_source_file(agent_root / "shared_memory.py"),
             "scanner/agent/utils.py": _hash_scan_source_file(agent_root / "utils.py"),
             "scanner/agent/toolkit.py": _hash_scan_source_file(agent_root / "toolkit.py"),
+            "scanner/agent/toolkit_fs.py": _hash_scan_source_file(agent_root / "toolkit_fs.py"),
+            "scanner/agent/toolkit_codeql.py": _hash_scan_source_file(agent_root / "toolkit_codeql.py"),
+            "scanner/similarity/retriever.py": _hash_scan_source_file(similarity_root / "retriever.py"),
+            "scanner/similarity/embedding.py": _hash_scan_source_file(similarity_root / "embedding.py"),
+            "config.py": _hash_scan_source_file(cli_root.parent / "config.py"),
             "utils/codeql_native.py": _hash_scan_source_file(cli_root.parent / "utils" / "codeql_native.py"),
         },
     }
@@ -579,6 +625,7 @@ def run_single_target_scan(
     critical_stop_max_priority: int = 2,
     profile_base_path: Optional[str] = None,
     software_profile_dirname: Optional[str] = None,
+    shared_public_memory_dir: Optional[str | Path] = None,
 ) -> bool:
     """Run one target scan through a stable public interface used by both CLIs."""
     resolved_repo_base_path = Path(repo_base_path).expanduser()
@@ -647,6 +694,11 @@ def run_single_target_scan(
                         output_base=output_base,
                     )
                     target_output_dir.mkdir(parents=True, exist_ok=True)
+                    shared_public_memory_root: Optional[Path] = None
+                    if shared_public_memory_dir is not None:
+                        shared_public_memory_root = Path(shared_public_memory_dir).expanduser()
+                        if not shared_public_memory_root.is_absolute():
+                            shared_public_memory_root = _path_config["repo_root"] / shared_public_memory_root
 
                     scan_languages = _resolve_scan_languages(target_repo_path, software_profile)
                     codeql_database_names = _resolve_codeql_database_names(
@@ -679,6 +731,36 @@ def run_single_target_scan(
                             target_output_dir,
                             purpose=output_lock_purpose,
                         )
+                        shared_public_memory_visibility_scope_id = build_shared_public_memory_visibility_scope_id(
+                            cve_id=cve_id,
+                            target_repo=target.repo_name,
+                            target_commit=target.commit_hash,
+                            target_output_dir=target_output_dir,
+                        )
+                        shared_public_memory_producer_id = (
+                            f"{cve_id}:"
+                            f"{stable_data_hash({
+                                'visibility_scope_id': shared_public_memory_visibility_scope_id,
+                                'scan_started_at': datetime.now().isoformat(timespec='microseconds'),
+                            })[:16]}"
+                        )
+                        shared_public_memory_manager = (
+                            SharedPublicMemoryManager(
+                                root_dir=shared_public_memory_root,
+                                repo_name=target.repo_name,
+                                repo_commit=target.commit_hash,
+                                repo_scope_key=stable_data_hash(str(target_repo_path.resolve()))[:12],
+                                producer_id=shared_public_memory_producer_id,
+                                visibility_scope_id=shared_public_memory_visibility_scope_id,
+                            )
+                            if shared_public_memory_root is not None
+                            else None
+                        )
+                        shared_public_memory_scope = (
+                            shared_public_memory_manager.describe_scope()
+                            if shared_public_memory_manager is not None
+                            else {"enabled": False, "root_hash": "", "scope_key": "", "state_hash": ""}
+                        )
                         finder = AgenticVulnFinder(
                             llm_client=llm_client,
                             repo_path=target_repo_path,
@@ -692,6 +774,8 @@ def run_single_target_scan(
                             output_dir=target_output_dir,
                             languages=scan_languages,
                             codeql_database_names=codeql_database_names,
+                            shared_public_memory_manager=shared_public_memory_manager,
+                            shared_public_memory_scope=shared_public_memory_scope,
                         )
                         scan_fingerprint = build_scan_fingerprint(
                             vulnerability_profile=vulnerability_profile,
@@ -703,6 +787,7 @@ def run_single_target_scan(
                             critical_stop_max_priority=critical_stop_max_priority,
                             scan_languages=scan_languages,
                             codeql_database_names=codeql_database_names,
+                            shared_public_memory_scope=shared_public_memory_scope,
                         )
                         results = finder.run()
                         _save_scan_outputs(

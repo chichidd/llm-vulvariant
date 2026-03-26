@@ -1,14 +1,17 @@
-"""Path configuration loading and profile directory resolution helpers."""
+"""Configuration loading and profile directory resolution helpers."""
 
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 from typing import Any, Dict, Optional
 
 import yaml
 
 DEFAULT_SOFTWARE_PROFILE_DIRNAME = "soft"
 DEFAULT_VULN_PROFILE_DIRNAME = "vuln"
+DEFAULT_SCANNER_EMBEDDING_MODEL_NAME = "jinaai--jina-code-embeddings-1.5b"
+logger = logging.getLogger(__name__)
 
 
 def resolve_profile_base_path(profile_base_path: str | Path | None = None) -> Path:
@@ -150,4 +153,53 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
     }
 
 
+def load_scanner_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load scanner configuration from ``config/scanner_config.yaml``.
+
+    Args:
+        config_path: Optional explicit config file path.
+
+    Returns:
+        Scanner configuration with defaults filled in.
+    """
+    default_config: Dict[str, Any] = {
+        "module_similarity": {
+            "threshold": 0.8,
+            "model_name": DEFAULT_SCANNER_EMBEDDING_MODEL_NAME,
+            "device": "cpu",
+        }
+    }
+    if config_path is None:
+        config_path = Path(__file__).parent.parent / "config" / "scanner_config.yaml"
+
+    try:
+        if config_path.exists():
+            raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            if isinstance(raw_config, dict):
+                module_similarity = raw_config.get("module_similarity", {})
+                if isinstance(module_similarity, dict):
+                    default_config["module_similarity"].update(
+                        {
+                            key: value
+                            for key, value in module_similarity.items()
+                            if value is not None
+                        }
+                    )
+    except Exception as exc:
+        logger.warning("Failed to load scanner config from %s: %s", config_path, exc)
+
+    module_similarity_config = default_config["module_similarity"]
+    try:
+        module_similarity_config["threshold"] = float(module_similarity_config.get("threshold", 0.8))
+    except (TypeError, ValueError):
+        module_similarity_config["threshold"] = 0.8
+    module_similarity_config["model_name"] = str(
+        module_similarity_config.get("model_name", DEFAULT_SCANNER_EMBEDDING_MODEL_NAME)
+        or DEFAULT_SCANNER_EMBEDDING_MODEL_NAME
+    ).strip() or DEFAULT_SCANNER_EMBEDDING_MODEL_NAME
+    module_similarity_config["device"] = str(module_similarity_config.get("device", "cpu") or "cpu").strip() or "cpu"
+    return default_config
+
+
 _path_config = load_paths_config()
+_scanner_config = load_scanner_config()

@@ -19,6 +19,7 @@ from scanner.agent.toolkit_codeql import ToolkitCodeQLMixin
 from scanner.agent.toolkit_fs import ToolResult, ToolkitFSMixin
 from scanner.agent.toolkit_profile import ToolkitProfileMixin
 from scanner.agent.toolkit_reporting import ToolkitReportingMixin
+from scanner.agent.shared_memory import SharedPublicMemoryManager
 
 logger = get_logger(__name__)
 
@@ -34,6 +35,7 @@ class AgenticToolkit(
         repo_path: Path,
         memory_manager=None,
         software_profile=None,
+        shared_public_memory_manager: Optional[SharedPublicMemoryManager] = None,
         languages: Optional[List[str]] = None,
         codeql_database_names: Optional[Dict[str, str]] = None,
     ):
@@ -41,6 +43,7 @@ class AgenticToolkit(
         self._file_cache: Dict[str, str] = {}
         self._memory_manager = memory_manager
         self._software_profile = software_profile
+        self._shared_public_memory_manager = shared_public_memory_manager
         self._file_to_module_cache: Dict[str, str] = {}  # file_path -> module_name
         self._module_cache: Dict[str, Dict] = {}  # module_name -> module_info
         self._call_graph_edges: List[Dict] = []  # call graph edges from repo_analysis
@@ -169,7 +172,7 @@ class AgenticToolkit(
         return touched_files
 
     def get_available_tools(self) -> List[Dict[str, Any]]:
-        return [
+        tools = [
             {
                 "type": "function",
                 "function": {
@@ -502,6 +505,35 @@ class AgenticToolkit(
                 },
             },
         ]
+        if self._shared_public_memory_manager is not None:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_shared_public_memory",
+                        "description": (
+                            "Read reusable scan observations collected from previous scans of the "
+                            "same target repository and commit in the current batch run."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Optional lexical filter over stored observations.",
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 20,
+                                    "description": "Maximum number of observations to return (default: 10).",
+                                },
+                            },
+                        },
+                    },
+                }
+            )
+        return tools
 
     @staticmethod
     def _normalize_tool_type(value: Any, expected_type: str) -> bool:
@@ -677,12 +709,37 @@ class AgenticToolkit(
                 result = self._read_codeql_results(**parameters)
             elif tool_name == "mark_file_completed":
                 result = self._mark_file_completed(**parameters)
+            elif tool_name == "read_shared_public_memory":
+                result = self._read_shared_public_memory(**parameters)
             else:
                 return ToolResult(success=False, content="", error=f"Unknown tool: {tool_name}")
             self._track_tool_file_touch(tool_name, parameters, result)
+            self._record_shared_public_observation(tool_name, parameters, result)
             return result
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
+
+    def _record_shared_public_observation(
+        self,
+        tool_name: str,
+        parameters: Dict[str, Any],
+        result: ToolResult,
+    ) -> None:
+        """Persist allowlisted tool observations into shared public memory."""
+        if not result.success or not isinstance(result.metadata, dict):
+            return
+        if tool_name == "read_shared_public_memory":
+            return
+        if self._shared_public_memory_manager is None:
+            return
+        try:
+            self._shared_public_memory_manager.record_observation(
+                tool_name,
+                parameters,
+                result.metadata,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to record shared public memory observation: %s", exc)
 
     def _track_tool_file_touch(
         self,
@@ -824,6 +881,26 @@ class AgenticToolkit(
             analysis["variables_used"] = unique_vars[:50]
             analysis["function_calls"] = analysis["function_calls"][:50]
             analysis["attribute_accesses"] = analysis["attribute_accesses"][:50]
-            return ToolResult(success=True, content=json.dumps(analysis, indent=2, ensure_ascii=False))
+            analysis["file_path"] = file_path
+            return ToolResult(
+                success=True,
+                content=json.dumps(analysis, indent=2, ensure_ascii=False),
+                metadata=analysis,
+            )
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
+
+    def _read_shared_public_memory(self, query: str = "", limit: int = 10) -> ToolResult:
+        """Read shared public scan observations for this target repo and commit."""
+        if self._shared_public_memory_manager is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error="Shared public memory is not configured for this scan.",
+            )
+        normalized_limit = max(1, min(int(limit), 20))
+        payload = self._shared_public_memory_manager.read_observations(
+            query=query,
+            limit=normalized_limit,
+        )
+        return ToolResult(success=True, content=json.dumps(payload, indent=2, ensure_ascii=False))

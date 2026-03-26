@@ -19,15 +19,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import math
 import logging
+import threading
 
 from config import _path_config
+from profiler.fingerprint import stable_data_hash
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_MODEL_NAME = "jinaai--jina-code-embeddings-1.5b"
+_RETRIEVER_CACHE: Dict[Tuple[str, str, str], "EmbeddingRetriever"] = {}
+_RETRIEVER_CACHE_LOCK = threading.Lock()
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
@@ -37,6 +41,95 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
 	if denom_a == 0.0 or denom_b == 0.0:
 		return 0.0
 	return sum(x * y for x, y in zip(a, b)) / (denom_a * denom_b)
+
+
+def resolve_embedding_model_path(model_name: Optional[str]) -> Path:
+	"""Resolve the concrete embedding model directory for one model name."""
+	requested_model_name = model_name
+	resolved_model_name = requested_model_name or DEFAULT_EMBEDDING_MODEL_NAME
+	base_model_path = Path(_path_config["embedding_model_path"])
+	direct_model_markers = ("config.json", "tokenizer.json", "modules.json")
+	if base_model_path.is_dir() and any((base_model_path / marker).exists() for marker in direct_model_markers):
+		if base_model_path.name == resolved_model_name:
+			return base_model_path
+		if requested_model_name and resolved_model_name != DEFAULT_EMBEDDING_MODEL_NAME:
+			return base_model_path.parent / resolved_model_name
+		return base_model_path
+	return base_model_path / resolved_model_name
+
+
+def embedding_model_artifact_signature(model_name: Optional[str]) -> Dict[str, str]:
+	"""Return the selected model path plus a stable on-disk artifact hash."""
+	model_path = resolve_embedding_model_path(model_name)
+	if not model_path.exists():
+		return {
+			"resolved_model_path": str(model_path),
+			"artifact_hash": "",
+		}
+	if model_path.is_file():
+		try:
+			stat_result = model_path.stat()
+			artifact_hash = stable_data_hash(
+				{
+					"path": str(model_path),
+					"size": int(stat_result.st_size),
+					"mtime_ns": int(stat_result.st_mtime_ns),
+				}
+			)
+		except OSError:
+			artifact_hash = ""
+		return {
+			"resolved_model_path": str(model_path),
+			"artifact_hash": artifact_hash,
+		}
+
+	file_entries = []
+	for child_path in sorted(path for path in model_path.rglob("*") if path.is_file()):
+		try:
+			stat_result = child_path.stat()
+		except OSError:
+			continue
+		file_entries.append(
+			{
+				"path": str(child_path.relative_to(model_path)),
+				"size": int(stat_result.st_size),
+				"mtime_ns": int(stat_result.st_mtime_ns),
+			}
+		)
+	return {
+		"resolved_model_path": str(model_path),
+		"artifact_hash": stable_data_hash(file_entries),
+	}
+
+
+def get_cached_embedding_retriever(
+	model_name: Optional[str],
+	device: Optional[str],
+) -> "EmbeddingRetriever":
+	"""Return a process-local cached embedding retriever for one model/device pair."""
+	artifact_signature = embedding_model_artifact_signature(model_name)
+	model_path = Path(artifact_signature["resolved_model_path"])
+	normalized_device = str(device or "cpu").strip() or "cpu"
+	cache_key = (
+		str(model_path),
+		str(artifact_signature.get("artifact_hash", "")).strip(),
+		normalized_device,
+	)
+	with _RETRIEVER_CACHE_LOCK:
+		cached_retriever = _RETRIEVER_CACHE.get(cache_key)
+		if cached_retriever is not None:
+			return cached_retriever
+		retriever = EmbeddingRetriever(
+			config=EmbeddingRetrievalConfig(
+				model_name=model_name,
+				device=normalized_device,
+				batch_size=32,
+				normalize=True,
+			)
+		)
+		retriever._ensure_loaded()
+		_RETRIEVER_CACHE[cache_key] = retriever
+		return retriever
 
 
 @dataclass
@@ -60,19 +153,7 @@ class EmbeddingRetriever:
 		requested_model_name = self.config.model_name
 		model_name = requested_model_name or DEFAULT_EMBEDDING_MODEL_NAME
 		self.config.model_name = model_name
-		base_model_path = Path(_path_config['embedding_model_path'])
-		direct_model_markers = ("config.json", "tokenizer.json", "modules.json")
-		if base_model_path.is_dir() and any((base_model_path / marker).exists() for marker in direct_model_markers):
-			# A concrete model directory acts as the default model location, but an
-			# explicit non-default override should still select a sibling model directory.
-			if base_model_path.name == model_name:
-				self.model_path = base_model_path
-			elif requested_model_name and model_name != DEFAULT_EMBEDDING_MODEL_NAME:
-				self.model_path = base_model_path.parent / model_name
-			else:
-				self.model_path = base_model_path
-		else:
-			self.model_path = base_model_path / model_name
+		self.model_path = resolve_embedding_model_path(requested_model_name)
 
 		if not self.model_path.exists():
 			raise FileNotFoundError(
@@ -81,6 +162,7 @@ class EmbeddingRetriever:
 		self._model: Any = None
 		self._backend: Optional[str] = None
 		self._tokenizer: Any = None
+		self._embed_lock = threading.Lock()
 
 	def _ensure_loaded(self) -> None:
 		if self._model is not None:
@@ -130,14 +212,15 @@ class EmbeddingRetriever:
 
 	def embed(self, snippets: Sequence[str]) -> List[List[float]]:
 		"""Generate embeddings for code snippets."""
-		self._ensure_loaded()
+		with self._embed_lock:
+			self._ensure_loaded()
 
-		cleaned = [s if isinstance(s, str) else "" for s in snippets]
-		if self._backend == "sentence-transformers":
-			return self._embed_sentence_transformers(cleaned)
-		elif self._backend == "transformers":
-			return self._embed_transformers(cleaned)
-		raise RuntimeError("Embedding model is not loaded")
+			cleaned = [s if isinstance(s, str) else "" for s in snippets]
+			if self._backend == "sentence-transformers":
+				return self._embed_sentence_transformers(cleaned)
+			elif self._backend == "transformers":
+				return self._embed_transformers(cleaned)
+			raise RuntimeError("Embedding model is not loaded")
 
 	def similarity(self, a: str, b: str) -> float:
 		"""Compute similarity between two snippets."""

@@ -82,6 +82,14 @@ def test_parse_args_defaults_similarity_model_to_embedding_default(monkeypatch):
     assert args.similarity_model_name == DEFAULT_EMBEDDING_MODEL_NAME
 
 
+def test_parse_args_accepts_run_id(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["batch-scanner", "--run-id", "run-manual"])
+
+    args = batch_scanner.parse_args()
+
+    assert args.run_id == "run-manual"
+
+
 def test_parse_args_help_describes_skip_existing_scan_validation(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["batch-scanner", "--help"])
 
@@ -109,6 +117,49 @@ def test_parse_args_rejects_legacy_shared_target_flags(monkeypatch):
 
     with pytest.raises(SystemExit):
         batch_scanner.parse_args()
+
+
+def test_resolve_shared_public_memory_dir_scopes_by_run_id(tmp_path):
+    resolved = batch_scanner.resolve_shared_public_memory_dir(
+        scan_output_dir=tmp_path / "scan-results",
+        run_id="run-123",
+    )
+
+    assert resolved == tmp_path / "scan-results" / "_runs" / "run-123" / "shared-public-memory"
+
+
+def test_build_shared_public_memory_scope_does_not_hide_previous_attempts(tmp_path, monkeypatch):
+    captured = {}
+
+    class DummySharedPublicMemoryManager:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def describe_scope(self):
+            return {"enabled": True, "root_hash": "root", "scope_key": "scope", "state_hash": "state"}
+
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "SharedPublicMemoryManager",
+        DummySharedPublicMemoryManager,
+    )
+    monkeypatch.setitem(batch_scanner_execution._path_config, "repo_root", tmp_path)
+
+    scope = batch_scanner_execution._build_shared_public_memory_scope(
+        batch_args=Namespace(
+            shared_public_memory_dir=str(tmp_path / "shared"),
+            run_id="run-1",
+            scan_output_dir=str(tmp_path / "scan-results"),
+        ),
+        cve_id="CVE-2026-0001",
+        repo_path=tmp_path / "repos" / "target-repo",
+        repo_name="target-repo",
+        repo_commit="a" * 40,
+    )
+
+    assert scope == {"enabled": True, "root_hash": "root", "scope_key": "scope", "state_hash": "state"}
+    assert captured["producer_id"] == ""
+    assert captured["visibility_scope_id"]
 
 
 def test_validate_args_rejects_negative_limit():
@@ -340,6 +391,7 @@ def test_run_target_scan_passes_profile_base_path_and_dirname(monkeypatch, tmp_p
         critical_stop_mode="min",
         verbose=False,
         skip_existing_scans=False,
+        run_id="run-123",
         profile_base_path=str(tmp_path / "profiles"),
         target_soft_profiles_dir="soft-nvidia",
     )
@@ -362,6 +414,9 @@ def test_run_target_scan_passes_profile_base_path_and_dirname(monkeypatch, tmp_p
     assert captured["repo_base_path"] == tmp_path / "repos"
     assert captured["max_iterations"] == 3
     assert captured["cve_id"] == "CVE-2026-0001"
+    assert captured["shared_public_memory_dir"] == (
+        tmp_path / "scan-out" / "_runs" / "run-123" / "shared-public-memory"
+    )
 
 
 def test_ensure_software_profile_delegates_cache_validation_to_generator(monkeypatch, tmp_path):
@@ -1025,6 +1080,7 @@ def test_build_profile_based_scan_fingerprint_for_skip_uses_profile_repo_path_ha
 
     fingerprint = batch_scanner._build_profile_based_scan_fingerprint_for_skip(
         batch_args=batch_args,
+        cve_id="CVE-2026-0001",
         vulnerability_profile=object(),
         llm_client=object(),
         target=target,
@@ -1036,6 +1092,72 @@ def test_build_profile_based_scan_fingerprint_for_skip_uses_profile_repo_path_ha
     assert captured["codeql_database_names"] == {
         "python": f"target-repo-{expected_path_hash}-tttttttt-python",
         "javascript": f"target-repo-{expected_path_hash}-tttttttt-javascript",
+    }
+
+
+def test_build_profile_based_scan_fingerprint_for_skip_includes_shared_memory_scope(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_build_scan_fingerprint(**kwargs):
+        captured.update(kwargs)
+        return {"hash": "expected"}
+
+    monkeypatch.setattr(
+        batch_scanner.agent_scanner,
+        "build_scan_fingerprint",
+        _fake_build_scan_fingerprint,
+    )
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_shared_public_memory_scope",
+        lambda **kwargs: {
+            "enabled": True,
+            "root_hash": "run-root",
+            "scope_key": "repo-scope",
+            "state_hash": "shared-state",
+        },
+    )
+
+    batch_args = Namespace(
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        target_repos_root=str(tmp_path / "repos"),
+        scan_output_dir=str(tmp_path / "scan-out"),
+        run_id="run-1",
+        shared_public_memory_dir=str(
+            tmp_path / "scan-out" / "_runs" / "run-1" / "shared-public-memory"
+        ),
+    )
+    target_commit = "t" * 40
+    target_profile = _mk_profile("target-repo")
+    target_profile.repo_info = {"repo_analysis": {"languages": ["python"]}}
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", target_commit, target_profile),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    scan_target = batch_scanner.agent_scanner.ScanTarget(
+        repo_name="target-repo",
+        commit_hash=target_commit,
+        similarity=target,
+    )
+
+    fingerprint = batch_scanner._build_profile_based_scan_fingerprint_for_skip(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+        scan_target=scan_target,
+    )
+
+    assert fingerprint == {"hash": "expected"}
+    assert captured["shared_public_memory_scope"] == {
+        "enabled": True,
+        "root_hash": "run-root",
+        "scope_key": "repo-scope",
+        "state_hash": "shared-state",
     }
 
 
@@ -2523,6 +2645,9 @@ def test_run_target_scan_task_includes_saved_coverage_metadata(monkeypatch, tmp_
     assert result["critical_scope_total_files"] == 2
     assert result["critical_scope_completed_files"] == 2
     assert result["scan_progress"] == {"completed": 2, "pending": 0}
+    assert result["started_at"]
+    assert result["finished_at"]
+    assert result["duration_seconds"] >= 0.0
 
 
 def test_main_uses_jobs_when_scan_worker_flags_are_unset(monkeypatch, tmp_path):
@@ -2678,3 +2803,109 @@ def test_main_summary_counts_are_aggregated_after_scan_task_dedup(monkeypatch, t
     assert summary["successful_scans"] == 1
     assert summary["failed_scans"] == 0
     assert summary["entries"][0]["scan_results"][0]["status"] == "ok"
+
+
+def test_main_summary_preserves_per_target_timing_and_coverage_metadata(monkeypatch, tmp_path):
+    vuln_json = tmp_path / "vuln.json"
+    vuln_json.write_text(
+        json.dumps([{"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"}]),
+        encoding="utf-8",
+    )
+    target_repos_root = tmp_path / "targets"
+    target_repos_root.mkdir()
+    profile_base_path = tmp_path / "profiles"
+    args = Namespace(
+        vuln_json=str(vuln_json),
+        source_repos_root=str(tmp_path / "sources"),
+        target_repos_root=str(target_repos_root),
+        profile_base_path=str(profile_base_path),
+        source_soft_profiles_dir="soft",
+        target_soft_profiles_dir="soft-nvidia",
+        vuln_profiles_dir="vuln",
+        scan_output_dir=str(tmp_path / "scan-out"),
+        similarity_threshold=0.7,
+        max_targets=5,
+        fallback_top_n=5,
+        include_same_repo=False,
+        similarity_model_name="stub-model",
+        similarity_device="cpu",
+        llm_provider="deepseek",
+        llm_name=None,
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        force_regenerate_profiles=False,
+        skip_existing_scans=True,
+        limit=None,
+        verbose=False,
+        max_workers=1,
+        scan_workers=1,
+        jobs=1,
+        run_id="run-1",
+        shared_public_memory_dir=str(tmp_path / "scan-out" / "_runs" / "run-1" / "shared-public-memory"),
+    )
+    target_candidate = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "b" * 40, _mk_profile("target")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+
+    monkeypatch.setitem(batch_scanner._path_config, "repo_root", tmp_path)
+    monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
+    monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
+    monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
+    monkeypatch.setattr(
+        batch_scanner,
+        "_load_vuln_entries",
+        lambda vuln_json, limit=None: [(0, {"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"})],
+    )
+    monkeypatch.setattr(batch_scanner, "_ensure_source_inputs_available", lambda **kwargs: True)
+    monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: _mk_profile("source"))
+    monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
+    monkeypatch.setattr(
+        batch_scanner,
+        "_discover_latest_repo_refs",
+        lambda **kwargs: {"target-repo": target_candidate.profile_ref},
+    )
+    monkeypatch.setattr(batch_scanner, "_select_similar_targets", lambda **kwargs: ([target_candidate], False))
+    monkeypatch.setattr(
+        batch_scanner,
+        "run_thread_pool_tasks",
+        lambda **kwargs: [
+            Namespace(
+                status="success",
+                payload={
+                    "repo_name": "target-repo",
+                    "commit_hash": "b" * 40,
+                    "overall_similarity": 0.8,
+                    "status": "ok",
+                    "coverage_status": "complete",
+                    "critical_scope_present": True,
+                    "critical_complete": True,
+                    "critical_scope_total_files": 3,
+                    "critical_scope_completed_files": 3,
+                    "scan_progress": {"completed": 3, "pending": 0},
+                    "started_at": "2026-03-26T10:00:00",
+                    "finished_at": "2026-03-26T10:00:05",
+                    "duration_seconds": 5.0,
+                },
+                error_message="",
+            )
+        ],
+    )
+
+    assert batch_scanner.main() == 0
+
+    summary_files = sorted((tmp_path / "scan-out").glob("batch-summary-*.json"))
+    assert len(summary_files) == 1
+    summary = json.loads(summary_files[0].read_text(encoding="utf-8"))
+    scan_result = summary["entries"][0]["scan_results"][0]
+
+    assert scan_result["critical_scope_present"] is True
+    assert scan_result["critical_complete"] is True
+    assert scan_result["critical_scope_total_files"] == 3
+    assert scan_result["critical_scope_completed_files"] == 3
+    assert scan_result["scan_progress"] == {"completed": 3, "pending": 0}
+    assert scan_result["started_at"] == "2026-03-26T10:00:00"
+    assert scan_result["finished_at"] == "2026-03-26T10:00:05"
+    assert scan_result["duration_seconds"] == 5.0

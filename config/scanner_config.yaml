@@ -1,0 +1,4 @@
+module_similarity:
+  threshold: 0.8
+  model_name: jinaai--jina-code-embeddings-1.5b
+  device: cpu

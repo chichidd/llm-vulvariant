@@ -1,11 +1,16 @@
 """Agentic vulnerability finder core logic."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from config import _scanner_config
 from llm import BaseLLMClient
 from llm.tool_arguments import normalize_tool_arguments
+from profiler.fingerprint import stable_data_hash
+from scanner.similarity.embedding import embedding_model_artifact_signature
 from utils.logger import get_logger
 from utils.number_utils import to_int
 from utils.llm_utils import extract_json_from_text
@@ -53,6 +58,8 @@ class AgenticVulnFinder:
         output_dir: Optional[Path] = None,
         languages: Optional[List[str]] = None,
         codeql_database_names: Optional[Dict[str, str]] = None,
+        shared_public_memory_manager: Optional[Any] = None,
+        shared_public_memory_scope: Optional[Dict[str, Any]] = None,
     ):
         self.llm_client = llm_client
         self.repo_path = repo_path
@@ -81,8 +88,10 @@ class AgenticVulnFinder:
         self.output_dir = output_dir
         self.scan_languages = list(languages or [])
         self.codeql_database_names = dict(codeql_database_names or {})
+        self.shared_public_memory_scope = dict(shared_public_memory_scope or {})
         self.toolkit = AgenticToolkit(
             repo_path,
+            shared_public_memory_manager=shared_public_memory_manager,
             languages=languages,
             codeql_database_names=codeql_database_names,
         )
@@ -97,15 +106,14 @@ class AgenticVulnFinder:
     
     def _init_memory(self):
         """Initialize memory manager with priority information."""
-        if not self.output_dir:
-            return
-        
-        # Calculate priorities
         self.module_priorities, self.file_to_module = calculate_module_priorities(
             self.software_profile,
             self.vulnerability_profile,
         )
-        
+        self.toolkit.set_software_profile(self.software_profile)
+        if not self.output_dir:
+            return
+
         # Initialize memory
         self.memory = AgentMemoryManager(self.output_dir, self.llm_client)
         
@@ -135,8 +143,6 @@ class AgenticVulnFinder:
         
         # Connect memory to toolkit for status checking
         self.toolkit.set_memory_manager(self.memory)
-        # Connect software profile to toolkit for call relationships
-        self.toolkit.set_software_profile(self.software_profile)
         
         if resumed:
             logger.info(f"Resumed scan with {len(self.memory.get_pending_files())} pending files")
@@ -161,6 +167,26 @@ class AgenticVulnFinder:
             if language_key and db_name_value:
                 normalized_codeql_database_names[language_key] = db_name_value
 
+        cli_root = Path(__file__).resolve().parents[2] / "cli"
+        agent_root = Path(__file__).resolve().parent
+        project_root = cli_root.parent
+        similarity_root = project_root / "scanner" / "similarity"
+        source_files = {
+            "scanner/agent/finder.py": agent_root / "finder.py",
+            "scanner/agent/memory.py": agent_root / "memory.py",
+            "scanner/agent/priority.py": agent_root / "priority.py",
+            "scanner/agent/prompts.py": agent_root / "prompts.py",
+            "scanner/agent/shared_memory.py": agent_root / "shared_memory.py",
+            "scanner/agent/toolkit.py": agent_root / "toolkit.py",
+            "scanner/agent/toolkit_fs.py": agent_root / "toolkit_fs.py",
+            "scanner/agent/toolkit_codeql.py": agent_root / "toolkit_codeql.py",
+            "scanner/agent/utils.py": agent_root / "utils.py",
+            "cli/agent_scanner.py": cli_root / "agent_scanner.py",
+            "scanner/similarity/retriever.py": similarity_root / "retriever.py",
+            "scanner/similarity/embedding.py": similarity_root / "embedding.py",
+            "config.py": project_root / "config.py",
+            "utils/codeql_native.py": project_root / "utils" / "codeql_native.py",
+        }
         return {
             "llm": {
                 "provider": getattr(llm_config, "provider", ""),
@@ -182,6 +208,31 @@ class AgenticVulnFinder:
                     if str(lang).strip()
                 }),
                 "codeql_database_names": normalized_codeql_database_names,
+                "shared_public_memory": {
+                    "enabled": bool(self.shared_public_memory_scope.get("enabled", False)),
+                    "root_hash": str(self.shared_public_memory_scope.get("root_hash", "")).strip(),
+                    "scope_key": str(self.shared_public_memory_scope.get("scope_key", "")).strip(),
+                    "state_hash": str(self.shared_public_memory_scope.get("state_hash", "")).strip(),
+                },
+                "module_similarity": {
+                    "threshold": float(
+                        _scanner_config.get("module_similarity", {}).get("threshold", 0.8)
+                    ),
+                    "model_name": str(
+                        _scanner_config.get("module_similarity", {}).get("model_name", "")
+                    ).strip(),
+                    "device": str(
+                        _scanner_config.get("module_similarity", {}).get("device", "cpu")
+                    ).strip(),
+                    **embedding_model_artifact_signature(
+                        str(_scanner_config.get("module_similarity", {}).get("model_name", "")).strip() or None
+                    ),
+                },
+            },
+            "source_hashes": {
+                label: stable_data_hash(path.read_text(encoding="utf-8"))
+                for label, path in source_files.items()
+                if path.exists()
             },
         }
 
@@ -475,7 +526,7 @@ class AgenticVulnFinder:
             progress_info = self.memory.format_progress_info()
             if self.critical_stop_max_priority == 1:
                 progress_info = (
-                    "Critical scope: priority-1 (AFFECTED) only. "
+                    "Critical scope: priority-1 modules only (directly affected or embedding-similar). "
                     "Do not spend turns on RELATED modules until all priority-1 files are complete.\n"
                     f"{progress_info}"
                 )

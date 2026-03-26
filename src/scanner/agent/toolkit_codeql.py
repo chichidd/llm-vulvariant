@@ -418,7 +418,17 @@ dependencies:
             )
             self._record_codeql_findings_in_memory(query_name, findings)
             summary = self._format_codeql_summary(query_name, findings)
-            return ToolResult(success=True, content=summary)
+            return ToolResult(
+                success=True,
+                content=summary,
+                metadata={
+                    "query_name": query_name,
+                    "query_language": query_language,
+                    "database_name": db_name,
+                    "finding_count": len(findings),
+                    "findings": findings[:20],
+                },
+            )
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("CodeQL query execution error: %s", exc)
             return ToolResult(

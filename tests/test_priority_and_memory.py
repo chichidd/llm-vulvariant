@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from profiler.software.models import ModuleInfo, SoftwareProfile
+from scanner.agent import priority as priority_module
 from scanner.agent.memory import AgentMemoryManager
 from scanner.agent.priority import calculate_module_priorities
 
@@ -23,6 +24,76 @@ def test_calculate_module_priorities_marks_affected_and_related():
     assert priorities["api"] == 2
     assert priorities["misc"] == 3
     assert file_to_module["core.py"] == "core"
+
+
+def test_calculate_module_priorities_promotes_embedding_similar_modules(monkeypatch):
+    software = SoftwareProfile(
+        name="repo",
+        modules=[
+            ModuleInfo(name="model_loader", files=["loader.py"], description="load model checkpoints"),
+            ModuleInfo(name="data_loader", files=["data.py"], description="read dataset files"),
+            ModuleInfo(name="webui", files=["web.py"], description="serve browser interface"),
+            ModuleInfo(name="cliui", files=["cli.py"], description="serve terminal interface"),
+            ModuleInfo(name="helper", files=["helper.py"], called_by_modules=["cliui"]),
+        ],
+    )
+    vulnerability = type("V", (), {"affected_modules": {"web.py": "webui"}})()
+
+    monkeypatch.setitem(
+        priority_module._scanner_config["module_similarity"],
+        "threshold",
+        0.8,
+    )
+
+    class DummyRetriever:
+        def similarity(self, left, right):
+            pair = (left, right)
+            if "webui" in pair[0] and "cliui" in pair[1]:
+                return 0.9
+            if "webui" in pair[1] and "cliui" in pair[0]:
+                return 0.9
+            return 0.2
+
+    monkeypatch.setattr(priority_module, "build_text_retriever", lambda **kwargs: DummyRetriever())
+
+    priorities, file_to_module = calculate_module_priorities(software, vulnerability)
+
+    assert priorities == {
+        "model_loader": 3,
+        "data_loader": 3,
+        "webui": 1,
+        "cliui": 1,
+        "helper": 2,
+    }
+    assert file_to_module == {
+        "loader.py": "model_loader",
+        "data.py": "data_loader",
+        "web.py": "webui",
+        "cli.py": "cliui",
+        "helper.py": "helper",
+    }
+
+
+def test_calculate_module_priorities_accepts_plain_attribute_module_objects():
+    plain_module = type(
+        "PlainModule",
+        (),
+        {
+            "name": "cliui",
+            "files": ["cli.py"],
+            "calls_modules": [],
+            "called_by_modules": [],
+            "category": "ui",
+            "description": "command-line interface",
+        },
+    )()
+    software = type("S", (), {"modules": [plain_module]})()
+    vulnerability = type("V", (), {"affected_modules": {"cli.py": "cliui"}})()
+
+    priorities, file_to_module = calculate_module_priorities(software, vulnerability)
+
+    assert priorities == {"cliui": 1}
+    assert file_to_module == {"cli.py": "cliui"}
 
 
 def test_agent_memory_manager_deduplicate_findings_and_progress(tmp_path):
@@ -282,7 +353,7 @@ def test_agent_memory_manager_markdown_matches_priority_one_scope(tmp_path):
 
     markdown = mgr.to_markdown()
 
-    assert "**Critical Scope**: priority-1 (affected) only" in markdown
+    assert "**Critical Scope**: priority-1 (directly affected or embedding-similar) only" in markdown
     assert "Incomplete Critical Files" not in markdown
 
 
@@ -299,6 +370,6 @@ def test_agent_memory_manager_markdown_lists_pending_priority_two_files_in_scope
 
     markdown = mgr.to_markdown()
 
-    assert "**Critical Scope**: priority-1/2 (affected + related)" in markdown
+    assert "**Critical Scope**: priority-1/2 (directly affected or embedding-similar + related)" in markdown
     assert "Incomplete Critical Files" in markdown
     assert "- [ ] `b.py`" in markdown

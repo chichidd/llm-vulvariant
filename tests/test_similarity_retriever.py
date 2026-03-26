@@ -6,7 +6,9 @@ from profiler.software.models import ModuleInfo, SoftwareProfile
 from scanner.similarity.retriever import (
     ProfileRef,
     ProfileSimilarityMetrics,
+    _embedding_only_text_similarity,
     _jaccard_similarity,
+    _module_embedding_text,
     _module_dependency_import_tokens,
     _text_similarity,
     compute_profile_similarity,
@@ -156,6 +158,30 @@ def test_text_similarity_uses_retriever_and_falls_back_on_error():
             raise RuntimeError("boom")
 
     assert _text_similarity("alpha beta", "alpha gamma", text_retriever=BrokenRetriever()) == pytest.approx(1 / 3)
+
+
+def test_embedding_only_text_similarity_never_falls_back_to_lexical():
+    class BrokenRetriever:
+        def similarity(self, left, right):
+            raise RuntimeError("boom")
+
+    assert _embedding_only_text_similarity("alpha beta", "alpha gamma", text_retriever=BrokenRetriever()) == 0.0
+
+
+def test_module_embedding_text_uses_name_category_and_description_only():
+    module = ModuleInfo(
+        name="model_loader",
+        category="model io",
+        description="Loads model checkpoints from local or remote storage.",
+        key_functions=["load_model"],
+    )
+
+    text = _module_embedding_text(module)
+
+    assert "model_loader" in text
+    assert "model io" in text
+    assert "Loads model checkpoints" in text
+    assert "load_model" not in text
 
 
 def test_compute_profile_similarity_falls_back_to_lexical_when_embedding_similarity_fails():
