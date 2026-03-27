@@ -13,6 +13,14 @@ from utils.llm_utils import extract_json_from_text
 
 logger = get_logger(__name__)
 
+REQUIRED_COMPRESSION_LIST_FIELDS = (
+    "shared_memory_hits",
+    "rejected_hypotheses",
+    "next_best_queries",
+    "evidence_gaps",
+    "files_completed_this_iteration",
+)
+
 
 def _is_compression_payload(payload: Dict[str, Any]) -> bool:
     """Return whether a JSON object matches the iteration-compression schema."""
@@ -21,12 +29,9 @@ def _is_compression_payload(payload: Dict[str, Any]) -> bool:
         return False
     if "reasoning" in payload and not isinstance(payload["reasoning"], dict):
         return False
-    if "failed_attempts" in payload and not isinstance(payload["failed_attempts"], list):
-        return False
-    if "next_step_insights" in payload and not isinstance(payload["next_step_insights"], list):
-        return False
-    if "next_steps" in payload and not isinstance(payload["next_steps"], list):
-        return False
+    for key in REQUIRED_COMPRESSION_LIST_FIELDS:
+        if not isinstance(payload.get(key), list):
+            return False
     if _contains_placeholder_values(payload):
         return False
     if not _has_meaningful_compression_context(payload):
@@ -60,6 +65,13 @@ def _has_meaningful_compression_context(payload: Dict[str, Any]) -> bool:
             return True
         if isinstance(conclusions, list) and any(
             isinstance(item, str) and item.strip() for item in conclusions
+        ):
+            return True
+
+    for key in REQUIRED_COMPRESSION_LIST_FIELDS:
+        values = payload.get(key)
+        if isinstance(values, list) and any(
+            isinstance(item, str) and item.strip() for item in values
         ):
             return True
 
@@ -156,9 +168,9 @@ def make_serializable(obj: Any) -> Any:
 DEFAULT_COMPRESSION_PROMPT = """You are a professional conversation analysis and compression expert. Please analyze and compress the assistant's scan logs from the following vulnerability scanning process, extracting key REASONING information only.
 
 **Important**: Do NOT include information about:
-- Which files/modules were checked (this is tracked separately)
 - Which files/modules are pending (this is tracked separately)
 - Reported vulnerability details (this is tracked separately)
+- Redundant inventories beyond the files completed in this iteration
 
 **Focus on extracting REASONING and INSIGHTS that are NOT tracked elsewhere:**
 
@@ -168,15 +180,20 @@ DEFAULT_COMPRESSION_PROMPT = """You are a professional conversation analysis and
      - What conclusions were reached about the code
      - Which possibilities were ruled out and why
 
-2. **Failed attempts**: Record explorations that did not succeed
-     - What was tried but no vulnerability was found
-     - Why it was a false positive or dead end
-     - Lessons learned for future analysis
+2. **Shared memory reuse**: Record which shared-memory queries or observations helped
+     - Focused queries that produced useful hits
+     - Reusable observations worth carrying forward
 
-3. **Next-step insights**: Hypotheses and strategies to validate
-     - Specific patterns or APIs to look for
+3. **Rejected hypotheses**: Record explorations that did not succeed
+     - What was tried but no vulnerability was found
+     - Why it was a false positive, dead end, or disqualified by negative constraints
+
+4. **Next-step insights**: Capture the next focused searches
+     - Specific patterns or APIs to look for next
      - Suspected vulnerable code paths not yet confirmed
-     - Analysis strategies for remaining modules
+     - Evidence gaps blocking a conclusion
+
+5. **Iteration progress**: Record only the files completed in this iteration
 
 **Key principles:**
 - Only include information that helps understand the REASONING, not raw facts
@@ -192,13 +209,11 @@ DEFAULT_COMPRESSION_PROMPT = """You are a professional conversation analysis and
         "analysis": "<key insights and analysis logic>",
         "conclusions": ["<conclusion_1>", "<conclusion_2>"]
     },
-    "failed_attempts": [
-        {
-            "what": "<what was tried>",
-            "why_failed": "<why it failed or why no issue was found>"
-        }
-    ],
-    "next_step_insights": ["<hypothesis or strategy to validate>"]
+    "shared_memory_hits": ["<focused shared-memory query or reusable observation>"],
+    "rejected_hypotheses": ["<what was rejected and why>"],
+    "next_best_queries": ["<next focused query or API family to search>"],
+    "evidence_gaps": ["<missing evidence that blocks confirmation>"],
+    "files_completed_this_iteration": ["<file path completed in this iteration>"]
 }
 ```
 

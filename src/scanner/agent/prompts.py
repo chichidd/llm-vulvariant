@@ -7,7 +7,12 @@ from typing import Any, Dict, List
 
 from .utils import _to_dict
 
-def build_system_prompt(vulnerability_profile: Any, toolkit) -> str:
+
+def build_system_prompt(
+    vulnerability_profile: Any,
+    toolkit,
+    shared_observation_count: int = 0,
+) -> str:
     vuln_dict = _to_dict(vulnerability_profile)
     vuln_summary = {
         "cve_id": vuln_dict.get("cve_id"),
@@ -22,6 +27,11 @@ def build_system_prompt(vulnerability_profile: Any, toolkit) -> str:
         "flow_features": vuln_dict.get("flow_features"),
         "exploit_scenarios": vuln_dict.get("exploit_scenarios"),
         "exploit_conditions": vuln_dict.get("exploit_conditions"),
+        "query_terms": vuln_dict.get("query_terms", []),
+        "dangerous_apis": vuln_dict.get("dangerous_apis", []),
+        "source_indicators": vuln_dict.get("source_indicators", []),
+        "sink_indicators": vuln_dict.get("sink_indicators", []),
+        "negative_constraints": vuln_dict.get("negative_constraints", []),
     }
 
     tools_desc = "\n".join(
@@ -35,12 +45,22 @@ def build_system_prompt(vulnerability_profile: Any, toolkit) -> str:
         for t in toolkit.get_available_tools()
         if isinstance(t, dict)
     }
-    shared_memory_hint = (
-        "\n    - Use read_shared_public_memory when you want reusable observations from previous "
-        "scans of the same target repo"
-        if "read_shared_public_memory" in tool_names
-        else ""
-    )
+    shared_memory_hint = ""
+    if "read_shared_public_memory" in tool_names:
+        shared_memory_hint = (
+            "\n    - Use read_shared_public_memory when you want reusable observations from previous "
+            "scans of the same target repo"
+        )
+        if shared_observation_count > 0:
+            shared_memory_hint += (
+                f"\n    - There are already {shared_observation_count} reusable shared observations "
+                "available for this target repo and commit in the current batch run; read them early "
+                "before repeating broad searches"
+                "\n    - Prefer a focused query derived from the current vulnerability pattern "
+                "(SOURCE/SINK/FLOW, dangerous APIs, module names, or sink keywords)"
+                "\n    - Do not default to an empty shared-memory query unless you explicitly want "
+                "a broad overview"
+            )
 
     return f"""You are a security researcher specializing in source-code vulnerability hunting.
 Your task is to find vulnerabilities in other parts of the codebase that are "similar" to the known vulnerability.
@@ -63,23 +83,39 @@ Key point:
 {tools_desc}
 
 ## Analysis Strategy
-1. Deeply understand the vulnerability pattern:
+1. Identify the vulnerability pattern from query_terms, dangerous_apis, source_indicators, sink_indicators, and negative_constraints:
     - SOURCE: Where does untrusted data enter?
     - SINK: What dangerous operation is performed?
     - FLOW: How does data flow from the source to the sink?
+    - Treat negative_constraints as disqualifiers that should reject false matches early.
 
-2. For each candidate module, you can use the following tools depending on your needs:
+2. If shared observations are available, read them with a focused query before broad reads:
+    - Start from focused query terms derived from the current vulnerability pattern.
+    - Reuse strong shared-memory hits before repeating repo-wide searches.
+{shared_memory_hint}
+
+3. Search PRIORITY-1 scope first:
+    - Exhaust directly affected or embedding-similar modules before widening.
+
+4. For each candidate module, use the following tools depending on your needs:
     - Use list_files_in_folder to quickly understand the module
     - Use search_in_file/search_in_folder to locate potential sinks
     - Use search_in_folder to identify sources (config parsing, user input, file reads, etc.)
     - Use read_file or get_function_code to inspect suspicious code in depth
     - Use analyze_data_flow to trace data flow from source to sink
-{shared_memory_hint}
 
-3. Think about alternative implementations:
+5. Think about alternative implementations:
     - Different APIs for the same functionality
     - Different data formats (JSON, YAML, XML, pickle)
     - Different execution methods (subprocess, os, multiprocessing)
+
+6. Widen to RELATED or repo-wide searches only when the current evidence is insufficient:
+    - Expand scope only after focused PRIORITY-1 checks and shared-memory reads leave unresolved gaps.
+
+7. Record rejected hypotheses, evidence gaps, and next best queries:
+    - Keep track of shared-memory hits worth reusing.
+    - Note why candidate patterns were rejected so they are not retried blindly.
+    - Capture the best next focused queries before broadening scope.
 
 ## Evidence-first reporting rule
 - Do not report a finding without evidence snippets from files/functions.
@@ -100,6 +136,7 @@ def build_initial_user_message(
     software_profile: Any,
     module_priorities: Dict[str, int] = None,
     critical_stop_max_priority: int = 2,
+    shared_observation_count: int = 0,
 ) -> str:
     software_dict = _to_dict(software_profile)
     module_priorities = module_priorities or {}
@@ -151,6 +188,27 @@ def build_initial_user_message(
         else "Do not skip any PRIORITY-1 or RELATED modules."
     )
 
+    shared_memory_section = ""
+    if shared_observation_count > 0:
+        shared_memory_section = (
+            f"- Shared public memory already has {shared_observation_count} reusable observations for this "
+            "target repo and commit. Call read_shared_public_memory before broad searches when you start a new module or pattern.\n"
+            "- Use focused query terms derived from the current vulnerability pattern instead of an empty query whenever possible.\n"
+        )
+    shared_memory_priority_line = ""
+    if shared_observation_count > 0 and p1_count == 0:
+        shared_memory_priority_line = (
+            "No PRIORITY-1 modules are currently identified. Start by calling read_shared_public_memory "
+            "with focused query terms derived from the current vulnerability pattern before broad "
+            "repo-wide searches.\n"
+        )
+    start_instruction = (
+        "Begin analysis now. Start by reading shared public memory with a focused query, then widen "
+        "to repo-wide searches."
+        if shared_memory_priority_line
+        else "Begin analysis now. Start with the 🔴 PRIORITY-1 modules."
+    )
+
     return f"""Based on the project architecture and the known vulnerability pattern, search for similar vulnerabilities in the codebase.
 
 ## Module Priority Guide
@@ -169,13 +227,15 @@ def build_initial_user_message(
 5. Mark each fully analyzed file with mark_file_completed, including files with no findings
 
 ## Analysis Strategy
-- For each PRIORITY-1 module, scan ALL files for the vulnerability pattern
-- Look for alternative APIs that perform similar dangerous operations
+{shared_memory_priority_line}- For each PRIORITY-1 module, scan ALL files for the vulnerability pattern
+{shared_memory_section}- Look for alternative APIs that perform similar dangerous operations
 - Trace data flow from user input/config to dangerous sinks
+- Widen to 🟡 RELATED modules only when 🔴 PRIORITY-1 evidence is insufficient
+- Record rejected hypotheses, evidence gaps, shared-memory hits, and next best queries as you go
 - {analysis_scope_line}
 - Keep scan progress accurate by calling mark_file_completed as soon as a file is fully analyzed
 
-Begin analysis now. Start with the 🔴 PRIORITY-1 modules."""
+{start_instruction}"""
 
 
 def build_intermediate_user_message(
@@ -183,6 +243,7 @@ def build_intermediate_user_message(
     findings: List[Dict[str, str]] = None,
     progress_info: str = "",
     critical_stop_max_priority: int = 2,
+    shared_observation_count: int = 0,
 ) -> str:
     """Build intermediate prompt with context about what's already been scanned."""
     normalized_max_priority = 1 if critical_stop_max_priority == 1 else 2
@@ -191,16 +252,29 @@ def build_intermediate_user_message(
 1. Have you scanned ALL files in PRIORITY-1 (🔴) modules?
 2. Do not spend turns on RELATED (🟡) modules while any PRIORITY-1 file remains pending
 3. Mark each fully analyzed file with mark_file_completed, even when it has no finding
-4. Do NOT repeat previous analysis - see scanned files and findings below."""
+4. Widen scope only when the current evidence is insufficient
+5. Record rejected hypotheses, evidence gaps, shared-memory hits, and next best queries
+6. Do NOT repeat previous analysis - see scanned files and findings below."""
     else:
         msg = """Continue your vulnerability analysis:
 1. Have you scanned ALL files in PRIORITY-1 (🔴) modules?
 2. Have you checked RELATED (🟡) modules?
 3. Mark each fully analyzed file with mark_file_completed, even when it has no finding
-4. Do NOT repeat previous analysis - see scanned files and findings below."""
+4. Widen scope only when the current evidence is insufficient
+5. Record rejected hypotheses, evidence gaps, shared-memory hits, and next best queries
+6. Do NOT repeat previous analysis - see scanned files and findings below."""
     
     if progress_info:
         msg += f"\n\n**Progress**: {progress_info}"
+
+    if shared_observation_count > 0:
+        msg += (
+            "\n\n**Shared Public Memory**: "
+            f"{shared_observation_count} reusable observations are already available from previous "
+            "scans of this target repo and commit. Call `read_shared_public_memory` before repeating "
+            "broad searches for a new module or pattern. Prefer focused query terms derived from the "
+            "current vulnerability pattern instead of an empty query unless you need a broad overview."
+        )
     
     if findings:
         msg += "\n\n**Already Reported Vulnerabilities** (DO NOT REPORT AGAIN):"

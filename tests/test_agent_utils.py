@@ -39,7 +39,15 @@ def test_make_serializable_handles_nested_custom_objects():
 def test_compress_iteration_conversation_parses_json_code_block():
     llm = DummyLLM(
         "```json\n"
-        "{\"summary\":\"s\",\"reasoning\":{\"analysis\":\"validated the relevant sink path\"}}\n"
+        "{"
+        "\"summary\":\"s\","
+        "\"reasoning\":{\"analysis\":\"validated the relevant sink path\"},"
+        "\"shared_memory_hits\":[\"query=os.system\"],"
+        "\"rejected_hypotheses\":[\"subprocess path is sanitized\"],"
+        "\"next_best_queries\":[\"shell=True\"],"
+        "\"evidence_gaps\":[\"need source-to-sink trace\"],"
+        "\"files_completed_this_iteration\":[\"app/exec.py\"]"
+        "}\n"
         "```"
     )
 
@@ -53,6 +61,7 @@ def test_compress_iteration_conversation_parses_json_code_block():
     assert result["iteration_number"] == 2
     assert result["content"]["summary"] == "s"
     assert result["content"]["reasoning"]["analysis"] == "validated the relevant sink path"
+    assert result["content"]["shared_memory_hits"] == ["query=os.system"]
 
 
 def test_compress_iteration_conversation_returns_error_payload_on_invalid_json():
@@ -98,10 +107,28 @@ def test_compress_iteration_conversation_rejects_summary_only_payload():
     assert result["summary"] == "Compression failed"
 
 
+def test_compress_iteration_conversation_rejects_missing_required_schema_fields():
+    llm = DummyLLM(
+        '{"summary":"tmp","reasoning":{"analysis":"x"},"failed_attempts":[],"next_step_insights":[]}'
+    )
+
+    result = compress_iteration_conversation(
+        llm_client=llm,
+        iteration=7,
+        iteration_history=[{"role": "assistant", "content": "x"}],
+        verbose=False,
+    )
+
+    assert result["iteration_number"] == 7
+    assert result["summary"] == "Compression failed"
+
+
 def test_compress_iteration_conversation_skips_example_json_before_final_summary():
     llm = DummyLLM(
         'Example: {"summary":"tmp"}\n'
-        'Final: {"summary":"s","reasoning":{"analysis":"x"},"failed_attempts":[],"next_step_insights":[]}'
+        'Final: {"summary":"s","reasoning":{"analysis":"x"},"shared_memory_hits":["q"],'
+        '"rejected_hypotheses":["h"],"next_best_queries":["n"],'
+        '"evidence_gaps":["g"],"files_completed_this_iteration":["f.py"]}'
     )
 
     result = compress_iteration_conversation(
@@ -114,6 +141,7 @@ def test_compress_iteration_conversation_skips_example_json_before_final_summary
     assert result["iteration_number"] == 5
     assert result["content"]["summary"] == "s"
     assert result["content"]["reasoning"]["analysis"] == "x"
+    assert result["content"]["next_best_queries"] == ["n"]
 
 
 def test_compress_iteration_conversation_rejects_placeholder_example_payload():
@@ -127,8 +155,11 @@ def test_compress_iteration_conversation_rejects_placeholder_example_payload():
         '"analysis":"<key insights and analysis logic>",'
         '"conclusions":["<conclusion_1>"]'
         "},"
-        '"failed_attempts":[{"what":"<what was tried>","why_failed":"<why it failed or why no issue was found>"}],'
-        '"next_step_insights":["<hypothesis or strategy to validate>"]'
+        '"shared_memory_hits":["<shared memory query or hit>"],'
+        '"rejected_hypotheses":["<rejected hypothesis and why>"],'
+        '"next_best_queries":["<next best query>"],'
+        '"evidence_gaps":["<missing evidence>"],'
+        '"files_completed_this_iteration":["<completed file path>"]'
         "}\n"
         "```"
     )
