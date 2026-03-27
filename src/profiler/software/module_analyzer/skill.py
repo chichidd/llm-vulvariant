@@ -491,8 +491,15 @@ class SkillModuleAnalyzer:
                 "name": name,
                 "category": coarse,
                 "description": description,
+                "responsibility": description,
+                "entry_points": [],
                 "key_functions": [],
+                "interfaces": [],
+                "depends_on": [],
                 "dependencies": [],
+                "boundary_rationale": "Grouped by inferred taxonomy ownership and observed file locality.",
+                "evidence_paths": sorted(files),
+                "confidence": "medium",
                 "files": sorted(files),
             }
             modules.append(module)
@@ -528,6 +535,16 @@ class SkillModuleAnalyzer:
         for module in modules:
             name = module.get("name", "")
             category, _ = self._split_module_name(name)
+            depends_on = module.get("depends_on", [])
+            if not isinstance(depends_on, list):
+                depends_on = []
+            dependencies = module.get("dependencies", [])
+            if not isinstance(dependencies, list):
+                dependencies = []
+            if not depends_on and dependencies:
+                depends_on = list(dependencies)
+            if not dependencies and depends_on:
+                dependencies = list(depends_on)
             files = [
                 file_path
                 for file_path in (module.get("files") or files_by_module.get(name, []))
@@ -537,8 +554,15 @@ class SkillModuleAnalyzer:
                 "name": name,
                 "category": module.get("category") or category,
                 "description": module.get("description", ""),
+                "responsibility": module.get("responsibility", module.get("description", "")),
+                "entry_points": module.get("entry_points", []),
                 "key_functions": module.get("key_functions", []),
-                "dependencies": module.get("dependencies", []),
+                "interfaces": module.get("interfaces", []),
+                "depends_on": depends_on,
+                "dependencies": dependencies,
+                "boundary_rationale": module.get("boundary_rationale", ""),
+                "evidence_paths": module.get("evidence_paths", []),
+                "confidence": module.get("confidence", "unknown"),
                 "files": sorted(set(files)),
             })
         return normalized

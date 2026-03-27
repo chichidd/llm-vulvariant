@@ -118,6 +118,8 @@ You can use the following tools to gather information:
 - Call this tool when you have collected enough information to identify all major functional modules
 - Provide the identified module list via the modules parameter
 - **IMPORTANT**: Each module MUST include a "category" field with a valid taxonomy classification (format: "coarse.fine")
+- For each module, return `name`, `category`, `description`, `responsibility`, `entry_points`, `files`, `key_functions`, `interfaces`, `depends_on`, `dependencies`, `boundary_rationale`, `evidence_paths`, and `confidence`
+- Keep `depends_on` and `dependencies` aligned unless repository evidence clearly supports a difference
 
 # Analysis Workflow
 1.	First, use list_folder to explore the repository’s directory structure.
@@ -148,7 +150,8 @@ You can use the following tools to gather information:
 - Maintain a global view of the repository structure throughout the analysis.
 - Avoid making assumptions without sufficient evidence.
 - Before finalizing, ensure you have considered all major folders and modules.
-- When using finalize, for each module, list paths of all the relevant files and folders you have explored.
+- When using finalize, for each module, `responsibility` should explain the owned concern, `entry_points` should list externally visible commands/APIs/routes, `interfaces` should describe how callers interact with the module, `boundary_rationale` should justify why the files belong together, `evidence_paths` should list repository-relative paths you inspected, and `confidence` must be `high`, `medium`, or `low`.
+- Use empty lists instead of guessing for `entry_points`, `interfaces`, `depends_on`, `dependencies`, or `evidence_paths` when evidence is insufficient.
 - Your final output must be comprehensive and accurate, with no omissions.
 """
 

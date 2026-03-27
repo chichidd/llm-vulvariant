@@ -109,11 +109,14 @@ class ModuleInfo:
     name: str
     category: str = ""  # 功能类别: data_loading, model_serving, api_interface, etc.
     description: str = ""
+    responsibility: str = ""  # 模块边界内的核心职责
+    entry_points: List[str] = field(default_factory=list)            # 对外入口
     files: List[str] = field(default_factory=list)
     
     # 功能特征（从 RepoAnalyzer 提取）
     key_functions: List[str] = field(default_factory=list)            # 关键函数
-    
+    interfaces: List[str] = field(default_factory=list)               # 模块暴露/依赖的接口
+
     # 数据流特征
     data_sources: List[str] = field(default_factory=list)             # 数据来源: file, network, database, user_input
     data_formats: List[str] = field(default_factory=list)             # 数据格式: json, yaml, pickle, csv
@@ -122,19 +125,40 @@ class ModuleInfo:
     # 依赖特征
     external_dependencies: List[str] = field(default_factory=list)    # 外部库依赖
     internal_dependencies: List[str] = field(default_factory=list)    # 内部模块依赖
+    depends_on: List[str] = field(default_factory=list)               # 新模块分析依赖
     dependencies: List[str] = field(default_factory=list)             # 原始模块分析依赖
+    boundary_rationale: str = ""                                      # 模块边界划分依据
+    evidence_paths: List[str] = field(default_factory=list)           # 支撑该模块划分的证据路径
+    confidence: str = "unknown"                                       # 模块画像置信度
 
     # 调用关系（来自调用图）
     called_by_modules: List[str] = field(default_factory=list)        # 被哪些模块调用
     calls_modules: List[str] = field(default_factory=list)            # 调用哪些模块
+
+    def __post_init__(self) -> None:
+        if not self.depends_on and self.dependencies:
+            self.depends_on = list(self.dependencies)
+        if not self.dependencies and self.depends_on:
+            self.dependencies = list(self.depends_on)
+        if not self.confidence:
+            self.confidence = "unknown"
     
     def to_dict(self) -> Dict[str, Any]:
+        resolved_depends_on = self.depends_on or self.dependencies
+        resolved_dependencies = self.dependencies or self.depends_on
         data = {
             "name": self.name,
             "category": self.category,
             "description": self.description,
+            "responsibility": self.responsibility,
+            "entry_points": self.entry_points,
             "files": self.files,
             "key_functions": self.key_functions,
+            "interfaces": self.interfaces,
+            "depends_on": resolved_depends_on,
+            "boundary_rationale": self.boundary_rationale,
+            "evidence_paths": self.evidence_paths,
+            "confidence": self.confidence,
             "data_sources": self.data_sources,
             "data_formats": self.data_formats,
             "processing_operations": self.processing_operations,
@@ -143,24 +167,44 @@ class ModuleInfo:
             "called_by_modules": self.called_by_modules,
             "calls_modules": self.calls_modules,
         }
-        if self.dependencies:
-            data["dependencies"] = self.dependencies
+        if resolved_dependencies:
+            data["dependencies"] = resolved_dependencies
         return data
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ModuleInfo":
+        depends_on = data.get("depends_on", [])
+        if not isinstance(depends_on, list):
+            depends_on = []
+
+        dependencies = data.get("dependencies", [])
+        if not isinstance(dependencies, list):
+            dependencies = []
+
+        if not depends_on and dependencies:
+            depends_on = list(dependencies)
+        if not dependencies and depends_on:
+            dependencies = list(depends_on)
+
         return cls(
             name=data.get("name", ""),
             category=data.get("category", ""),
             description=data.get("description", ""),
+            responsibility=data.get("responsibility", ""),
+            entry_points=data.get("entry_points", []),
             files=data.get("files", []),
             key_functions=data.get("key_functions", []),
+            interfaces=data.get("interfaces", []),
             data_sources=data.get("data_sources", []),
             data_formats=data.get("data_formats", []),
             processing_operations=data.get("processing_operations", []),
             external_dependencies=data.get("external_dependencies", []),
             internal_dependencies=data.get("internal_dependencies", []),
-            dependencies=data.get("dependencies", []),
+            depends_on=depends_on,
+            dependencies=dependencies,
+            boundary_rationale=data.get("boundary_rationale", ""),
+            evidence_paths=data.get("evidence_paths", []),
+            confidence=data.get("confidence", "unknown"),
             called_by_modules=data.get("called_by_modules", []),
             calls_modules=data.get("calls_modules", []),
         )

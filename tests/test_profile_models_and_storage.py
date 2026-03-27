@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from profiler.profile_storage import ProfileStorageManager
+from profiler.software.analyzer import SoftwareProfiler
 from profiler.software.models import DataFlowPattern, ModuleInfo, SoftwareProfile
 from profiler.vulnerability.models import (
     FlowFeature,
@@ -14,6 +15,35 @@ from profiler.vulnerability.models import (
     SourceFeature,
     VulnerabilityProfile,
 )
+
+
+def test_moduleinfo_roundtrip_preserves_richer_contract_fields():
+    module = ModuleInfo(
+        name="launcher",
+        category="execution.launcher",
+        description="Coordinates process startup.",
+        responsibility="Dispatch subprocess-backed launch requests.",
+        entry_points=["launch()"],
+        files=["src/launcher.py"],
+        key_functions=["launch"],
+        interfaces=["CLI", "Python API"],
+        depends_on=["core.runtime"],
+        boundary_rationale="Owns the process execution boundary.",
+        evidence_paths=["src/launcher.py", "src/cli.py"],
+        confidence="high",
+    )
+
+    data = module.to_dict()
+    restored = ModuleInfo.from_dict(data)
+
+    assert data["responsibility"] == "Dispatch subprocess-backed launch requests."
+    assert data["entry_points"] == ["launch()"]
+    assert data["interfaces"] == ["CLI", "Python API"]
+    assert data["depends_on"] == ["core.runtime"]
+    assert data["boundary_rationale"] == "Owns the process execution boundary."
+    assert data["evidence_paths"] == ["src/launcher.py", "src/cli.py"]
+    assert data["confidence"] == "high"
+    assert restored == module
 
 
 def test_moduleinfo_to_dict_and_from_dict_fields():
@@ -44,6 +74,62 @@ def test_moduleinfo_preserves_raw_dependencies_field_when_present():
 
     assert module.dependencies == ["core"]
     assert module.to_dict()["dependencies"] == ["core"]
+    assert module.depends_on == ["core"]
+
+
+def test_moduleinfo_uses_depends_on_as_legacy_dependencies_when_needed():
+    module = ModuleInfo.from_dict(
+        {
+            "name": "api",
+            "files": ["src/api.py"],
+            "depends_on": ["core"],
+        }
+    )
+
+    assert module.depends_on == ["core"]
+    assert module.dependencies == ["core"]
+    assert module.to_dict()["depends_on"] == ["core"]
+    assert module.to_dict()["dependencies"] == ["core"]
+
+
+def test_software_profiler_enhancement_preserves_richer_module_contract():
+    profiler = SoftwareProfiler.__new__(SoftwareProfiler)
+    profiler.detection_rules = {
+        "data_sources": {},
+        "data_formats": {},
+        "processing_operations": {},
+    }
+
+    modules = profiler._enhance_modules_with_repo_analysis(
+        base_modules=[
+            {
+                "name": "launcher",
+                "category": "execution.launcher",
+                "description": "Coordinates process startup.",
+                "responsibility": "Dispatch subprocess-backed launch requests.",
+                "entry_points": ["launch()"],
+                "files": ["src/launcher.py"],
+                "key_functions": ["launch"],
+                "interfaces": ["CLI"],
+                "depends_on": ["core.runtime"],
+                "boundary_rationale": "Owns the process execution boundary.",
+                "evidence_paths": ["src/launcher.py"],
+                "confidence": "high",
+            }
+        ],
+        repo_analysis={"functions": [], "call_graph_edges": [], "dependencies": []},
+        repo_files=["src/launcher.py"],
+    )
+
+    assert len(modules) == 1
+    assert modules[0].responsibility == "Dispatch subprocess-backed launch requests."
+    assert modules[0].entry_points == ["launch()"]
+    assert modules[0].interfaces == ["CLI"]
+    assert modules[0].depends_on == ["core.runtime"]
+    assert modules[0].boundary_rationale == "Owns the process execution boundary."
+    assert modules[0].evidence_paths == ["src/launcher.py"]
+    assert modules[0].confidence == "high"
+    assert modules[0].dependencies == ["core.runtime"]
 
 
 def test_software_profile_roundtrip_keeps_module_and_dependency_fields():
@@ -153,7 +239,19 @@ def test_software_profile_from_dict_normalizes_modules_and_data_flow_patterns():
 def test_software_profile_to_dict_normalizes_module_dicts():
     profile = SoftwareProfile(
         name="repo",
-        modules=[{"name": "api", "files": ["src/api.py"], "dependencies": ["core"]}],
+        modules=[
+            {
+                "name": "api",
+                "files": ["src/api.py"],
+                "responsibility": "Serve API requests.",
+                "entry_points": ["handle_request()"],
+                "interfaces": ["HTTP API"],
+                "depends_on": ["core"],
+                "boundary_rationale": "Owns request parsing and response emission.",
+                "evidence_paths": ["src/api.py"],
+                "confidence": "high",
+            }
+        ],
         data_flow_patterns=[{"pattern_type": "network_to_file"}],
     )
 
@@ -164,8 +262,15 @@ def test_software_profile_to_dict_normalizes_module_dicts():
             "name": "api",
             "category": "",
             "description": "",
+            "responsibility": "Serve API requests.",
+            "entry_points": ["handle_request()"],
             "files": ["src/api.py"],
             "key_functions": [],
+            "interfaces": ["HTTP API"],
+            "depends_on": ["core"],
+            "boundary_rationale": "Owns request parsing and response emission.",
+            "evidence_paths": ["src/api.py"],
+            "confidence": "high",
             "data_sources": [],
             "data_formats": [],
             "processing_operations": [],

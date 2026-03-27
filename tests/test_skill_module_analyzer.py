@@ -2,7 +2,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from profiler.software.module_analyzer.toolkit import ModuleAnalyzerToolkit
 from profiler.software.module_analyzer.skill import SkillModuleAnalyzer as SkillModuleAnalyzer
+from profiler.software.prompts import MODULE_ANALYSIS_SYSTEM_PROMPT
 
 
 
@@ -31,6 +33,77 @@ def test_skill_attach_dependencies_ignores_module_level_entries():
     enriched = analyzer._attach_key_functions_and_dependencies(modules, repo_info, Path("/tmp/repo"))
 
     assert enriched[0]["key_functions"] == ["run"]
+
+
+def test_module_analysis_prompt_requests_richer_module_contract():
+    prompt = MODULE_ANALYSIS_SYSTEM_PROMPT.lower()
+
+    assert "responsibility" in prompt
+    assert "entry_points" in prompt
+    assert "interfaces" in prompt
+    assert "depends_on" in prompt
+    assert "boundary_rationale" in prompt
+    assert "evidence_paths" in prompt
+    assert "confidence" in prompt
+
+
+def test_module_analyzer_finalize_schema_includes_richer_module_fields():
+    toolkit = ModuleAnalyzerToolkit(repo_path=Path("/tmp/repo"), file_list=["src/launcher.py"])
+    tools = toolkit.get_available_tools()
+
+    finalize_tool = next(tool for tool in tools if tool["function"]["name"] == "finalize")
+    module_properties = finalize_tool["function"]["parameters"]["properties"]["modules"]["items"]["properties"]
+
+    assert "responsibility" in module_properties
+    assert "entry_points" in module_properties
+    assert "interfaces" in module_properties
+    assert "depends_on" in module_properties
+    assert "boundary_rationale" in module_properties
+    assert "evidence_paths" in module_properties
+    assert "confidence" in module_properties
+
+
+def test_skill_normalize_modules_preserves_richer_fields_and_legacy_dependencies():
+    analyzer = SkillModuleAnalyzer(code_extensions=[".py"])
+
+    normalized = analyzer._normalize_modules(
+        modules=[
+            {
+                "name": "execution.launcher",
+                "category": "execution",
+                "description": "Coordinates process startup.",
+                "responsibility": "Dispatch subprocess-backed launch requests.",
+                "entry_points": ["launch()"],
+                "files": ["src/launcher.py", "docs/launcher.md"],
+                "key_functions": ["launch"],
+                "interfaces": ["CLI"],
+                "depends_on": ["core.runtime"],
+                "boundary_rationale": "Owns the process execution boundary.",
+                "evidence_paths": ["src/launcher.py"],
+                "confidence": "high",
+            }
+        ],
+        file_index={"src/launcher.py": "execution.launcher"},
+        repo_info={"files": ["src/launcher.py", "docs/launcher.md"]},
+    )
+
+    assert normalized == [
+        {
+            "name": "execution.launcher",
+            "category": "execution",
+            "description": "Coordinates process startup.",
+            "responsibility": "Dispatch subprocess-backed launch requests.",
+            "entry_points": ["launch()"],
+            "files": ["src/launcher.py"],
+            "key_functions": ["launch"],
+            "interfaces": ["CLI"],
+            "depends_on": ["core.runtime"],
+            "boundary_rationale": "Owns the process execution boundary.",
+            "evidence_paths": ["src/launcher.py"],
+            "confidence": "high",
+            "dependencies": ["core.runtime"],
+        }
+    ]
 
 
 class _StorageManagerStub:

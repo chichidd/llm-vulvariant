@@ -83,6 +83,15 @@ class ModuleAnalyzerToolkit:
                                         "name": {"type": "string", "description": "Module name."},
                                         "category": {"type": "string", "description": "Module category (e.g., web_interface, data_loading, core_algorithm, etc.)."},
                                         "description": {"type": "string", "description": "Module functionality description."},
+                                        "responsibility": {
+                                            "type": "string",
+                                            "description": "One-sentence summary of the concern this module owns.",
+                                        },
+                                        "entry_points": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "description": "Externally visible commands, APIs, routes, or startup hooks owned by the module.",
+                                        },
                                         "files": {
                                             "type": "array",
                                             "items": {"type": "string"},
@@ -93,10 +102,33 @@ class ModuleAnalyzerToolkit:
                                             "items": {"type": "string"},
                                             "description": "List of key functions or class names in the module.",
                                         },
-                                        "dependencies": {
+                                        "interfaces": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "description": "Interfaces the module exposes or relies on, such as CLI, HTTP API, worker, or library API.",
+                                        },
+                                        "depends_on": {
                                             "type": "array",
                                             "items": {"type": "string"},
                                             "description": "List of other modules that this module depends on.",
+                                        },
+                                        "dependencies": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "description": "Compatibility copy of the module dependency list for downstream consumers that still read dependencies.",
+                                        },
+                                        "boundary_rationale": {
+                                            "type": "string",
+                                            "description": "Short justification for why these files belong to one logical module.",
+                                        },
+                                        "evidence_paths": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "description": "Repository-relative paths inspected as evidence for this module boundary.",
+                                        },
+                                        "confidence": {
+                                            "type": "string",
+                                            "description": "Confidence level for this module summary: high, medium, or low.",
                                         },
                                     },
                                     "required": ["name", "category", "description", "files"],

@@ -1072,13 +1072,27 @@ class SoftwareProfiler:
                         calls_modules.add(callee_module)
 
             # 统一 internal_dependencies 与 calls_modules 的来源，避免路径映射不一致。
-            base_internal_dependencies = module.get('dependencies', [])
-            if not isinstance(base_internal_dependencies, list):
-                base_internal_dependencies = []
+            raw_depends_on = module.get('depends_on', [])
+            if not isinstance(raw_depends_on, list):
+                raw_depends_on = []
+            raw_dependencies = module.get('dependencies', [])
+            if not isinstance(raw_dependencies, list):
+                raw_dependencies = []
+            if not raw_depends_on and raw_dependencies:
+                raw_depends_on = list(raw_dependencies)
+            if not raw_dependencies and raw_depends_on:
+                raw_dependencies = list(raw_depends_on)
+
+            dependency_candidates_for_internal = list(raw_dependencies)
+            for dep_name in raw_depends_on:
+                if isinstance(dep_name, str) and dep_name not in dependency_candidates_for_internal:
+                    dependency_candidates_for_internal.append(dep_name)
             preserved_dependencies = []
             seen_preserved_dependencies = set()
+            preserved_depends_on = []
+            seen_preserved_depends_on = set()
             internal_dependencies = set(calls_modules)
-            for dep_name in base_internal_dependencies:
+            for dep_name in raw_dependencies:
                 if not isinstance(dep_name, str):
                     continue
                 normalized_dep_name = dep_name.strip()
@@ -1091,19 +1105,49 @@ class SoftwareProfiler:
                     continue
                 if normalized_dep_name in module_name_to_files:
                     internal_dependencies.add(normalized_dep_name)
+
+            for dep_name in dependency_candidates_for_internal:
+                if not isinstance(dep_name, str):
+                    continue
+                normalized_dep_name = dep_name.strip()
+                if not normalized_dep_name or normalized_dep_name == module_name:
+                    continue
+                if normalized_dep_name in module_name_to_files:
+                    internal_dependencies.add(normalized_dep_name)
+
+            for dep_name in raw_depends_on:
+                if not isinstance(dep_name, str):
+                    continue
+                normalized_dep_name = dep_name.strip()
+                if not normalized_dep_name or normalized_dep_name in seen_preserved_depends_on:
+                    continue
+                preserved_depends_on.append(normalized_dep_name)
+                seen_preserved_depends_on.add(normalized_dep_name)
+
+            if not preserved_depends_on and preserved_dependencies:
+                preserved_depends_on = list(preserved_dependencies)
+            if not preserved_dependencies and preserved_depends_on:
+                preserved_dependencies = list(preserved_depends_on)
             
             enhanced_module = ModuleInfo(
                 name=module_name,
                 category=module.get('category', ''),
                 description=module.get('description', ''),
+                responsibility=module.get('responsibility', module.get('description', '')),
+                entry_points=module.get('entry_points', []),
                 files=module_files,
                 key_functions=module.get('key_functions', []),
+                interfaces=module.get('interfaces', []),
                 data_sources=data_sources,
                 data_formats=data_formats,
                 processing_operations=processing_operations,
                 external_dependencies=sorted(list(external_dependencies)),
                 internal_dependencies=sorted(list(internal_dependencies)),
+                depends_on=preserved_depends_on,
                 dependencies=preserved_dependencies,
+                boundary_rationale=module.get('boundary_rationale', ''),
+                evidence_paths=module.get('evidence_paths', []),
+                confidence=module.get('confidence', 'unknown'),
                 called_by_modules=sorted(list(called_by_modules)),
                 calls_modules=sorted(list(calls_modules))
             )
