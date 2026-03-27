@@ -282,9 +282,39 @@ def compute_profile_similarity(
     """
     weights = weights or DEFAULT_SIMILARITY_WEIGHTS
 
+    source_description_text = "\n".join(
+        part
+        for part in (
+            source_profile.description,
+            f"capabilities: {' | '.join(source_profile.capabilities or [])}",
+            f"interfaces: {' | '.join(source_profile.interfaces or [])}",
+            f"deployment: {' | '.join(source_profile.deployment_style or [])}",
+            f"operator_inputs: {' | '.join(source_profile.operator_inputs or [])}",
+            f"external_surfaces: {' | '.join(source_profile.external_surfaces or [])}",
+            f"evidence: {source_profile.evidence_summary}",
+            f"confidence: {source_profile.confidence}",
+            f"open_questions: {' | '.join(source_profile.open_questions or [])}",
+        )
+        if part and part.strip()
+    )
+    target_description_text = "\n".join(
+        part
+        for part in (
+            target_profile.description,
+            f"capabilities: {' | '.join(target_profile.capabilities or [])}",
+            f"interfaces: {' | '.join(target_profile.interfaces or [])}",
+            f"deployment: {' | '.join(target_profile.deployment_style or [])}",
+            f"operator_inputs: {' | '.join(target_profile.operator_inputs or [])}",
+            f"external_surfaces: {' | '.join(target_profile.external_surfaces or [])}",
+            f"evidence: {target_profile.evidence_summary}",
+            f"confidence: {target_profile.confidence}",
+            f"open_questions: {' | '.join(target_profile.open_questions or [])}",
+        )
+        if part and part.strip()
+    )
     description_sim = _text_similarity(
-        source_profile.description,
-        target_profile.description,
+        source_description_text,
+        target_description_text,
         text_retriever=text_retriever,
     )
     target_application_sim = _text_similarity(

@@ -93,6 +93,24 @@ def _stub_git(monkeypatch, commit="abc123"):
     monkeypatch.setattr(analyzer_module, "restore_git_position", lambda _repo, _target: True)
 
 
+def _valid_basic_info_payload(**overrides):
+    payload = {
+        "description": "demo",
+        "target_application": ["training"],
+        "target_user": ["researcher"],
+        "capabilities": ["train models"],
+        "interfaces": ["CLI"],
+        "deployment_style": ["self-hosted"],
+        "operator_inputs": ["training config"],
+        "external_surfaces": ["command line arguments"],
+        "evidence_summary": "README references a CLI workflow for launching training jobs.",
+        "confidence": "high",
+        "open_questions": ["Does the repo also expose an API?"],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_generate_profile_loads_cached_final_result(tmp_path, monkeypatch):
     repo_dir = tmp_path / "demo"
     repo_dir.mkdir()
@@ -707,7 +725,7 @@ def test_generate_profile_full_reruns_incomplete_basic_info_checkpoint():
     assert storage_manager.saved_checkpoints["basic_info"]["description"] == "fresh description"
 
 
-def test_generate_profile_full_does_not_persist_incomplete_basic_info_result():
+def test_generate_profile_full_raises_for_incomplete_fresh_basic_info_result():
     storage_manager = StubStorageManager(
         checkpoints={
             "repo_info": {
@@ -722,6 +740,17 @@ def test_generate_profile_full_does_not_persist_incomplete_basic_info_result():
         (),
         {
             "analyze": lambda _self, *_args, **_kwargs: {
+                "description": " ",
+                "target_application": [],
+                "target_user": ["researcher"],
+                "capabilities": ["train models"],
+                "interfaces": ["CLI"],
+                "deployment_style": ["self-hosted"],
+                "operator_inputs": ["training config"],
+                "external_surfaces": ["command line arguments"],
+                "evidence_summary": "",
+                "confidence": "unknown",
+                "open_questions": [""],
                 "llm_calls": 1,
                 "llm_usage": {
                     "source": "llm_client",
@@ -749,13 +778,10 @@ def test_generate_profile_full_does_not_persist_incomplete_basic_info_result():
         {"analyze": lambda _self, **_kwargs: {"modules": [{"name": "api", "files": ["app.py"]}], "llm_calls": 0}},
     )()
 
-    profile = profiler._generate_profile_full(Path("/tmp/demo"), "demo", "abc123")
+    with pytest.raises(RuntimeError, match="Basic info analysis did not produce a valid result"):
+        profiler._generate_profile_full(Path("/tmp/demo"), "demo", "abc123")
 
-    assert profile.description == ""
     assert "basic_info" not in storage_manager.saved_checkpoints
-    assert profile.metadata["llm_calls"] == 1
-    assert profile.metadata["llm_usage_summary"]["calls_total"] == 1
-    assert profile.metadata["llm_usage_summary"]["input_tokens"] == 7
 
 
 def test_force_regenerate_rebuilds_repo_analyzer_cache(monkeypatch):
@@ -766,7 +792,7 @@ def test_force_regenerate_rebuilds_repo_analyzer_cache(monkeypatch):
     profiler.basic_info_analyzer = type(
         "BasicInfoAnalyzer",
         (),
-        {"analyze": lambda _self, *_args, **_kwargs: {"description": "", "target_application": [], "target_user": []}},
+        {"analyze": lambda _self, *_args, **_kwargs: _valid_basic_info_payload()},
     )()
     profiler.module_analyzer = type(
         "SkillModuleAnalyzer",
@@ -1029,7 +1055,7 @@ def test_generate_profile_full_accepts_completed_skill_analysis_with_empty_modul
     profiler.basic_info_analyzer = type(
         "BasicInfoAnalyzer",
         (),
-        {"analyze": lambda _self, *_args, **_kwargs: {"description": "", "target_application": [], "target_user": []}},
+        {"analyze": lambda _self, *_args, **_kwargs: _valid_basic_info_payload()},
     )()
     profiler._extract_data_flow_patterns = lambda *_args, **_kwargs: []
     profiler._extract_project_level_features = lambda *_args, **_kwargs: {}
@@ -1065,7 +1091,7 @@ def test_force_regenerate_disables_agent_conversation_resume(monkeypatch):
     profiler.basic_info_analyzer = type(
         "BasicInfoAnalyzer",
         (),
-        {"analyze": lambda _self, *_args, **_kwargs: {"description": "", "target_application": [], "target_user": []}},
+        {"analyze": lambda _self, *_args, **_kwargs: _valid_basic_info_payload()},
     )()
     profiler._extract_data_flow_patterns = lambda *_args, **_kwargs: []
     profiler._extract_project_level_features = lambda *_args, **_kwargs: {}
@@ -1103,7 +1129,7 @@ def test_force_regenerate_propagates_to_skill_module_analyzer(monkeypatch):
     profiler.basic_info_analyzer = type(
         "BasicInfoAnalyzer",
         (),
-        {"analyze": lambda _self, *_args, **_kwargs: {"description": "", "target_application": [], "target_user": []}},
+        {"analyze": lambda _self, *_args, **_kwargs: _valid_basic_info_payload()},
     )()
     profiler._extract_data_flow_patterns = lambda *_args, **_kwargs: []
     profiler._extract_project_level_features = lambda *_args, **_kwargs: {}
@@ -1149,9 +1175,7 @@ def test_generate_profile_full_persists_llm_usage_metadata():
         (),
         {
             "analyze": lambda _self, *_args, **_kwargs: {
-                "description": "demo",
-                "target_application": ["training"],
-                "target_user": ["researcher"],
+                **_valid_basic_info_payload(),
                 "llm_calls": 1,
                 "llm_usage": {
                     "source": "llm_client",
@@ -1253,9 +1277,7 @@ def test_generate_profile_full_normalizes_missing_basic_info_usage_before_merge(
         (),
         {
             "analyze": lambda _self, *_args, **_kwargs: {
-                "description": "demo",
-                "target_application": ["training"],
-                "target_user": ["researcher"],
+                **_valid_basic_info_payload(),
                 "llm_calls": 1,
             }
         },
@@ -1353,9 +1375,7 @@ def test_generate_profile_full_tracks_agent_module_usage_metadata():
         (),
         {
             "analyze": lambda _self, *_args, **_kwargs: {
-                "description": "demo",
-                "target_application": ["training"],
-                "target_user": ["researcher"],
+                **_valid_basic_info_payload(),
                 "llm_calls": 1,
                 "llm_usage": {
                     "source": "llm_client",
@@ -1465,9 +1485,7 @@ def test_generate_profile_full_normalizes_resumed_agent_module_usage_source():
         (),
         {
             "analyze": lambda _self, *_args, **_kwargs: {
-                "description": "demo",
-                "target_application": ["training"],
-                "target_user": ["researcher"],
+                **_valid_basic_info_payload(),
                 "llm_calls": 1,
                 "llm_usage": {
                     "source": "llm_client",

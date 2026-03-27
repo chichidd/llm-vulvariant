@@ -224,6 +224,60 @@ def test_compute_profile_similarity_falls_back_to_lexical_when_embedding_similar
     assert 0.0 <= metrics.overall_sim <= 1.0
 
 
+def test_compute_profile_similarity_uses_richer_basic_info_in_description_dimension():
+    source = _mk_profile(
+        "src",
+        "generic platform",
+        [ModuleInfo(name="m")],
+        apps=["platform"],
+        users=["operator"],
+        capabilities=["train models"],
+        interfaces=["CLI"],
+        deployment_style=["self-hosted"],
+        operator_inputs=["training config"],
+        external_surfaces=["command line arguments"],
+        evidence_summary="CLI workflow launches model training jobs.",
+        confidence="high",
+        open_questions=["Does it expose an API?"],
+    )
+    matching = _mk_profile(
+        "match",
+        "generic platform",
+        [ModuleInfo(name="m")],
+        apps=["platform"],
+        users=["operator"],
+        capabilities=["train models"],
+        interfaces=["CLI"],
+        deployment_style=["self-hosted"],
+        operator_inputs=["training config"],
+        external_surfaces=["command line arguments"],
+        evidence_summary="CLI workflow launches model training jobs.",
+        confidence="high",
+        open_questions=["Does it expose an API?"],
+    )
+    non_matching = _mk_profile(
+        "mismatch",
+        "generic platform",
+        [ModuleInfo(name="m")],
+        apps=["platform"],
+        users=["operator"],
+        capabilities=["serve ads"],
+        interfaces=["HTTP API"],
+        deployment_style=["managed service"],
+        operator_inputs=["tenant request"],
+        external_surfaces=["public REST endpoints"],
+        evidence_summary="Hosted service handles ad delivery.",
+        confidence="low",
+        open_questions=["Does it support edge caching?"],
+    )
+
+    matching_metrics = compute_profile_similarity(source, matching, text_retriever=None)
+    non_matching_metrics = compute_profile_similarity(source, non_matching, text_retriever=None)
+
+    assert matching_metrics.description_sim > non_matching_metrics.description_sim
+    assert matching_metrics.overall_sim > non_matching_metrics.overall_sim
+
+
 def test_rank_similar_profiles_excludes_same_repo_and_uses_tie_break(monkeypatch):
     source = ProfileRef("repo-a", "aaaaaaaaaaaa1111", _mk_profile("a", "x", [ModuleInfo(name="m")]))
     candidate_1 = ProfileRef("repo-b", "bbbb", _mk_profile("b", "x", [ModuleInfo(name="m")]))

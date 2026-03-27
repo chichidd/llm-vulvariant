@@ -36,6 +36,7 @@ from .models import (
     DataFlowPattern,
     ModuleInfo,
     SoftwareProfile,
+    is_valid_software_basic_info,
     normalize_file_extensions,
 )
 from .repo_collector import RepoInfoCollector
@@ -210,21 +211,7 @@ class SoftwareProfiler:
 
     @staticmethod
     def _is_basic_info_complete(basic_info: Optional[Dict[str, Any]]) -> bool:
-        if not isinstance(basic_info, dict):
-            return False
-        return (
-            isinstance(basic_info.get("description"), str)
-            and isinstance(basic_info.get("target_application"), list)
-            and isinstance(basic_info.get("target_user"), list)
-            and isinstance(basic_info.get("capabilities"), list)
-            and isinstance(basic_info.get("interfaces"), list)
-            and isinstance(basic_info.get("deployment_style"), list)
-            and isinstance(basic_info.get("operator_inputs"), list)
-            and isinstance(basic_info.get("external_surfaces"), list)
-            and isinstance(basic_info.get("evidence_summary"), str)
-            and isinstance(basic_info.get("confidence"), str)
-            and isinstance(basic_info.get("open_questions"), list)
-        )
+        return is_valid_software_basic_info(basic_info)
     
     @classmethod
     def _load_detection_rules(cls, rules_path: Path = None, output_dir: Path = None) -> Dict[str, Any]:
@@ -692,7 +679,11 @@ class SoftwareProfiler:
             basic_info = self.basic_info_analyzer.analyze(
                 repo_path, repo_info, repo_name, version, storage_manager=self.storage_manager
             )
-            if self.storage_manager and self._is_basic_info_complete(basic_info):
+            if not self._is_basic_info_complete(basic_info):
+                raise RuntimeError(
+                    f"Basic info analysis did not produce a valid result for {repo_name}@{version[:12]}"
+                )
+            if self.storage_manager:
                 self.storage_manager.save_checkpoint("basic_info", basic_info, *path_parts)
         basic_info = basic_info or {}
         

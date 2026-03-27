@@ -16,6 +16,7 @@ from llm import (
 from utils.logger import get_logger
 from utils.llm_utils import parse_llm_json, extract_message_content
 from profiler.profile_storage import ProfileStorageManager
+from .models import is_valid_software_basic_info
 from .prompts import BASIC_INFO_PROMPT, SOFTWARE_BASIC_INFO_SYSTEM_PROMPT
 
 logger = get_logger(__name__)
@@ -110,6 +111,8 @@ class BasicInfoAnalyzer:
                 max_repair_attempts=2,
                 task_hint="software basic information extraction",
             )
+            if not is_valid_software_basic_info(llm_result):
+                raise ValueError("LLM returned invalid software basic info payload")
             llm_usage = aggregate_llm_usage_since(self.llm_client, usage_snapshot)
 
             if storage_manager:
@@ -136,7 +139,7 @@ class BasicInfoAnalyzer:
                     "operator_inputs": llm_result.get("operator_inputs", []),
                     "external_surfaces": llm_result.get("external_surfaces", []),
                     "evidence_summary": llm_result.get("evidence_summary", ""),
-                    "confidence": llm_result.get("confidence", ""),
+                    "confidence": str(llm_result.get("confidence", "")).strip().lower(),
                     "open_questions": llm_result.get("open_questions", []),
                     "llm_usage": llm_usage,
                     "llm_calls": llm_usage.get("sessions_total", llm_usage.get("calls_total", 0)),

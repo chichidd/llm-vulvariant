@@ -56,6 +56,46 @@ def normalize_file_extensions(extensions: Optional[Iterable[str]]) -> List[str]:
 
 
 DEFAULT_FILE_EXTENSIONS = normalize_file_extensions(EXTENSION_MAPPING.keys())
+VALID_BASIC_INFO_CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
+REQUIRED_BASIC_INFO_LIST_FIELDS = (
+    "target_application",
+    "target_user",
+    "capabilities",
+    "interfaces",
+    "deployment_style",
+    "operator_inputs",
+    "external_surfaces",
+)
+
+
+def is_valid_software_basic_info(basic_info: Optional[Dict[str, Any]]) -> bool:
+    """Return whether a basic-info payload satisfies the Task 5 contract."""
+    if not isinstance(basic_info, dict):
+        return False
+
+    for key in ("description", "evidence_summary"):
+        value = basic_info.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return False
+
+    confidence = basic_info.get("confidence")
+    if not isinstance(confidence, str) or confidence.strip().lower() not in VALID_BASIC_INFO_CONFIDENCE_VALUES:
+        return False
+
+    for key in REQUIRED_BASIC_INFO_LIST_FIELDS:
+        values = basic_info.get(key)
+        if not isinstance(values, list) or not values:
+            return False
+        if any(not isinstance(item, str) or not item.strip() for item in values):
+            return False
+
+    open_questions = basic_info.get("open_questions")
+    if not isinstance(open_questions, list):
+        return False
+    if any(not isinstance(item, str) or not item.strip() for item in open_questions):
+        return False
+
+    return True
 
 
 @dataclass

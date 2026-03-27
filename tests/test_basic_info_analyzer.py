@@ -114,3 +114,42 @@ def test_basic_info_analyzer_records_llm_usage(tmp_path):
     assert saved["llm_usage"]["input_tokens"] == 12
     assert saved["parsed_result"]["capabilities"] == ["model training orchestration"]
     assert saved["parsed_result"]["external_surfaces"] == ["command line arguments"]
+
+
+def test_basic_info_analyzer_rejects_semantically_invalid_payload(tmp_path):
+    class _InvalidPayloadLLMClient(_TrackedLLMClient):
+        def chat(self, messages, **kwargs):
+            super().chat(messages, **kwargs)
+            return _Response(
+                json.dumps(
+                    {
+                        "description": "   ",
+                        "target_application": ["training"],
+                        "target_user": ["researcher"],
+                        "capabilities": ["   "],
+                        "interfaces": ["CLI"],
+                        "deployment_style": ["self-hosted"],
+                        "operator_inputs": ["training config"],
+                        "external_surfaces": ["command line arguments"],
+                        "evidence_summary": "",
+                        "confidence": "unknown",
+                        "open_questions": [""],
+                    }
+                )
+            )
+
+    storage_manager = ProfileStorageManager(base_dir=tmp_path, profile_type="software")
+    analyzer = BasicInfoAnalyzer(llm_client=_InvalidPayloadLLMClient())
+
+    result = analyzer.analyze(
+        repo_path=tmp_path / "repo",
+        repo_info={"readme_content": "demo", "config_files": []},
+        repo_name="repo",
+        version="abc123",
+        storage_manager=storage_manager,
+    )
+
+    assert "description" not in result
+    assert result["llm_calls"] == 1
+    assert result["llm_usage"]["input_tokens"] == 12
+    assert not (tmp_path / "repo" / "abc123" / "conversations" / "basic_info" / "basic_info.json").exists()
