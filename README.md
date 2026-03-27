@@ -351,6 +351,8 @@ Agent 特性：
 - `AgenticVulnFinder` 实现上支持最多 300 轮迭代；`scanner` CLI 的默认 `--max-iterations` 是 3，可按需覆盖
 - **Priority-1 提前停止**：当高优先级发现完成时可提前结束（支持 `min` / `max` 策略）
 - **模块优先级排序**：根据漏洞画像自动计算目标模块的扫描优先级
+- **结构化漏洞引导**：扫描 prompt 直接消费 `query_terms`、`dangerous_apis`、`source_indicators`、`sink_indicators`、`variant_hypotheses`、`negative_constraints`、`likely_false_positive_patterns`、`scan_start_points`、`open_questions`、`assumptions`
+- **Shared public memory 聚焦读取**：当同一 run 已有共享 observation 时，Agent 会先用聚焦 query 调用 `read_shared_public_memory`，证据不足时再扩大搜索范围
 - **可恢复**：`AgentMemoryManager` 跟踪已处理文件/模块，支持断点续扫
 
 ### 7.3 可恢复性设计
@@ -471,16 +473,29 @@ repo 锁的行为：
 
 ## 8. 输出产物
 
+### 画像阶段
+
+`profiles/soft/<repo>/<commit>/software_profile.json`
+- `basic_info` 固定包含 `description`、`target_application`、`target_user`、`capabilities`、`interfaces`、`deployment_style`、`operator_inputs`、`external_surfaces`、`evidence_summary`、`confidence`、`open_questions`
+- `modules[]` 固定包含 `name`、`category`、`responsibility`、`entry_points`、`files`、`key_functions`、`interfaces`、`depends_on`、`dependencies`、`boundary_rationale`、`evidence_paths`、`confidence`
+
+`profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
+- `source_features`、`flow_features`、`sink_features` 会保留 `status`、`confidence`、`evidence`、`evidence_summary`、`open_questions`、`assumptions`、`negative_constraints`
+- 顶层摘要会直接提供 scanner-ready guidance：`query_terms`、`dangerous_apis`、`source_indicators`、`sink_indicators`、`variant_hypotheses`、`negative_constraints`、`likely_false_positive_patterns`、`scan_start_points`、`confidence`、`evidence`、`evidence_summary`、`open_questions`、`assumptions`、`status`
+
 ### 扫描阶段
 
 | 路径 | 说明 |
 |------|------|
 | `<scan-dir>/<cve>/<repo>-<commit12>/agentic_vuln_findings.json` | 扫描原始发现 |
 | `.../conversation_history.json` | Agent 对话历史 |
-| `.../scan_memory.json` | 扫描续跑状态 |
+| `.../scan_memory.json` | 扫描续跑状态与迭代压缩摘要 |
 | `.../target_similarity.json` | 目标选择时的相似度详情，仅在目标由相似度检索/排序选出时生成 |
-| `<scan-dir>/_runs/<run-id>/shared-public-memory/<repo>-<commit12>/observations/*.json` | 同一 batch run 内共享的公共 observation；agent 可按需读取，不影响私有 `scan_memory.json` |
+| `<scan-dir>/_runs/<run-id>/shared-public-memory/<repo>-<commit12>/observations/*.json` | 同一 batch run 内共享的公共 observation；agent 会优先用聚焦 query 按需读取，不影响私有 `scan_memory.json` |
 | `<scan-dir>/batch-summary-<timestamp>.json` | 批量扫描汇总信息（jobs、target 时序、覆盖率统计等） |
+
+`scan_memory.json`
+- 迭代压缩摘要会保留 `shared_memory_hits`、`rejected_hypotheses`、`next_best_queries`、`evidence_gaps`、`files_completed_this_iteration`
 
 ### 可利用性验证阶段
 
@@ -490,6 +505,10 @@ repo 锁的行为：
 | `.../evidence/<finding_id>/` | Docker PoC 证据（脚本、构建日志、执行输出） |
 | `.../reports/security_report.md` | 汇总安全研究报告，仅在 `--generate-report` 时生成 |
 | `.../reports/ghsa_*.md` | GHSA 格式漏洞报告，仅在 `--generate-report` 时生成 |
+
+`exploitability.json`
+- `results[]` 中的每条 finding 会保留 `verdict`、`confidence`、`verdict_rationale`、`preconditions`、`static_evidence`、`dynamic_plan`、`docker_verification`、`open_questions`
+- `reports/security_report.md` 与 `reports/ghsa_*.md` 会把这些 richer fields 展开为专门章节，而不是只保留单行 verdict
 
 ### 聚合提交产物
 
