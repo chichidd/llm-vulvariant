@@ -158,6 +158,7 @@ class ModuleInfo:
             "key_functions": self.key_functions,
             "interfaces": self.interfaces,
             "depends_on": resolved_depends_on,
+            "dependencies": resolved_dependencies,
             "boundary_rationale": self.boundary_rationale,
             "evidence_paths": self.evidence_paths,
             "confidence": self.confidence,
@@ -169,8 +170,6 @@ class ModuleInfo:
             "called_by_modules": self.called_by_modules,
             "calls_modules": self.calls_modules,
         }
-        if resolved_dependencies:
-            data["dependencies"] = resolved_dependencies
         return data
     
     @classmethod

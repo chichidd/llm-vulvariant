@@ -46,6 +46,33 @@ def test_moduleinfo_roundtrip_preserves_richer_contract_fields():
     assert restored == module
 
 
+def test_moduleinfo_roundtrip_preserves_empty_dependency_mirror_keys():
+    module = ModuleInfo(
+        name="launcher",
+        category="execution.launcher",
+        description="Coordinates process startup.",
+        responsibility="Dispatch subprocess-backed launch requests.",
+        entry_points=["launch()"],
+        files=["src/launcher.py"],
+        key_functions=["launch"],
+        interfaces=["CLI"],
+        depends_on=[],
+        dependencies=[],
+        boundary_rationale="Owns the process execution boundary.",
+        evidence_paths=["src/launcher.py"],
+        confidence="high",
+    )
+
+    data = module.to_dict()
+    restored = ModuleInfo.from_dict(data)
+
+    assert data["depends_on"] == []
+    assert data["dependencies"] == []
+    assert restored.depends_on == []
+    assert restored.dependencies == []
+    assert restored == module
+
+
 def test_moduleinfo_to_dict_and_from_dict_fields():
     module = ModuleInfo(
         name="api",
@@ -56,7 +83,8 @@ def test_moduleinfo_to_dict_and_from_dict_fields():
 
     data = module.to_dict()
     assert data["internal_dependencies"] == ["core"]
-    assert "dependencies" not in data
+    assert data["depends_on"] == []
+    assert data["dependencies"] == []
 
     restored = ModuleInfo.from_dict({"name": "x", "files": ["a.py"], "internal_dependencies": ["b"]})
     assert restored.files == ["a.py"]
