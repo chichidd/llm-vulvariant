@@ -57,14 +57,17 @@ def normalize_file_extensions(extensions: Optional[Iterable[str]]) -> List[str]:
 
 DEFAULT_FILE_EXTENSIONS = normalize_file_extensions(EXTENSION_MAPPING.keys())
 VALID_BASIC_INFO_CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
-REQUIRED_BASIC_INFO_LIST_FIELDS = (
+NON_EMPTY_BASIC_INFO_LIST_FIELDS = (
     "target_application",
     "target_user",
     "capabilities",
+)
+OPTIONAL_BASIC_INFO_LIST_FIELDS = (
     "interfaces",
     "deployment_style",
     "operator_inputs",
     "external_surfaces",
+    "open_questions",
 )
 
 
@@ -82,18 +85,19 @@ def is_valid_software_basic_info(basic_info: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(confidence, str) or confidence.strip().lower() not in VALID_BASIC_INFO_CONFIDENCE_VALUES:
         return False
 
-    for key in REQUIRED_BASIC_INFO_LIST_FIELDS:
+    for key in NON_EMPTY_BASIC_INFO_LIST_FIELDS:
         values = basic_info.get(key)
         if not isinstance(values, list) or not values:
             return False
         if any(not isinstance(item, str) or not item.strip() for item in values):
             return False
 
-    open_questions = basic_info.get("open_questions")
-    if not isinstance(open_questions, list):
-        return False
-    if any(not isinstance(item, str) or not item.strip() for item in open_questions):
-        return False
+    for key in OPTIONAL_BASIC_INFO_LIST_FIELDS:
+        values = basic_info.get(key)
+        if not isinstance(values, list):
+            return False
+        if any(not isinstance(item, str) or not item.strip() for item in values):
+            return False
 
     return True
 

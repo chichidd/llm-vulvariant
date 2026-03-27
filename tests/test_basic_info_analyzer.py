@@ -153,3 +153,41 @@ def test_basic_info_analyzer_rejects_semantically_invalid_payload(tmp_path):
     assert result["llm_calls"] == 1
     assert result["llm_usage"]["input_tokens"] == 12
     assert not (tmp_path / "repo" / "abc123" / "conversations" / "basic_info" / "basic_info.json").exists()
+
+
+def test_basic_info_analyzer_allows_empty_evidence_backed_optional_lists(tmp_path):
+    class _OptionalEmptyListsLLMClient(_TrackedLLMClient):
+        def chat(self, messages, **kwargs):
+            super().chat(messages, **kwargs)
+            return _Response(
+                json.dumps(
+                    {
+                        "description": "demo",
+                        "target_application": ["training"],
+                        "target_user": ["researcher"],
+                        "capabilities": ["model training orchestration"],
+                        "interfaces": [],
+                        "deployment_style": [],
+                        "operator_inputs": [],
+                        "external_surfaces": [],
+                        "evidence_summary": "README documents a training workflow but does not confirm external interfaces.",
+                        "confidence": "medium",
+                        "open_questions": [],
+                    }
+                )
+            )
+
+    analyzer = BasicInfoAnalyzer(llm_client=_OptionalEmptyListsLLMClient())
+
+    result = analyzer.analyze(
+        repo_path=tmp_path / "repo",
+        repo_info={"readme_content": "demo", "config_files": []},
+        repo_name="repo",
+        version="abc123",
+    )
+
+    assert result["interfaces"] == []
+    assert result["deployment_style"] == []
+    assert result["operator_inputs"] == []
+    assert result["external_surfaces"] == []
+    assert result["confidence"] == "medium"

@@ -21,7 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 import json
 import re
 
-from profiler.software.models import ModuleInfo, SoftwareProfile
+from profiler.software.models import ModuleInfo, SoftwareProfile, is_valid_software_basic_info
 from scanner.similarity.embedding import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingRetriever,
@@ -118,6 +118,9 @@ def load_all_software_profiles(repo_profiles_dir: Path) -> List[ProfileRef]:
             try:
                 data = json.loads(profile_path.read_text(encoding="utf-8"))
                 profile = SoftwareProfile.from_dict(data)
+                if not is_valid_software_basic_info(profile.to_dict().get("basic_info", {})):
+                    logger.warning("Skipping incomplete software profile %s", profile_path)
+                    continue
                 refs.append(
                     ProfileRef(
                         repo_name=repo_name,
@@ -145,9 +148,12 @@ def _profile_is_parseable(profile_path: Path) -> bool:
     """Return whether one persisted software profile can be parsed successfully."""
     try:
         data = json.loads(profile_path.read_text(encoding="utf-8"))
-        SoftwareProfile.from_dict(data)
+        profile = SoftwareProfile.from_dict(data)
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning(f"Failed to load profile {profile_path}: {exc}")
+        return False
+    if not is_valid_software_basic_info(profile.to_dict().get("basic_info", {})):
+        logger.warning("Skipping incomplete software profile %s", profile_path)
         return False
     return True
 

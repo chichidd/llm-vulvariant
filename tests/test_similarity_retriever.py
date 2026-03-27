@@ -367,6 +367,9 @@ def test_load_all_profiles_and_commit_resolution(tmp_path):
     (good_dir / "software_profile.json").write_text(
         (
             "{\"basic_info\": {\"name\": \"repo1\", \"version\": \"abc123456789\", "
+            "\"description\": \"API service for model inference.\", "
+            "\"target_application\": [\"inference\"], "
+            "\"target_user\": [\"platform engineer\"], "
             "\"capabilities\": [\"serve api traffic\"], "
             "\"interfaces\": [\"HTTP API\"], "
             "\"deployment_style\": [\"containerized service\"], "
@@ -403,16 +406,16 @@ def test_load_all_profiles_and_commit_resolution(tmp_path):
     os.utime(bad_dir / "software_profile.json", (30, 30))
 
     refs = load_all_software_profiles(repo_profiles_dir)
-    assert len(refs) == 3
-    assert {ref.repo_name for ref in refs} == {"repo1", "repo2"}
+    assert len(refs) == 1
+    assert {ref.repo_name for ref in refs} == {"repo1"}
     assert resolve_profile_commit(repo_profiles_dir, "repo1") == "abc123456789"
     selected_repo1 = select_profile_ref(refs, "repo1")
     assert selected_repo1 is not None and selected_repo1.commit_hash == "abc123456789"
     assert selected_repo1.profile.capabilities == ["serve api traffic"]
     assert selected_repo1.profile.external_surfaces == ["REST endpoints"]
 
-    assert resolve_profile_commit(repo_profiles_dir, "repo2") == "000000000001"
-    assert resolve_profile_commit(repo_profiles_dir, "repo2", "00000000000") == "000000000001"
+    assert resolve_profile_commit(repo_profiles_dir, "repo2") is None
+    assert resolve_profile_commit(repo_profiles_dir, "repo2", "00000000000") is None
     assert resolve_profile_commit(repo_profiles_dir, "repo2", "does-not-exist") is None
 
 
