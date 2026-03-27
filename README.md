@@ -507,8 +507,9 @@ repo 锁的行为：
 | `.../reports/ghsa_*.md` | GHSA 格式漏洞报告，仅在 `--generate-report` 时生成 |
 
 `exploitability.json`
-- `results[]` 中的每条 finding 会保留 `verdict`、`confidence`、`verdict_rationale`、`preconditions`、`static_evidence`、`dynamic_plan`、`docker_verification`、`open_questions`
-- `reports/security_report.md` 与 `reports/ghsa_*.md` 会把这些 richer fields 展开为专门章节，而不是只保留单行 verdict
+- `results[]` 中的每条 finding 会保留 richer sections：`verdict`、`confidence`、`verdict_rationale`、`preconditions`、`static_evidence`、`dynamic_plan`、`docker_verification`、`open_questions`
+- 同时仍保留 legacy compatibility sections：`sink_analysis`、`source_analysis`、`attack_scenario`、`remediation`
+- `reports/security_report.md` 与 `reports/ghsa_*.md` 会同时消费 richer sections 和 legacy compatibility sections，而不是只保留单行 verdict
 
 ### 聚合提交产物
 
