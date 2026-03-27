@@ -236,15 +236,22 @@ def build_initial_user_message(
             "with focused query terms derived from the current vulnerability pattern before broad "
             "repo-wide searches.\n"
         )
+    no_priority_one_with_related_modules = no_priority_one_modules and p2_count > 0
     task_start_line = (
         "1. **Start by reading shared public memory**: No PRIORITY-1 modules are currently identified, "
         "so begin with focused shared-memory queries and then widen carefully"
         if shared_memory_priority_line
         else (
-            "1. **No PRIORITY-1 modules are currently identified**: Start with focused repo-wide searches "
-            "anchored on the vulnerability pattern"
-            if no_priority_one_modules
-            else "1. **Start with PRIORITY-1 modules**: These are directly affected or embedding-similar to the known vulnerable module"
+            "1. **Start with 🟡 RELATED modules**: No PRIORITY-1 modules are currently identified, so use "
+            "the RELATED scope as the highest-priority concrete starting point and focus those checks with "
+            "scan_start_points plus the structured vulnerability guidance"
+            if no_priority_one_with_related_modules
+            else (
+                "1. **No PRIORITY-1 modules are currently identified**: Start with focused repo-wide searches "
+                "anchored on the vulnerability pattern"
+                if no_priority_one_modules
+                else "1. **Start with PRIORITY-1 modules**: These are directly affected or embedding-similar to the known vulnerable module"
+            )
         )
     )
     module_scan_line = (
@@ -258,10 +265,14 @@ def build_initial_user_message(
         "to repo-wide searches."
         if shared_memory_priority_line
         else (
-            "Begin analysis now. No PRIORITY-1 modules are currently identified, so start with focused "
-            "repo-wide searches anchored on the vulnerability pattern."
-            if no_priority_one_modules
-            else "Begin analysis now. Start with the 🔴 PRIORITY-1 modules."
+            "Begin analysis now. Start with the 🟡 RELATED modules as the highest-priority concrete scope."
+            if no_priority_one_with_related_modules
+            else (
+                "Begin analysis now. No PRIORITY-1 modules are currently identified, so start with focused "
+                "repo-wide searches anchored on the vulnerability pattern."
+                if no_priority_one_modules
+                else "Begin analysis now. Start with the 🔴 PRIORITY-1 modules."
+            )
         )
     )
 

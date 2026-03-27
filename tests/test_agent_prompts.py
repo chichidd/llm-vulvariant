@@ -298,6 +298,30 @@ def test_build_initial_message_handles_no_priority_one_with_related_modules():
     assert "Use 🟡 RELATED modules as the highest-priority concrete scan targets" in initial
 
 
+def test_build_initial_message_starts_with_related_modules_when_no_priority_one_and_no_shared_memory():
+    software_profile = {
+        "basic_info": {"name": "demo"},
+        "modules": [
+            {"name": "m2", "files": ["b.py"], "description": "related", "key_functions": []},
+            {"name": "m3", "files": ["c.py"], "description": "other", "key_functions": []},
+        ],
+    }
+
+    initial = build_initial_user_message(
+        software_profile,
+        {"m2": 2, "m3": 3},
+        shared_observation_count=0,
+    )
+
+    assert "Use 🟡 RELATED modules as the highest-priority concrete scan targets" in initial
+    assert "Start with focused repo-wide searches anchored on the vulnerability pattern" not in initial
+    assert (
+        "Begin analysis now. No PRIORITY-1 modules are currently identified, so start with focused "
+        "repo-wide searches anchored on the vulnerability pattern."
+    ) not in initial
+    assert "Begin analysis now. Start with the 🟡 RELATED modules as the highest-priority concrete scope." in initial
+
+
 def test_build_priority_one_messages_keep_focus_on_priority_one_modules():
     software_profile = {
         "basic_info": {"name": "demo"},
