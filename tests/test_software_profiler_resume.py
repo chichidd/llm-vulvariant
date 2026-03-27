@@ -580,6 +580,14 @@ def test_generate_profile_full_reruns_incomplete_basic_info_checkpoint():
                 "description": "fresh description",
                 "target_application": ["training"],
                 "target_user": ["researcher"],
+                "capabilities": ["train models"],
+                "interfaces": ["CLI"],
+                "deployment_style": ["self-hosted"],
+                "operator_inputs": ["training config"],
+                "external_surfaces": ["CLI arguments"],
+                "evidence_summary": "README references a CLI workflow for launching training jobs.",
+                "confidence": "high",
+                "open_questions": ["Does the repo also expose an API?"],
                 "llm_calls": 1,
                 "llm_usage": {
                     "source": "llm_client",
@@ -606,6 +614,14 @@ def test_generate_profile_full_reruns_incomplete_basic_info_checkpoint():
 
     assert basic_info_calls == [True]
     assert profile.description == "fresh description"
+    assert profile.capabilities == ["train models"]
+    assert profile.interfaces == ["CLI"]
+    assert profile.deployment_style == ["self-hosted"]
+    assert profile.operator_inputs == ["training config"]
+    assert profile.external_surfaces == ["CLI arguments"]
+    assert profile.evidence_summary == "README references a CLI workflow for launching training jobs."
+    assert profile.confidence == "high"
+    assert profile.open_questions == ["Does the repo also expose an API?"]
     assert storage_manager.saved_checkpoints["basic_info"]["description"] == "fresh description"
 
 
