@@ -119,7 +119,7 @@ You can use the following tools to gather information:
 - Provide the identified module list via the modules parameter
 - **IMPORTANT**: Each module MUST include a "category" field with a valid taxonomy classification (format: "coarse.fine")
 - For each module, return `name`, `category`, `description`, `responsibility`, `entry_points`, `files`, `key_functions`, `interfaces`, `depends_on`, `dependencies`, `boundary_rationale`, `evidence_paths`, and `confidence`
-- Keep `depends_on` and `dependencies` aligned unless repository evidence clearly supports a difference
+- Keep `depends_on` and `dependencies` as aligned copies for legacy compatibility
 
 # Analysis Workflow
 1.	First, use list_folder to explore the repository’s directory structure.

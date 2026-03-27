@@ -26,6 +26,8 @@ from profiler.software.module_analyzer.taxonomy_loader import load_ai_infra_taxo
 
 logger = get_logger(__name__)
 
+VALID_MODULE_CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
+
 
 class SkillModuleAnalyzer:
     """Analyze repository modules using .claude/skills outputs."""
@@ -439,8 +441,13 @@ class SkillModuleAnalyzer:
         repo_info: Dict[str, Any],
     ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
         modules = self._extract_modules(module_profile)
-        if modules:
+        if self._modules_follow_task6_contract(modules):
             return self._normalize_modules(modules, file_index, repo_info), file_index
+        if modules:
+            logger.warning(
+                "Ignoring persisted module_profile modules that do not satisfy the Task 6 contract; "
+                "falling back to module_map/file_index synthesis"
+            )
 
         code_files = [
             f for f in repo_info.get("files", [])
@@ -514,6 +521,68 @@ class SkillModuleAnalyzer:
             if isinstance(modules, list):
                 return modules
         return []
+
+    def _modules_follow_task6_contract(self, modules: List[Dict[str, Any]]) -> bool:
+        required_fields = (
+            "name",
+            "category",
+            "description",
+            "responsibility",
+            "entry_points",
+            "files",
+            "key_functions",
+            "interfaces",
+            "depends_on",
+            "dependencies",
+            "boundary_rationale",
+            "evidence_paths",
+            "confidence",
+        )
+        list_fields = (
+            "entry_points",
+            "files",
+            "key_functions",
+            "interfaces",
+            "depends_on",
+            "dependencies",
+            "evidence_paths",
+        )
+        string_fields = (
+            "name",
+            "category",
+            "description",
+            "responsibility",
+            "boundary_rationale",
+            "confidence",
+        )
+
+        if not isinstance(modules, list) or not modules:
+            return False
+
+        for module in modules:
+            if not isinstance(module, dict):
+                return False
+            if any(field not in module for field in required_fields):
+                return False
+
+            for field in string_fields:
+                value = module.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    return False
+
+            for field in list_fields:
+                value = module.get(field)
+                if not isinstance(value, list):
+                    return False
+                if any(not isinstance(item, str) or not item.strip() for item in value):
+                    return False
+
+            if module.get("confidence") not in VALID_MODULE_CONFIDENCE_VALUES:
+                return False
+            if module.get("depends_on") != module.get("dependencies"):
+                return False
+
+        return True
 
     def _normalize_modules(
         self,

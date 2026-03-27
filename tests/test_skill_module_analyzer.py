@@ -45,6 +45,8 @@ def test_module_analysis_prompt_requests_richer_module_contract():
     assert "boundary_rationale" in prompt
     assert "evidence_paths" in prompt
     assert "confidence" in prompt
+    assert "aligned copies for legacy compatibility" in prompt
+    assert "clearly supports a difference" not in prompt
 
 
 def test_module_analyzer_finalize_schema_includes_richer_module_fields():
@@ -222,6 +224,48 @@ def test_module_analyzer_finalize_accepts_valid_richer_payload():
     payload = json.loads(result.content)
     assert payload["modules"][0]["depends_on"] == ["core.runtime"]
     assert payload["modules"][0]["dependencies"] == ["core.runtime"]
+
+
+def test_skill_build_modules_falls_back_when_persisted_profile_uses_legacy_minimal_contract():
+    analyzer = SkillModuleAnalyzer(code_extensions=[".py"])
+    analyzer.taxonomy = {"coarse": {"fine": {}}}
+
+    modules, filtered_index = analyzer._build_modules(
+        module_profile={
+            "modules": [
+                {
+                    "name": "coarse.fine",
+                    "category": "coarse",
+                    "files": ["src/app.py"],
+                }
+            ]
+        },
+        module_map={
+            "selected_modules": ["coarse"],
+            "modules": {"coarse": {"evidence": ["path:src/app.py"]}},
+        },
+        file_index={"src/app.py": "coarse.fine"},
+        repo_info={"files": ["src/app.py"]},
+    )
+
+    assert filtered_index == {"src/app.py": "coarse.fine"}
+    assert modules == [
+        {
+            "name": "coarse.fine",
+            "category": "coarse",
+            "description": "Fine responsibilities within Coarse. Key areas: src.",
+            "responsibility": "Fine responsibilities within Coarse. Key areas: src.",
+            "entry_points": [],
+            "key_functions": [],
+            "interfaces": [],
+            "depends_on": [],
+            "dependencies": [],
+            "boundary_rationale": "Grouped by inferred taxonomy ownership and observed file locality.",
+            "evidence_paths": ["src/app.py"],
+            "confidence": "medium",
+            "files": ["src/app.py"],
+        }
+    ]
 
 
 class _StorageManagerStub:
@@ -530,6 +574,8 @@ def test_skill_analyze_validation_mode_runs_direct_scan_script(monkeypatch, tmp_
             ),
             encoding="utf-8",
         )
+        # Persist an invalid legacy-minimal profile and verify analyze() falls back
+        # to module_map/file_index synthesis instead of accepting partial payloads.
         (out_dir / "module_profile.json").write_text(
             json.dumps(
                 {
@@ -563,6 +609,16 @@ def test_skill_analyze_validation_mode_runs_direct_scan_script(monkeypatch, tmp_
     assert result["module_analysis_record_path"].endswith("module_analysis_invocation.json")
     assert result["claude_cli_record_path"].endswith("module_analysis_invocation.json")
     assert result["modules"][0]["files"] == ["src/app.py"]
+    assert result["modules"][0]["responsibility"] == "Fine responsibilities within Coarse. Key areas: src."
+    assert result["modules"][0]["entry_points"] == []
+    assert result["modules"][0]["interfaces"] == []
+    assert result["modules"][0]["depends_on"] == []
+    assert result["modules"][0]["dependencies"] == []
+    assert result["modules"][0]["boundary_rationale"] == (
+        "Grouped by inferred taxonomy ownership and observed file locality."
+    )
+    assert result["modules"][0]["evidence_paths"] == ["src/app.py"]
+    assert result["modules"][0]["confidence"] == "medium"
     cmd, kwargs = commands[0]
     assert cmd[1] == str(script_path)
     assert cmd[cmd.index("--analysis-mode") + 1] == "validation_script"
