@@ -216,6 +216,14 @@ class SoftwareProfiler:
             isinstance(basic_info.get("description"), str)
             and isinstance(basic_info.get("target_application"), list)
             and isinstance(basic_info.get("target_user"), list)
+            and isinstance(basic_info.get("capabilities"), list)
+            and isinstance(basic_info.get("interfaces"), list)
+            and isinstance(basic_info.get("deployment_style"), list)
+            and isinstance(basic_info.get("operator_inputs"), list)
+            and isinstance(basic_info.get("external_surfaces"), list)
+            and isinstance(basic_info.get("evidence_summary"), str)
+            and isinstance(basic_info.get("confidence"), str)
+            and isinstance(basic_info.get("open_questions"), list)
         )
     
     @classmethod

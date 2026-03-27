@@ -460,6 +460,14 @@ def test_generate_profile_full_reuses_saved_checkpoints():
             "description": "from-checkpoint",
             "target_application": ["inference"],
             "target_user": ["developer"],
+            "capabilities": ["serve inference traffic"],
+            "interfaces": ["HTTP API"],
+            "deployment_style": ["containerized service"],
+            "operator_inputs": ["model configuration"],
+            "external_surfaces": ["REST endpoints"],
+            "evidence_summary": "README references a deployed API service.",
+            "confidence": "high",
+            "open_questions": ["Does it offer background workers?"],
         },
         "modules": {
             "modules": [{"name": "api", "files": ["app.py"]}],
@@ -481,6 +489,64 @@ def test_generate_profile_full_reuses_saved_checkpoints():
     assert profile.repo_info == {"files": ["app.py"], "repo_analysis": None}
 
 
+def test_generate_profile_full_reruns_old_schema_basic_info_checkpoint():
+    checkpoints = {
+        "repo_info": {
+            "files": ["app.py"],
+            "repo_analysis": None,
+        },
+        "basic_info": {
+            "description": "old checkpoint description",
+            "target_application": ["inference"],
+            "target_user": ["developer"],
+        },
+        "modules": {
+            "modules": [{"name": "api", "files": ["app.py"]}],
+        },
+    }
+    storage_manager = StubStorageManager(checkpoints=checkpoints)
+    profiler = _stub_profiler(storage_manager)
+
+    profiler.repo_collector = type(
+        "RepoCollector",
+        (),
+        {"collect": lambda *_args, **_kwargs: pytest.fail("repo collection should not rerun")},
+    )()
+    profiler.module_analyzer = type(
+        "ModuleAnalyzer",
+        (),
+        {"analyze": lambda *_args, **_kwargs: pytest.fail("module analysis should not rerun")},
+    )()
+
+    basic_info_calls = []
+
+    class RecordingBasicInfoAnalyzer:
+        def analyze(self, *_args, **_kwargs):
+            basic_info_calls.append(True)
+            return {
+                "description": "fresh description",
+                "target_application": ["training"],
+                "target_user": ["researcher"],
+                "capabilities": ["train models"],
+                "interfaces": ["CLI"],
+                "deployment_style": ["self-hosted"],
+                "operator_inputs": ["training config"],
+                "external_surfaces": ["CLI arguments"],
+                "evidence_summary": "README references a CLI workflow for launching training jobs.",
+                "confidence": "high",
+                "open_questions": ["Does the repo also expose an API?"],
+            }
+
+    profiler.basic_info_analyzer = RecordingBasicInfoAnalyzer()
+
+    profile = profiler._generate_profile_full(Path("/tmp/demo"), "demo", "abc123")
+
+    assert basic_info_calls == [True]
+    assert profile.description == "fresh description"
+    assert profile.capabilities == ["train models"]
+    assert storage_manager.saved_checkpoints["basic_info"]["capabilities"] == ["train models"]
+
+
 def test_generate_profile_full_reanalyzes_empty_modules_checkpoint():
     checkpoints = {
         "repo_info": {
@@ -491,6 +557,14 @@ def test_generate_profile_full_reanalyzes_empty_modules_checkpoint():
             "description": "from-checkpoint",
             "target_application": ["inference"],
             "target_user": ["developer"],
+            "capabilities": ["serve inference traffic"],
+            "interfaces": ["HTTP API"],
+            "deployment_style": ["containerized service"],
+            "operator_inputs": ["model configuration"],
+            "external_surfaces": ["REST endpoints"],
+            "evidence_summary": "README references a deployed API service.",
+            "confidence": "high",
+            "open_questions": ["Does it offer background workers?"],
         },
         "modules": {
             "modules": [],
@@ -535,6 +609,14 @@ def test_generate_profile_full_raises_when_module_analysis_returns_no_modules():
                 "description": "from-checkpoint",
                 "target_application": ["inference"],
                 "target_user": ["developer"],
+                "capabilities": ["serve inference traffic"],
+                "interfaces": ["HTTP API"],
+                "deployment_style": ["containerized service"],
+                "operator_inputs": ["model configuration"],
+                "external_surfaces": ["REST endpoints"],
+                "evidence_summary": "README references a deployed API service.",
+                "confidence": "high",
+                "open_questions": ["Does it offer background workers?"],
             },
         }
     )
