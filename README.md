@@ -476,8 +476,8 @@ repo 锁的行为：
 ### 画像阶段
 
 `profiles/soft/<repo>/<commit>/software_profile.json`
-- `basic_info` 固定包含 `description`、`target_application`、`target_user`、`capabilities`、`interfaces`、`deployment_style`、`operator_inputs`、`external_surfaces`、`evidence_summary`、`confidence`、`open_questions`
-- `modules[]` 固定包含 `name`、`category`、`responsibility`、`entry_points`、`files`、`key_functions`、`interfaces`、`depends_on`、`dependencies`、`boundary_rationale`、`evidence_paths`、`confidence`
+- `basic_info` 中本轮 prompt contract 重点强调的字段包括 `description`、`target_application`、`target_user`、`capabilities`、`interfaces`、`deployment_style`、`operator_inputs`、`external_surfaces`、`evidence_summary`、`confidence`、`open_questions`
+- `modules[]` 中 scanner-facing contract 重点字段包括 `name`、`category`、`responsibility`、`entry_points`、`files`、`key_functions`、`interfaces`、`depends_on`、`dependencies`、`boundary_rationale`、`evidence_paths`、`confidence`
 
 `profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
 - `source_features`、`flow_features`、`sink_features` 会保留 `status`、`confidence`、`evidence`、`evidence_summary`、`open_questions`、`assumptions`、`negative_constraints`

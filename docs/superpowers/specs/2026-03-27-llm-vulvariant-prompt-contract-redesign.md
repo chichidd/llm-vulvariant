@@ -20,7 +20,9 @@ Common evidence fields used where applicable:
 
 ### Software Profile Output
 
-`software_profile.json` stores the following `basic_info` fields:
+This section highlights the prompt-contract fields emphasized by this redesign. It is not an exhaustive serializer schema for `software_profile.json`.
+
+`software_profile.json` highlights the following `basic_info` fields:
 
 - `description`
 - `target_application`
@@ -34,7 +36,7 @@ Common evidence fields used where applicable:
 - `confidence`
 - `open_questions`
 
-`software_profile.json` stores the following `modules[]` fields:
+`software_profile.json` highlights the following `modules[]` fields:
 
 - `name`
 - `category`
