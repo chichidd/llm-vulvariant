@@ -220,8 +220,11 @@ def test_extract_complementary_summary_structured(monkeypatch):
                 "analysis": "user input reaches sink",
                 "conclusions": ["possible vuln"],
             },
-            "failed_attempts": [{"what": "path A", "why_failed": "sanitized"}],
-            "next_step_insights": ["inspect parser"],
+            "shared_memory_hits": ["query=os.system hit src/api.py"],
+            "rejected_hypotheses": ["subprocess path is sanitized"],
+            "next_best_queries": ["shell=True"],
+            "evidence_gaps": ["need source-to-sink trace"],
+            "files_completed_this_iteration": ["src/api.py"],
         }
     }
 
@@ -229,8 +232,11 @@ def test_extract_complementary_summary_structured(monkeypatch):
 
     assert "Summary" in text
     assert "Reasoning" in text
-    assert "Failed Attempts" in text
-    assert "Next Steps" in text
+    assert "Shared Memory Hits" in text
+    assert "Rejected Hypotheses" in text
+    assert "Next Best Queries" in text
+    assert "Evidence Gaps" in text
+    assert "Files Completed This Iteration" in text
 
 
 def test_extract_complementary_summary_non_dict_fallback(monkeypatch):
@@ -241,6 +247,7 @@ def test_extract_complementary_summary_non_dict_fallback(monkeypatch):
 def test_get_user_message_iteration_uses_progress_context(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
     finder.critical_stop_max_priority = 1
+    finder.shared_public_memory_scope = {"observation_count": 4}
 
     captured = {}
     pending_priorities = []
@@ -254,11 +261,13 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
         findings,
         progress_info,
         critical_stop_max_priority=2,
+        shared_observation_count=0,
     ):
         captured["scanned_files"] = scanned_files
         captured["findings"] = findings
         captured["progress_info"] = progress_info
         captured["critical_stop_max_priority"] = critical_stop_max_priority
+        captured["shared_observation_count"] = shared_observation_count
         return "intermediate"
 
     finder.memory = SimpleNamespace(
@@ -286,6 +295,7 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
     assert captured["scanned_files"] == ["done.py"]
     assert captured["findings"][0]["type"] == "cmd"
     assert captured["critical_stop_max_priority"] == 1
+    assert captured["shared_observation_count"] == 4
     assert "3/10 files scanned" in captured["progress_info"]
     assert "Critical scope: priority-1 modules only" in captured["progress_info"]
     assert pending_priorities == [1]
@@ -294,16 +304,19 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
 def test_get_user_message_initial_passes_critical_stop_priority(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
     finder.critical_stop_max_priority = 1
+    finder.shared_public_memory_scope = {"observation_count": 2}
     captured = {}
 
     def fake_build_initial_user_message(
         software_profile,
         module_priorities,
         critical_stop_max_priority=2,
+        shared_observation_count=0,
     ):
         captured["software_profile"] = software_profile
         captured["module_priorities"] = module_priorities
         captured["critical_stop_max_priority"] = critical_stop_max_priority
+        captured["shared_observation_count"] = shared_observation_count
         return "initial"
 
     monkeypatch.setattr(finder_module, "build_initial_user_message", fake_build_initial_user_message)
@@ -314,6 +327,55 @@ def test_get_user_message_initial_passes_critical_stop_priority(monkeypatch):
     assert captured["software_profile"] is finder.software_profile
     assert captured["module_priorities"] == finder.module_priorities
     assert captured["critical_stop_max_priority"] == 1
+    assert captured["shared_observation_count"] == 2
+
+
+def test_get_user_message_initial_includes_structured_vulnerability_guidance(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.vulnerability_profile = SimpleNamespace(
+        to_dict=lambda: {
+            "query_terms": ["os.system", "request.args"],
+            "dangerous_apis": ["os.system"],
+            "source_indicators": ["request.args.get"],
+            "sink_indicators": ["os.system(cmd)"],
+            "negative_constraints": ["feature flag disabled"],
+            "scan_start_points": ["src/api.py:entry"],
+            "variant_hypotheses": ["subprocess.run(..., shell=True)"],
+            "likely_false_positive_patterns": ["fixed literal command"],
+        }
+    )
+
+    message = finder._get_user_message(iteration=0)
+
+    assert "Structured Vulnerability Guidance" in message
+    assert '"query_terms": [' in message
+    assert '"scan_start_points": [' in message
+    assert "subprocess.run(..., shell=True)" in message
+
+
+def test_run_passes_shared_observation_count_to_system_prompt(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.shared_public_memory_scope = {"observation_count": 6}
+    captured = {}
+
+    def fake_build_system_prompt(vulnerability_profile, toolkit, shared_observation_count=0):
+        captured["vulnerability_profile"] = vulnerability_profile
+        captured["toolkit"] = toolkit
+        captured["shared_observation_count"] = shared_observation_count
+        return "system"
+
+    def fake_run_turn(iteration):
+        finder.conversation_history.append({"role": "assistant", "content": "analysis complete"})
+        return 1
+
+    monkeypatch.setattr(finder_module, "build_system_prompt", fake_build_system_prompt)
+    monkeypatch.setattr(finder, "_run_turn", fake_run_turn)
+
+    finder.run()
+
+    assert captured["vulnerability_profile"] is finder.vulnerability_profile
+    assert captured["toolkit"] is finder.toolkit
+    assert captured["shared_observation_count"] == 6
 
 
 def test_run_stops_when_assistant_says_analysis_complete(monkeypatch):

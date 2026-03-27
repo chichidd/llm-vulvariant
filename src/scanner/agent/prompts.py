@@ -31,7 +31,12 @@ def build_system_prompt(
         "dangerous_apis": vuln_dict.get("dangerous_apis", []),
         "source_indicators": vuln_dict.get("source_indicators", []),
         "sink_indicators": vuln_dict.get("sink_indicators", []),
+        "variant_hypotheses": vuln_dict.get("variant_hypotheses", []),
         "negative_constraints": vuln_dict.get("negative_constraints", []),
+        "likely_false_positive_patterns": vuln_dict.get("likely_false_positive_patterns", []),
+        "scan_start_points": vuln_dict.get("scan_start_points", []),
+        "open_questions": vuln_dict.get("open_questions", []),
+        "assumptions": vuln_dict.get("assumptions", []),
     }
 
     tools_desc = "\n".join(
@@ -87,7 +92,9 @@ Key point:
     - SOURCE: Where does untrusted data enter?
     - SINK: What dangerous operation is performed?
     - FLOW: How does data flow from the source to the sink?
+    - Use scan_start_points as concrete anchors for first-pass inspection before inventing broader searches.
     - Treat negative_constraints as disqualifiers that should reject false matches early.
+    - Treat likely_false_positive_patterns as early warning signs for dead ends.
 
 2. If shared observations are available, read them with a focused query before broad reads:
     - Start from focused query terms derived from the current vulnerability pattern.
@@ -108,6 +115,7 @@ Key point:
     - Different APIs for the same functionality
     - Different data formats (JSON, YAML, XML, pickle)
     - Different execution methods (subprocess, os, multiprocessing)
+    - Use variant_hypotheses to prioritize plausible variants before repo-wide exploration
 
 6. Widen to RELATED or repo-wide searches only when the current evidence is insufficient:
     - Expand scope only after focused PRIORITY-1 checks and shared-memory reads leave unresolved gaps.
@@ -196,17 +204,40 @@ def build_initial_user_message(
             "- Use focused query terms derived from the current vulnerability pattern instead of an empty query whenever possible.\n"
         )
     shared_memory_priority_line = ""
-    if shared_observation_count > 0 and p1_count == 0:
+    no_priority_one_modules = p1_count == 0
+    if shared_observation_count > 0 and no_priority_one_modules:
         shared_memory_priority_line = (
             "No PRIORITY-1 modules are currently identified. Start by calling read_shared_public_memory "
             "with focused query terms derived from the current vulnerability pattern before broad "
             "repo-wide searches.\n"
         )
+    task_start_line = (
+        "1. **Start by reading shared public memory**: No PRIORITY-1 modules are currently identified, "
+        "so begin with focused shared-memory queries and then widen carefully"
+        if shared_memory_priority_line
+        else (
+            "1. **No PRIORITY-1 modules are currently identified**: Start with focused repo-wide searches "
+            "anchored on the vulnerability pattern"
+            if no_priority_one_modules
+            else "1. **Start with PRIORITY-1 modules**: These are directly affected or embedding-similar to the known vulnerable module"
+        )
+    )
+    module_scan_line = (
+        "- No PRIORITY-1 modules are currently identified; use shared memory, scan_start_points, and focused repo-wide "
+        "searches to establish the best candidate modules"
+        if no_priority_one_modules
+        else "- For each PRIORITY-1 module, scan ALL files for the vulnerability pattern"
+    )
     start_instruction = (
         "Begin analysis now. Start by reading shared public memory with a focused query, then widen "
         "to repo-wide searches."
         if shared_memory_priority_line
-        else "Begin analysis now. Start with the 🔴 PRIORITY-1 modules."
+        else (
+            "Begin analysis now. No PRIORITY-1 modules are currently identified, so start with focused "
+            "repo-wide searches anchored on the vulnerability pattern."
+            if no_priority_one_modules
+            else "Begin analysis now. Start with the 🔴 PRIORITY-1 modules."
+        )
     )
 
     return f"""Based on the project architecture and the known vulnerability pattern, search for similar vulnerabilities in the codebase.
@@ -220,14 +251,14 @@ def build_initial_user_message(
 {json.dumps(project_info, indent=2, ensure_ascii=False)}
 
 ## Your Task
-1. **Start with PRIORITY-1 modules**: These are directly affected or embedding-similar to the known vulnerable module
+{task_start_line}
 2. Understand the vulnerability pattern (SOURCE → FLOW → SINK)
 3. Use tools to deeply analyze code in priority order
 4. Report each finding with the report_vulnerability tool
 5. Mark each fully analyzed file with mark_file_completed, including files with no findings
 
 ## Analysis Strategy
-{shared_memory_priority_line}- For each PRIORITY-1 module, scan ALL files for the vulnerability pattern
+{shared_memory_priority_line}{module_scan_line}
 {shared_memory_section}- Look for alternative APIs that perform similar dangerous operations
 - Trace data flow from user input/config to dangerous sinks
 - Widen to 🟡 RELATED modules only when 🔴 PRIORITY-1 evidence is insufficient

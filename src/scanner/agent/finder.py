@@ -448,8 +448,11 @@ class AgenticVulnFinder:
         
         This method extracts only:
         - reasoning: motivation, analysis logic, conclusions
-        - failed_attempts: what was tried and why it failed
-        - next_step_insights: hypotheses and strategies to validate
+        - shared_memory_hits: reusable shared-memory queries or observations
+        - rejected_hypotheses: dead ends or false positives worth avoiding
+        - next_best_queries: focused follow-up searches
+        - evidence_gaps: missing proof blocking confirmation
+        - files_completed_this_iteration: newly completed files
         - summary: one-sentence summary
         """
         content = summarized.get("content", summarized)
@@ -480,30 +483,47 @@ class AgenticVulnFinder:
                     reasoning_lines.append(f"- Conclusions: {conclusions}")
             if reasoning_lines:
                 complementary_parts.append("**Reasoning**:\n" + "\n".join(reasoning_lines))
-        
-        # 3. Failed attempts - important context not tracked elsewhere
-        failed = content.get("failed_attempts", [])
-        if failed:
-            failed_lines = []
-            for attempt in failed[:5]:  # Limit to avoid too much context
+
+        rejected_hypotheses = content.get("rejected_hypotheses", [])
+        if not rejected_hypotheses:
+            for attempt in content.get("failed_attempts", [])[:5]:
                 if isinstance(attempt, dict):
-                    what = attempt.get("what", "")
-                    why = attempt.get("why_failed", "")
-                    if what:
-                        failed_lines.append(f"- {what}: {why}")
-                elif isinstance(attempt, str):
-                    failed_lines.append(f"- {attempt}")
-            if failed_lines:
-                complementary_parts.append("**Failed Attempts**:\n" + "\n".join(failed_lines))
-        
-        # 4. Next step insights - hypotheses and strategies
-        next_insights = content.get("next_step_insights", content.get("next_steps", []))
-        if next_insights:
-            if isinstance(next_insights, list):
-                insights_str = "\n".join(f"- {item}" for item in next_insights[:5])
+                    what = str(attempt.get("what", "")).strip()
+                    why = str(attempt.get("why_failed", "")).strip()
+                    if what and why:
+                        rejected_hypotheses.append(f"{what}: {why}")
+                    elif what:
+                        rejected_hypotheses.append(what)
+                elif isinstance(attempt, str) and attempt.strip():
+                    rejected_hypotheses.append(attempt.strip())
+
+        next_best_queries = content.get(
+            "next_best_queries",
+            content.get("next_step_insights", content.get("next_steps", [])),
+        )
+        list_sections = [
+            ("Shared Memory Hits", content.get("shared_memory_hits", [])),
+            ("Rejected Hypotheses", rejected_hypotheses),
+            ("Next Best Queries", next_best_queries),
+            ("Evidence Gaps", content.get("evidence_gaps", [])),
+            (
+                "Files Completed This Iteration",
+                content.get("files_completed_this_iteration", []),
+            ),
+        ]
+        for title, values in list_sections:
+            if isinstance(values, list):
+                lines = [
+                    f"- {item}"
+                    for item in values[:5]
+                    if isinstance(item, str) and item.strip()
+                ]
+            elif isinstance(values, str) and values.strip():
+                lines = [f"- {values.strip()}"]
             else:
-                insights_str = f"- {next_insights}"
-            complementary_parts.append(f"**Next Steps**:\n{insights_str}")
+                lines = []
+            if lines:
+                complementary_parts.append(f"**{title}**:\n" + "\n".join(lines))
         
         if not complementary_parts:
             return "Iteration completed. Check progress for details."
@@ -511,11 +531,48 @@ class AgenticVulnFinder:
         return "\n\n".join(complementary_parts)
 
     def _get_user_message(self, iteration: int) -> str:
+        shared_observation_count = max(
+            0,
+            to_int(self.shared_public_memory_scope.get("observation_count", 0)),
+        )
+        vulnerability_dict: Dict[str, Any]
+        if hasattr(self.vulnerability_profile, "to_dict"):
+            vulnerability_dict = self.vulnerability_profile.to_dict()
+        elif isinstance(self.vulnerability_profile, dict):
+            vulnerability_dict = self.vulnerability_profile
+        else:
+            vulnerability_dict = {}
+        structured_guidance = {
+            field_name: field_value
+            for field_name, field_value in {
+                "query_terms": vulnerability_dict.get("query_terms", []),
+                "dangerous_apis": vulnerability_dict.get("dangerous_apis", []),
+                "source_indicators": vulnerability_dict.get("source_indicators", []),
+                "sink_indicators": vulnerability_dict.get("sink_indicators", []),
+                "variant_hypotheses": vulnerability_dict.get("variant_hypotheses", []),
+                "negative_constraints": vulnerability_dict.get("negative_constraints", []),
+                "likely_false_positive_patterns": vulnerability_dict.get(
+                    "likely_false_positive_patterns", []
+                ),
+                "scan_start_points": vulnerability_dict.get("scan_start_points", []),
+                "open_questions": vulnerability_dict.get("open_questions", []),
+                "assumptions": vulnerability_dict.get("assumptions", []),
+            }.items()
+            if field_value
+        }
+        guidance_prefix = ""
+        if structured_guidance:
+            guidance_prefix = (
+                "## Structured Vulnerability Guidance\n"
+                "Use these concrete anchors when choosing shared-memory queries, modules, and search patterns.\n"
+                f"{json.dumps(structured_guidance, indent=2, ensure_ascii=False)}\n\n"
+            )
         if iteration == 0:
-            return build_initial_user_message(
+            return guidance_prefix + build_initial_user_message(
                 self.software_profile,
                 self.module_priorities,
                 critical_stop_max_priority=self.critical_stop_max_priority,
+                shared_observation_count=shared_observation_count,
             )
         # Include progress info and already-scanned context for subsequent iterations
         progress_info = ""
@@ -540,11 +597,12 @@ class AgenticVulnFinder:
             scanned_files = self.memory.get_scanned_files()
             findings = self.memory.get_findings_summary()
         
-        return build_intermediate_user_message(
+        return guidance_prefix + build_intermediate_user_message(
             scanned_files=scanned_files,
             findings=findings,
             progress_info=progress_info,
             critical_stop_max_priority=self.critical_stop_max_priority,
+            shared_observation_count=shared_observation_count,
         )
 
     def _finalize_iteration_progress(self, iteration: int) -> None:
@@ -558,8 +616,19 @@ class AgenticVulnFinder:
     def run(self) -> Dict[str, Any]:
         if self.verbose:
             logger.info("Starting agentic vulnerability analysis with native tool calling...")
+        shared_observation_count = max(
+            0,
+            to_int(self.shared_public_memory_scope.get("observation_count", 0)),
+        )
         self.conversation_history = [
-            {"role": "system", "content": build_system_prompt(self.vulnerability_profile, self.toolkit)}
+            {
+                "role": "system",
+                "content": build_system_prompt(
+                    self.vulnerability_profile,
+                    self.toolkit,
+                    shared_observation_count=shared_observation_count,
+                ),
+            }
         ]
         iteration = 0  # iteration index
 

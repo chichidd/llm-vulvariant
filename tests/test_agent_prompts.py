@@ -176,6 +176,9 @@ def test_build_system_prompt_defines_structured_search_contract():
             "source_indicators": ["request.args.get"],
             "sink_indicators": ["os.system(cmd)"],
             "negative_constraints": ["feature flag disabled"],
+            "scan_start_points": ["src/api.py:entry"],
+            "variant_hypotheses": ["subprocess.run(..., shell=True)"],
+            "likely_false_positive_patterns": ["fixed literal command"],
         },
         _ToolkitWithSharedMemory(),
         shared_observation_count=2,
@@ -186,7 +189,11 @@ def test_build_system_prompt_defines_structured_search_contract():
     assert "source_indicators" in prompt
     assert "sink_indicators" in prompt
     assert "negative_constraints" in prompt
+    assert "scan_start_points" in prompt
+    assert "variant_hypotheses" in prompt
+    assert "likely_false_positive_patterns" in prompt
     assert "Identify the vulnerability pattern from query_terms, dangerous_apis" in prompt
+    assert "Use scan_start_points as concrete anchors" in prompt
     assert "If shared observations are available, read them with a focused query before broad reads" in prompt
     assert "Search PRIORITY-1 scope first" in prompt
     assert "Widen to RELATED or repo-wide searches only when the current evidence is insufficient" in prompt
@@ -266,6 +273,8 @@ def test_build_initial_message_guides_shared_memory_first_when_priority_one_empt
 
     assert "No PRIORITY-1 modules are currently identified" in initial
     assert "Start by calling read_shared_public_memory with focused query terms" in initial
+    assert "**Start with PRIORITY-1 modules**" not in initial
+    assert "For each PRIORITY-1 module" not in initial
 
 
 def test_build_priority_one_messages_keep_focus_on_priority_one_modules():
