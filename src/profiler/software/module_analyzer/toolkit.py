@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+VALID_MODULE_CONFIDENCE_VALUES = ("high", "medium", "low")
+
 
 @dataclass
 class ToolResult:
@@ -128,10 +130,25 @@ class ModuleAnalyzerToolkit:
                                         },
                                         "confidence": {
                                             "type": "string",
+                                            "enum": list(VALID_MODULE_CONFIDENCE_VALUES),
                                             "description": "Confidence level for this module summary: high, medium, or low.",
                                         },
                                     },
-                                    "required": ["name", "category", "description", "files"],
+                                    "required": [
+                                        "name",
+                                        "category",
+                                        "description",
+                                        "responsibility",
+                                        "entry_points",
+                                        "files",
+                                        "key_functions",
+                                        "interfaces",
+                                        "depends_on",
+                                        "dependencies",
+                                        "boundary_rationale",
+                                        "evidence_paths",
+                                        "confidence",
+                                    ],
                                 },
                                 "description": "List of identified modules.",
                             },
@@ -281,7 +298,115 @@ class ModuleAnalyzerToolkit:
     
     def _finalize(self, modules: List[Dict[str, Any]]) -> ToolResult:
         """Finalize the analysis and return the modules."""
+        if not isinstance(modules, list):
+            return ToolResult(
+                success=False,
+                content="",
+                error="modules must be a list of module objects.",
+            )
+
+        required_fields = (
+            "name",
+            "category",
+            "description",
+            "responsibility",
+            "entry_points",
+            "files",
+            "key_functions",
+            "interfaces",
+            "depends_on",
+            "dependencies",
+            "boundary_rationale",
+            "evidence_paths",
+            "confidence",
+        )
+        list_fields = (
+            "entry_points",
+            "files",
+            "key_functions",
+            "interfaces",
+            "depends_on",
+            "dependencies",
+            "evidence_paths",
+        )
+        string_fields = (
+            "name",
+            "category",
+            "description",
+            "responsibility",
+            "boundary_rationale",
+            "confidence",
+        )
+        normalized_modules: List[Dict[str, Any]] = []
+        for index, module in enumerate(modules):
+            if not isinstance(module, dict):
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=f"modules[{index}] must be an object.",
+                )
+
+            missing_fields = [field for field in required_fields if field not in module]
+            if missing_fields:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=f"modules[{index}] missing required fields: {', '.join(missing_fields)}",
+                )
+
+            normalized_module = dict(module)
+            for field in string_fields:
+                value = normalized_module.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    return ToolResult(
+                        success=False,
+                        content="",
+                        error=f"modules[{index}].{field} must be a non-empty string.",
+                    )
+                normalized_module[field] = value.strip()
+
+            for field in list_fields:
+                value = normalized_module.get(field)
+                if not isinstance(value, list):
+                    return ToolResult(
+                        success=False,
+                        content="",
+                        error=f"modules[{index}].{field} must be a list of strings.",
+                    )
+                cleaned_values = []
+                for item in value:
+                    if not isinstance(item, str) or not item.strip():
+                        return ToolResult(
+                            success=False,
+                            content="",
+                            error=f"modules[{index}].{field} must contain only non-empty strings.",
+                        )
+                    cleaned_values.append(item.strip())
+                normalized_module[field] = cleaned_values
+
+            if normalized_module["confidence"] not in VALID_MODULE_CONFIDENCE_VALUES:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=(
+                        f"modules[{index}].confidence must be one of "
+                        f"{', '.join(VALID_MODULE_CONFIDENCE_VALUES)}."
+                    ),
+                )
+
+            if normalized_module["depends_on"] != normalized_module["dependencies"]:
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=(
+                        f"modules[{index}].depends_on must match modules[{index}].dependencies "
+                        "to preserve the legacy contract."
+                    ),
+                )
+
+            normalized_modules.append(normalized_module)
+
         return ToolResult(
             success=True,
-            content=json.dumps({"modules": modules}, ensure_ascii=False, indent=2)
+            content=json.dumps({"modules": normalized_modules}, ensure_ascii=False, indent=2)
         )

@@ -726,6 +726,7 @@ class SkillModuleAnalyzer:
             module["key_functions"] = ordered[: self.max_key_functions]
             deps = sorted(module_dependencies.get(module_name, []))
             module["dependencies"] = deps
+            module["depends_on"] = list(deps)
 
         return modules
 

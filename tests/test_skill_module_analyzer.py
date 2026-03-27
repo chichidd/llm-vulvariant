@@ -52,7 +52,8 @@ def test_module_analyzer_finalize_schema_includes_richer_module_fields():
     tools = toolkit.get_available_tools()
 
     finalize_tool = next(tool for tool in tools if tool["function"]["name"] == "finalize")
-    module_properties = finalize_tool["function"]["parameters"]["properties"]["modules"]["items"]["properties"]
+    module_schema = finalize_tool["function"]["parameters"]["properties"]["modules"]["items"]
+    module_properties = module_schema["properties"]
 
     assert "responsibility" in module_properties
     assert "entry_points" in module_properties
@@ -61,6 +62,22 @@ def test_module_analyzer_finalize_schema_includes_richer_module_fields():
     assert "boundary_rationale" in module_properties
     assert "evidence_paths" in module_properties
     assert "confidence" in module_properties
+    assert set(module_schema["required"]) >= {
+        "name",
+        "category",
+        "description",
+        "responsibility",
+        "entry_points",
+        "files",
+        "key_functions",
+        "interfaces",
+        "depends_on",
+        "dependencies",
+        "boundary_rationale",
+        "evidence_paths",
+        "confidence",
+    }
+    assert module_properties["confidence"]["enum"] == ["high", "medium", "low"]
 
 
 def test_skill_normalize_modules_preserves_richer_fields_and_legacy_dependencies():
@@ -104,6 +121,107 @@ def test_skill_normalize_modules_preserves_richer_fields_and_legacy_dependencies
             "dependencies": ["core.runtime"],
         }
     ]
+
+
+def test_skill_dependency_enrichment_keeps_depends_on_aligned_with_dependencies():
+    analyzer = SkillModuleAnalyzer()
+    modules = [
+        {
+            "name": "module.a",
+            "category": "module",
+            "description": "",
+            "responsibility": "",
+            "entry_points": [],
+            "files": ["src/a.py"],
+            "key_functions": [],
+            "interfaces": [],
+            "depends_on": [],
+            "dependencies": [],
+            "boundary_rationale": "",
+            "evidence_paths": ["src/a.py"],
+            "confidence": "medium",
+        },
+        {
+            "name": "module.b",
+            "category": "module",
+            "description": "",
+            "responsibility": "",
+            "entry_points": [],
+            "files": ["src/b.py"],
+            "key_functions": [],
+            "interfaces": [],
+            "depends_on": [],
+            "dependencies": [],
+            "boundary_rationale": "",
+            "evidence_paths": ["src/b.py"],
+            "confidence": "medium",
+        },
+    ]
+    repo_info = {
+        "repo_analysis": {
+            "functions": [],
+            "call_graph_edges": [
+                {
+                    "caller_file": "src/a.py",
+                    "callee_file": "src/b.py",
+                }
+            ],
+        }
+    }
+
+    enriched = analyzer._attach_key_functions_and_dependencies(modules, repo_info, Path("/tmp/repo"))
+
+    assert enriched[0]["dependencies"] == ["module.b"]
+    assert enriched[0]["depends_on"] == ["module.b"]
+    assert enriched[1]["dependencies"] == []
+    assert enriched[1]["depends_on"] == []
+
+
+def test_module_analyzer_finalize_rejects_legacy_minimal_payload():
+    toolkit = ModuleAnalyzerToolkit(repo_path=Path("/tmp/repo"), file_list=["src/launcher.py"])
+
+    result = toolkit._finalize(
+        [
+            {
+                "name": "launcher",
+                "category": "execution.launcher",
+                "description": "Coordinates process startup.",
+                "files": ["src/launcher.py"],
+            }
+        ]
+    )
+
+    assert result.success is False
+    assert "missing required fields" in (result.error or "")
+
+
+def test_module_analyzer_finalize_accepts_valid_richer_payload():
+    toolkit = ModuleAnalyzerToolkit(repo_path=Path("/tmp/repo"), file_list=["src/launcher.py"])
+
+    result = toolkit._finalize(
+        [
+            {
+                "name": "launcher",
+                "category": "execution.launcher",
+                "description": "Coordinates process startup.",
+                "responsibility": "Dispatch subprocess-backed launch requests.",
+                "entry_points": ["launch()"],
+                "files": ["src/launcher.py"],
+                "key_functions": ["launch"],
+                "interfaces": ["CLI"],
+                "depends_on": ["core.runtime"],
+                "dependencies": ["core.runtime"],
+                "boundary_rationale": "Owns the process execution boundary.",
+                "evidence_paths": ["src/launcher.py"],
+                "confidence": "high",
+            }
+        ]
+    )
+
+    assert result.success is True
+    payload = json.loads(result.content)
+    assert payload["modules"][0]["depends_on"] == ["core.runtime"]
+    assert payload["modules"][0]["dependencies"] == ["core.runtime"]
 
 
 class _StorageManagerStub:
