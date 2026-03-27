@@ -89,6 +89,9 @@ class ReportGenerator:
     @classmethod
     def _normalize_text_list(cls, value: Any) -> List[str]:
         """Normalize list-shaped text sections into non-empty rendered strings."""
+        if isinstance(value, str):
+            rendered = value.strip()
+            return [rendered] if rendered else []
         if not isinstance(value, list):
             return []
 

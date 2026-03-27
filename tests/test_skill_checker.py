@@ -304,6 +304,31 @@ def test_build_prompt_requests_structured_evidence_contract(tmp_path):
     assert "If evidence is missing, say so explicitly in the relevant field." in prompt
 
 
+def test_parse_claude_result_promotes_string_evidence_fields_to_single_item_lists():
+    checker = _checker()
+    output = {
+        "result": json.dumps(
+            {
+                "verdict": "NOT_EXPLOITABLE",
+                "confidence": "medium",
+                "verdict_rationale": "Input never reaches an executable sink.",
+                "preconditions": "Attacker controls the CLI argument.",
+                "static_evidence": "cli.py validates the argument before dispatch.",
+                "dynamic_plan": "Try to pass shell metacharacters through the CLI wrapper.",
+                "open_questions": "Whether another entry point bypasses the wrapper.",
+            }
+        )
+    }
+
+    parsed = checker._parse_claude_result(output)
+
+    assert parsed is not None
+    assert parsed["preconditions"] == ["Attacker controls the CLI argument."]
+    assert parsed["static_evidence"] == ["cli.py validates the argument before dispatch."]
+    assert parsed["dynamic_plan"] == ["Try to pass shell metacharacters through the CLI wrapper."]
+    assert parsed["open_questions"] == ["Whether another entry point bypasses the wrapper."]
+
+
 def test_strip_inline_json_objects_removes_nested_payload_once():
     checker = _checker()
     text = (

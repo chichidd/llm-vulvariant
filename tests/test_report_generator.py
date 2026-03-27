@@ -279,6 +279,38 @@ def test_generate_reports_render_structured_checker_evidence_sections():
     assert "Open Questions" in full_report
 
 
+def test_generate_reports_render_string_valued_checker_evidence_sections():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "CONDITIONALLY_EXPLOITABLE",
+                "confidence": "medium",
+                "verdict_rationale": "Exploitability depends on a reachable admin-only endpoint.",
+                "preconditions": "Attacker can authenticate to the admin endpoint.",
+                "static_evidence": "admin.py passes request data into subprocess.run(..., shell=True).",
+                "dynamic_plan": "Replay an authenticated request containing shell metacharacters.",
+                "open_questions": "Whether the admin endpoint is enabled by default.",
+                "original_finding": {
+                    "file_path": "src/app.py",
+                    "vulnerability_type": "command_injection",
+                    "description": "Unsafe shell invocation",
+                    "evidence": "subprocess.run(user_cmd, shell=True)",
+                },
+            }
+        ],
+    }
+
+    ghsa_report = gen.generate_ghsa_reports(data)[0]["content"]
+    full_report = gen.generate_full_report(data)
+
+    assert "Attacker can authenticate to the admin endpoint." in ghsa_report
+    assert "admin.py passes request data into subprocess.run(..., shell=True)." in full_report
+    assert "Replay an authenticated request containing shell metacharacters." in full_report
+    assert "Whether the admin endpoint is enabled by default." in full_report
+
+
 def test_generate_ghsa_reports_tolerates_type_drifted_analysis_payloads():
     gen = _generator()
     data = {

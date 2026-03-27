@@ -281,6 +281,9 @@ class SkillExploitabilityChecker:
     @staticmethod
     def _normalize_analysis_list(value: Any) -> List[str]:
         """Normalize list-shaped evidence sections into non-empty strings."""
+        if isinstance(value, str):
+            rendered = value.strip()
+            return [rendered] if rendered else []
         if not isinstance(value, list):
             return []
 
