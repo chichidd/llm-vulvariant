@@ -371,13 +371,13 @@ def test_load_all_profiles_and_commit_resolution(tmp_path):
             "\"target_application\": [\"inference\"], "
             "\"target_user\": [\"platform engineer\"], "
             "\"capabilities\": [\"serve api traffic\"], "
-            "\"interfaces\": [\"HTTP API\"], "
-            "\"deployment_style\": [\"containerized service\"], "
-            "\"operator_inputs\": [\"config file\"], "
-            "\"external_surfaces\": [\"REST endpoints\"], "
+            "\"interfaces\": [], "
+            "\"deployment_style\": [], "
+            "\"operator_inputs\": [], "
+            "\"external_surfaces\": [], "
             "\"evidence_summary\": \"README references an API server.\", "
             "\"confidence\": \"high\", "
-            "\"open_questions\": [\"Is gRPC also exposed?\"]}}"
+            "\"open_questions\": []}}"
         ),
         encoding="utf-8",
     )
@@ -412,7 +412,8 @@ def test_load_all_profiles_and_commit_resolution(tmp_path):
     selected_repo1 = select_profile_ref(refs, "repo1")
     assert selected_repo1 is not None and selected_repo1.commit_hash == "abc123456789"
     assert selected_repo1.profile.capabilities == ["serve api traffic"]
-    assert selected_repo1.profile.external_surfaces == ["REST endpoints"]
+    assert selected_repo1.profile.interfaces == []
+    assert selected_repo1.profile.external_surfaces == []
 
     assert resolve_profile_commit(repo_profiles_dir, "repo2") is None
     assert resolve_profile_commit(repo_profiles_dir, "repo2", "00000000000") is None

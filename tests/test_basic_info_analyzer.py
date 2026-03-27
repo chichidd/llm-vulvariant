@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from profiler.profile_storage import ProfileStorageManager
 from profiler.software.basic_info_analyzer import BasicInfoAnalyzer
+from profiler.software.prompts import BASIC_INFO_PROMPT
 from utils.claude_cli import aggregate_usage_summaries
 
 
@@ -191,3 +192,13 @@ def test_basic_info_analyzer_allows_empty_evidence_backed_optional_lists(tmp_pat
     assert result["operator_inputs"] == []
     assert result["external_surfaces"] == []
     assert result["confidence"] == "medium"
+
+
+def test_basic_info_prompt_allows_empty_evidence_backed_optional_lists():
+    assert "return [] rather than guessing." in BASIC_INFO_PROMPT
+    assert "`interfaces`, `deployment_style`, `operator_inputs`, `external_surfaces`, or `open_questions`" in BASIC_INFO_PROMPT
+    assert "## 5. Interfaces (interfaces)" in BASIC_INFO_PROMPT
+    assert "## 6. Deployment style (deployment_style)" in BASIC_INFO_PROMPT
+    assert "## 7. Operator inputs (operator_inputs)" in BASIC_INFO_PROMPT
+    assert "## 8. External surfaces (external_surfaces)" in BASIC_INFO_PROMPT
+    assert "## 11. Open questions (open_questions)" in BASIC_INFO_PROMPT

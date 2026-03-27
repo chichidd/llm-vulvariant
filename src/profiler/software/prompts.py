@@ -38,15 +38,19 @@ List the software's major capabilities or services. Use short, concrete phrases 
 
 ## 5. Interfaces (interfaces)
 List the primary interfaces the software exposes or relies on, such as CLI, HTTP API, SDK/library entry points, web UI, or background workers.
+If repository evidence is silent, return `[]` rather than guessing.
 
 ## 6. Deployment style (deployment_style)
 List the deployment or execution styles supported by the software, such as library, CLI tool, long-running service, containerized service, or plugin.
+If repository evidence is silent, return `[]` rather than guessing.
 
 ## 7. Operator inputs (operator_inputs)
 List the main inputs operators, developers, or administrators provide to run or configure the software.
+If repository evidence is silent, return `[]` rather than guessing.
 
 ## 8. External surfaces (external_surfaces)
 List the externally reachable or attacker-relevant surfaces exposed by the software, such as APIs, file ingestion paths, message queues, network listeners, or admin endpoints.
+If repository evidence is silent, return `[]` rather than guessing.
 
 ## 9. Evidence summary (evidence_summary)
 Provide a brief 1-3 sentence summary of the repository evidence that supports the fields above.
@@ -56,6 +60,7 @@ Rate your confidence in this summary as `high`, `medium`, or `low`.
 
 ## 11. Open questions (open_questions)
 List the most important unresolved questions or ambiguities that remain after reviewing the provided evidence.
+If the provided evidence leaves no material unresolved questions, return `[]`.
 ---
 
 # Working Guidelines
@@ -65,7 +70,8 @@ List the most important unresolved questions or ambiguities that remain after re
 3. **Classify accurately**: choose the most fitting categories; avoid overly broad labels.
 4. **Completeness**: if there are multiple scenarios or user groups, list them all.
 5. **Stay evidence-backed**: do not invent interfaces, deployments, or external surfaces that are not supported by the provided materials.
-6. **Output JSON only**: do not add any explanation or extra text.
+6. **Optional empty lists**: if repository evidence is silent for `interfaces`, `deployment_style`, `operator_inputs`, `external_surfaces`, or `open_questions`, return [] rather than guessing.
+7. **Output JSON only**: do not add any explanation or extra text.
 
 # JSON Format
 
@@ -75,13 +81,13 @@ List the most important unresolved questions or ambiguities that remain after re
   "target_application": ["scenario 1", "scenario 2"],
   "target_user": ["user group 1", "user group 2"],
   "capabilities": ["capability 1", "capability 2"],
-  "interfaces": ["interface 1", "interface 2"],
-  "deployment_style": ["deployment 1", "deployment 2"],
-  "operator_inputs": ["input 1", "input 2"],
-  "external_surfaces": ["surface 1", "surface 2"],
+  "interfaces": [],
+  "deployment_style": [],
+  "operator_inputs": [],
+  "external_surfaces": [],
   "evidence_summary": "Short evidence-backed summary.",
   "confidence": "high",
-  "open_questions": ["question 1", "question 2"]
+  "open_questions": []
 }}
 ```
 

@@ -124,13 +124,13 @@ def test_generate_profile_loads_cached_final_result(tmp_path, monkeypatch):
             "target_application": ["inference"],
             "target_user": ["platform engineer"],
             "capabilities": ["serve inference traffic"],
-            "interfaces": ["HTTP API"],
-            "deployment_style": ["containerized service"],
-            "operator_inputs": ["model configuration"],
-            "external_surfaces": ["REST endpoints"],
+            "interfaces": [],
+            "deployment_style": [],
+            "operator_inputs": [],
+            "external_surfaces": [],
             "evidence_summary": "Cached README summary references an HTTP API server.",
             "confidence": "high",
-            "open_questions": ["Does it support gRPC?"],
+            "open_questions": [],
         },
         "repo_info": {"files": ["app.py"]},
         "modules": [{"name": "api", "files": ["app.py"]}],
@@ -145,7 +145,8 @@ def test_generate_profile_loads_cached_final_result(tmp_path, monkeypatch):
     assert isinstance(profile, SoftwareProfile)
     assert profile.description == "cached"
     assert profile.capabilities == ["serve inference traffic"]
-    assert profile.external_surfaces == ["REST endpoints"]
+    assert profile.interfaces == []
+    assert profile.external_surfaces == []
 
 
 def test_generate_profile_rejects_cached_final_result_with_incomplete_basic_info(tmp_path, monkeypatch):
