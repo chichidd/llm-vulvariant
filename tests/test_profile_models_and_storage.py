@@ -53,6 +53,14 @@ def test_software_profile_roundtrip_keeps_module_and_dependency_fields():
         description="A service that handles model serving",
         target_application=["inference"],
         target_user=["ml engineer"],
+        capabilities=["serve models", "manage deployments"],
+        interfaces=["HTTP API", "CLI"],
+        deployment_style=["containerized service"],
+        operator_inputs=["model artifact", "runtime configuration"],
+        external_surfaces=["REST endpoints", "admin CLI"],
+        evidence_summary="README describes an API server and deployment flow.",
+        confidence="high",
+        open_questions=["Is multi-tenant deployment supported?"],
         modules=[
             ModuleInfo(
                 name="serving",
@@ -73,6 +81,14 @@ def test_software_profile_roundtrip_keeps_module_and_dependency_fields():
 
     assert decoded.name == "demo"
     assert decoded.version == "abc123"
+    assert decoded.capabilities == ["serve models", "manage deployments"]
+    assert decoded.interfaces == ["HTTP API", "CLI"]
+    assert decoded.deployment_style == ["containerized service"]
+    assert decoded.operator_inputs == ["model artifact", "runtime configuration"]
+    assert decoded.external_surfaces == ["REST endpoints", "admin CLI"]
+    assert decoded.evidence_summary == "README describes an API server and deployment flow."
+    assert decoded.confidence == "high"
+    assert decoded.open_questions == ["Is multi-tenant deployment supported?"]
     assert len(decoded.modules) == 1
     assert isinstance(decoded.modules[0], ModuleInfo)
     assert decoded.modules[0].external_dependencies == ["torch"]
@@ -100,13 +116,32 @@ def test_software_profile_to_dict_keeps_builtin_only_dependency_details():
 
 def test_software_profile_from_dict_normalizes_modules_and_data_flow_patterns():
     data = {
-        "basic_info": {"name": "repo", "version": "v1"},
+        "basic_info": {
+            "name": "repo",
+            "version": "v1",
+            "capabilities": ["load models"],
+            "interfaces": ["CLI"],
+            "deployment_style": ["library"],
+            "operator_inputs": ["config file"],
+            "external_surfaces": ["CLI arguments"],
+            "evidence_summary": "README references a CLI entrypoint.",
+            "confidence": "medium",
+            "open_questions": ["Does it support remote storage?"],
+        },
         "modules": [{"name": "raw", "files": ["a.py"]}],
         "data_flow_patterns": [{"pattern_type": "file_to_memory", "source_apis": ["open"]}],
     }
 
     profile = SoftwareProfile.from_dict(data)
 
+    assert profile.capabilities == ["load models"]
+    assert profile.interfaces == ["CLI"]
+    assert profile.deployment_style == ["library"]
+    assert profile.operator_inputs == ["config file"]
+    assert profile.external_surfaces == ["CLI arguments"]
+    assert profile.evidence_summary == "README references a CLI entrypoint."
+    assert profile.confidence == "medium"
+    assert profile.open_questions == ["Does it support remote storage?"]
     assert len(profile.modules) == 1
     assert isinstance(profile.modules[0], ModuleInfo)
     assert profile.modules[0].name == "raw"

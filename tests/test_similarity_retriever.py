@@ -19,12 +19,36 @@ from scanner.similarity.retriever import (
 )
 
 
-def _mk_profile(name: str, desc: str, modules, apps=None, users=None, dep_count=None, libs=None):
+def _mk_profile(
+    name: str,
+    desc: str,
+    modules,
+    apps=None,
+    users=None,
+    dep_count=None,
+    libs=None,
+    capabilities=None,
+    interfaces=None,
+    deployment_style=None,
+    operator_inputs=None,
+    external_surfaces=None,
+    evidence_summary="",
+    confidence="unknown",
+    open_questions=None,
+):
     return SoftwareProfile(
         name=name,
         description=desc,
         target_application=apps or [],
         target_user=users or [],
+        capabilities=capabilities or [],
+        interfaces=interfaces or [],
+        deployment_style=deployment_style or [],
+        operator_inputs=operator_inputs or [],
+        external_surfaces=external_surfaces or [],
+        evidence_summary=evidence_summary,
+        confidence=confidence,
+        open_questions=open_questions or [],
         modules=modules,
         dependency_usage_count=dep_count or {},
         third_party_libraries=libs or [],
@@ -259,7 +283,17 @@ def test_load_all_profiles_and_commit_resolution(tmp_path):
     good_dir = repo_profiles_dir / "repo1" / "abc123456789"
     good_dir.mkdir(parents=True)
     (good_dir / "software_profile.json").write_text(
-        "{\"basic_info\": {\"name\": \"repo1\", \"version\": \"abc123456789\"}}",
+        (
+            "{\"basic_info\": {\"name\": \"repo1\", \"version\": \"abc123456789\", "
+            "\"capabilities\": [\"serve api traffic\"], "
+            "\"interfaces\": [\"HTTP API\"], "
+            "\"deployment_style\": [\"containerized service\"], "
+            "\"operator_inputs\": [\"config file\"], "
+            "\"external_surfaces\": [\"REST endpoints\"], "
+            "\"evidence_summary\": \"README references an API server.\", "
+            "\"confidence\": \"high\", "
+            "\"open_questions\": [\"Is gRPC also exposed?\"]}}"
+        ),
         encoding="utf-8",
     )
 
@@ -292,6 +326,8 @@ def test_load_all_profiles_and_commit_resolution(tmp_path):
     assert resolve_profile_commit(repo_profiles_dir, "repo1") == "abc123456789"
     selected_repo1 = select_profile_ref(refs, "repo1")
     assert selected_repo1 is not None and selected_repo1.commit_hash == "abc123456789"
+    assert selected_repo1.profile.capabilities == ["serve api traffic"]
+    assert selected_repo1.profile.external_surfaces == ["REST endpoints"]
 
     assert resolve_profile_commit(repo_profiles_dir, "repo2") == "000000000001"
     assert resolve_profile_commit(repo_profiles_dir, "repo2", "00000000000") == "000000000001"

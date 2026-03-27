@@ -1,8 +1,10 @@
 """Basic information analyzer (app name, target scenarios, etc.)."""
 
-from pathlib import Path
-from typing import Dict, Any, Optional
+from __future__ import annotations
+
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 from llm import (
     BaseLLMClient,
@@ -21,32 +23,37 @@ logger = get_logger(__name__)
 
 class BasicInfoAnalyzer:
     """Analyze basic information about the software."""
-    
+
     def __init__(self, llm_client: BaseLLMClient):
         self.llm_client = llm_client
 
     def analyze(
-        self, 
-        repo_path: Path, 
-        repo_info: Dict,
-        repo_name: str = None,
-        version: str = None,
-        storage_manager: Optional[ProfileStorageManager] = None
+        self,
+        repo_path: Path,
+        repo_info: Dict[str, Any],
+        repo_name: Optional[str] = None,
+        version: Optional[str] = None,
+        storage_manager: Optional[ProfileStorageManager] = None,
     ) -> Dict[str, Any]:
-        """
-        Analyze basic information.
-        
+        """Analyze repository-level software basic information.
+
+        Args:
+            repo_path: Local repository path.
+            repo_info: Repository metadata collected before LLM analysis.
+            repo_name: Optional repository name override.
+            version: Optional commit or version identifier.
+            storage_manager: Optional storage manager used to persist the prompt
+                conversation.
+
         Returns:
-            A dict containing the following fields:
-            - description: Project description
-            - target_application: Target application scenarios
-            - target_user: Target users
+            Parsed basic-info fields plus LLM usage metadata when analysis
+            succeeds. On failure, returns usage metadata only.
         """
         logger.info("Analyzing basic info...")
-        
+
         # Format configuration files
         config_files_text = self._format_config_files(repo_info.get("config_files", []))
-        
+
         # Build the LLM prompt
         prompt = BASIC_INFO_PROMPT.format(
             repo_name=repo_name or repo_path.name,
@@ -73,11 +80,31 @@ class BasicInfoAnalyzer:
             content = extract_message_content(response)
             llm_result = parse_llm_json(
                 content,
-                required_keys=["description", "target_application", "target_user"],
+                required_keys=[
+                    "description",
+                    "target_application",
+                    "target_user",
+                    "capabilities",
+                    "interfaces",
+                    "deployment_style",
+                    "operator_inputs",
+                    "external_surfaces",
+                    "evidence_summary",
+                    "confidence",
+                    "open_questions",
+                ],
                 expected_types={
                     "description": str,
                     "target_application": list,
                     "target_user": list,
+                    "capabilities": list,
+                    "interfaces": list,
+                    "deployment_style": list,
+                    "operator_inputs": list,
+                    "external_surfaces": list,
+                    "evidence_summary": str,
+                    "confidence": str,
+                    "open_questions": list,
                 },
                 llm_client=self.llm_client,
                 max_repair_attempts=2,
@@ -103,6 +130,14 @@ class BasicInfoAnalyzer:
                     "description": llm_result.get("description", ""),
                     "target_application": llm_result.get("target_application", []),
                     "target_user": llm_result.get("target_user", []),
+                    "capabilities": llm_result.get("capabilities", []),
+                    "interfaces": llm_result.get("interfaces", []),
+                    "deployment_style": llm_result.get("deployment_style", []),
+                    "operator_inputs": llm_result.get("operator_inputs", []),
+                    "external_surfaces": llm_result.get("external_surfaces", []),
+                    "evidence_summary": llm_result.get("evidence_summary", ""),
+                    "confidence": llm_result.get("confidence", ""),
+                    "open_questions": llm_result.get("open_questions", []),
                     "llm_usage": llm_usage,
                     "llm_calls": llm_usage.get("sessions_total", llm_usage.get("calls_total", 0)),
                 }
@@ -114,13 +149,19 @@ class BasicInfoAnalyzer:
             "llm_usage": llm_usage,
             "llm_calls": llm_usage.get("sessions_total", llm_usage.get("calls_total", 0)),
         }
-    
-    def _format_config_files(self, config_files: list) -> str:
-        """Format configuration file contents."""
+
+    def _format_config_files(self, config_files: list[Dict[str, Any]]) -> str:
+        """Format configuration file contents.
+
+        Args:
+            config_files: Collected configuration file records.
+
+        Returns:
+            Up to three formatted config snippets for the prompt.
+        """
         result = []
         for config in config_files[:3]:  # At most 3
             name = config.get("name", "unknown")
             content = config.get("content", "")
             result.append(f"[{name}]\n{content}")
         return "\n\n".join(result)
-    

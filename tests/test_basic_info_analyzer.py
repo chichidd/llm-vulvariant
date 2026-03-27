@@ -67,6 +67,14 @@ class _TrackedLLMClient:
                     "description": "demo",
                     "target_application": ["training"],
                     "target_user": ["researcher"],
+                    "capabilities": ["model training orchestration"],
+                    "interfaces": ["CLI"],
+                    "deployment_style": ["self-hosted"],
+                    "operator_inputs": ["training config"],
+                    "external_surfaces": ["command line arguments"],
+                    "evidence_summary": "README documents a CLI workflow for launching training jobs.",
+                    "confidence": "high",
+                    "open_questions": ["Does the repo also expose a web dashboard?"],
                 }
             )
         )
@@ -85,6 +93,14 @@ def test_basic_info_analyzer_records_llm_usage(tmp_path):
     )
 
     assert result["description"] == "demo"
+    assert result["capabilities"] == ["model training orchestration"]
+    assert result["interfaces"] == ["CLI"]
+    assert result["deployment_style"] == ["self-hosted"]
+    assert result["operator_inputs"] == ["training config"]
+    assert result["external_surfaces"] == ["command line arguments"]
+    assert result["evidence_summary"] == "README documents a CLI workflow for launching training jobs."
+    assert result["confidence"] == "high"
+    assert result["open_questions"] == ["Does the repo also expose a web dashboard?"]
     assert result["llm_calls"] == 1
     assert result["llm_usage"]["input_tokens"] == 12
     assert result["llm_usage"]["output_tokens"] == 34
@@ -96,3 +112,5 @@ def test_basic_info_analyzer_records_llm_usage(tmp_path):
     )
     assert saved["llm_usage"]["calls_total"] == 1
     assert saved["llm_usage"]["input_tokens"] == 12
+    assert saved["parsed_result"]["capabilities"] == ["model training orchestration"]
+    assert saved["parsed_result"]["external_surfaces"] == ["command line arguments"]

@@ -161,6 +161,14 @@ class SoftwareProfile:
     description: str = ""
     target_application: List[str] = field(default_factory=list)  # 目标场景
     target_user: List[str] = field(default_factory=list)  # 目标人群
+    capabilities: List[str] = field(default_factory=list)
+    interfaces: List[str] = field(default_factory=list)
+    deployment_style: List[str] = field(default_factory=list)
+    operator_inputs: List[str] = field(default_factory=list)
+    external_surfaces: List[str] = field(default_factory=list)
+    evidence_summary: str = ""
+    confidence: str = "unknown"
+    open_questions: List[str] = field(default_factory=list)
 
     # 1.2 架构信息
     repo_info: Dict[str, Any] = field(default_factory=dict)
@@ -205,6 +213,14 @@ class SoftwareProfile:
                 "description": self.description,
                 "target_application": self.target_application,
                 "target_user": self.target_user,
+                "capabilities": self.capabilities,
+                "interfaces": self.interfaces,
+                "deployment_style": self.deployment_style,
+                "operator_inputs": self.operator_inputs,
+                "external_surfaces": self.external_surfaces,
+                "evidence_summary": self.evidence_summary,
+                "confidence": self.confidence,
+                "open_questions": self.open_questions,
             },
             "repo_info": self.repo_info,
             "modules": serialized_modules,
@@ -283,6 +299,14 @@ class SoftwareProfile:
             description=basic.get("description", ""),
             target_application=basic.get("target_application", []),
             target_user=basic.get("target_user", []),
+            capabilities=basic.get("capabilities", []),
+            interfaces=basic.get("interfaces", []),
+            deployment_style=basic.get("deployment_style", []),
+            operator_inputs=basic.get("operator_inputs", []),
+            external_surfaces=basic.get("external_surfaces", []),
+            evidence_summary=basic.get("evidence_summary", ""),
+            confidence=basic.get("confidence", "unknown"),
+            open_questions=basic.get("open_questions", []),
             repo_info=repo_info,
             modules=modules,
             data_flow_patterns=data_flow_patterns,

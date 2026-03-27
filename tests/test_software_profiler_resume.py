@@ -99,7 +99,19 @@ def test_generate_profile_loads_cached_final_result(tmp_path, monkeypatch):
     _stub_git(monkeypatch)
 
     cached_profile = {
-        "basic_info": {"name": "demo", "version": "abc123", "description": "cached"},
+        "basic_info": {
+            "name": "demo",
+            "version": "abc123",
+            "description": "cached",
+            "capabilities": ["serve inference traffic"],
+            "interfaces": ["HTTP API"],
+            "deployment_style": ["containerized service"],
+            "operator_inputs": ["model configuration"],
+            "external_surfaces": ["REST endpoints"],
+            "evidence_summary": "Cached README summary references an HTTP API server.",
+            "confidence": "high",
+            "open_questions": ["Does it support gRPC?"],
+        },
         "repo_info": {"files": ["app.py"]},
         "modules": [{"name": "api", "files": ["app.py"]}],
         "metadata": {"profile_fingerprint": {"hash": "expected"}},
@@ -112,6 +124,8 @@ def test_generate_profile_loads_cached_final_result(tmp_path, monkeypatch):
 
     assert isinstance(profile, SoftwareProfile)
     assert profile.description == "cached"
+    assert profile.capabilities == ["serve inference traffic"]
+    assert profile.external_surfaces == ["REST endpoints"]
 
 
 def test_generate_profile_rejects_cached_final_result_with_empty_modules(tmp_path, monkeypatch):
@@ -219,6 +233,14 @@ def test_generate_profile_missing_resume_state_forces_full_regeneration(tmp_path
             "description": "stale",
             "target_application": ["old"],
             "target_user": ["old"],
+            "capabilities": ["old capability"],
+            "interfaces": ["old interface"],
+            "deployment_style": ["old deployment"],
+            "operator_inputs": ["old input"],
+            "external_surfaces": ["old surface"],
+            "evidence_summary": "old summary",
+            "confidence": "low",
+            "open_questions": ["old question"],
         },
         "modules": {"modules": [{"name": "api", "files": ["app.py"]}]},
     }
@@ -250,6 +272,14 @@ def test_generate_profile_matching_resume_state_allows_checkpoint_reuse(tmp_path
             "description": "from-checkpoint",
             "target_application": ["inference"],
             "target_user": ["developer"],
+            "capabilities": ["serve inference traffic"],
+            "interfaces": ["HTTP API"],
+            "deployment_style": ["containerized service"],
+            "operator_inputs": ["model configuration"],
+            "external_surfaces": ["REST endpoints"],
+            "evidence_summary": "README references a deployed API service.",
+            "confidence": "high",
+            "open_questions": ["Does it offer background workers?"],
         },
         "modules": {"modules": [{"name": "api", "files": ["app.py"]}]},
     }

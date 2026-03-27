@@ -5,7 +5,7 @@ LLM Prompt Templates for Software Profiling
 SOFTWARE_BASIC_INFO_SYSTEM_PROMPT = """You are a senior software analysis assistant.
 Follow the user's task strictly, ground conclusions in provided repository evidence, and output JSON only."""
 
-BASIC_INFO_PROMPT = """Please carefully analyze the following software repository and accurately identify its application domain, target scenarios, and user groups.
+BASIC_INFO_PROMPT = """Please carefully analyze the following software repository and accurately identify its application domain, operational context, and external surfaces.
 
 # Repository Information
 
@@ -32,6 +32,30 @@ Identify the software’s **specific application domains**. List as many relevan
 
 ## 3. Target users (target_user)
 Identify the software’s **primary users**. List as many relevant user groups as applicable, ensuring accuracy and detail.
+
+## 4. Core capabilities (capabilities)
+List the software's major capabilities or services. Use short, concrete phrases grounded in repository evidence.
+
+## 5. Interfaces (interfaces)
+List the primary interfaces the software exposes or relies on, such as CLI, HTTP API, SDK/library entry points, web UI, or background workers.
+
+## 6. Deployment style (deployment_style)
+List the deployment or execution styles supported by the software, such as library, CLI tool, long-running service, containerized service, or plugin.
+
+## 7. Operator inputs (operator_inputs)
+List the main inputs operators, developers, or administrators provide to run or configure the software.
+
+## 8. External surfaces (external_surfaces)
+List the externally reachable or attacker-relevant surfaces exposed by the software, such as APIs, file ingestion paths, message queues, network listeners, or admin endpoints.
+
+## 9. Evidence summary (evidence_summary)
+Provide a brief 1-3 sentence summary of the repository evidence that supports the fields above.
+
+## 10. Confidence (confidence)
+Rate your confidence in this summary as `high`, `medium`, or `low`.
+
+## 11. Open questions (open_questions)
+List the most important unresolved questions or ambiguities that remain after reviewing the provided evidence.
 ---
 
 # Working Guidelines
@@ -40,7 +64,8 @@ Identify the software’s **primary users**. List as many relevant user groups a
 2. **Analyze dependencies and configuration**: infer the tech stack and application type.
 3. **Classify accurately**: choose the most fitting categories; avoid overly broad labels.
 4. **Completeness**: if there are multiple scenarios or user groups, list them all.
-5. **Output JSON only**: do not add any explanation or extra text.
+5. **Stay evidence-backed**: do not invent interfaces, deployments, or external surfaces that are not supported by the provided materials.
+6. **Output JSON only**: do not add any explanation or extra text.
 
 # JSON Format
 
@@ -48,7 +73,15 @@ Identify the software’s **primary users**. List as many relevant user groups a
 {{
   "description": "Core software description (1–3 sentences)",
   "target_application": ["scenario 1", "scenario 2"],
-  "target_user": ["user group 1", "user group 2"]
+  "target_user": ["user group 1", "user group 2"],
+  "capabilities": ["capability 1", "capability 2"],
+  "interfaces": ["interface 1", "interface 2"],
+  "deployment_style": ["deployment 1", "deployment 2"],
+  "operator_inputs": ["input 1", "input 2"],
+  "external_surfaces": ["surface 1", "surface 2"],
+  "evidence_summary": "Short evidence-backed summary.",
+  "confidence": "high",
+  "open_questions": ["question 1", "question 2"]
 }}
 ```
 
