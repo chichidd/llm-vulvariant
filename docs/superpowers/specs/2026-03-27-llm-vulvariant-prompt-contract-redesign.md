@@ -95,16 +95,21 @@ The scanner runtime consumes structured vulnerability guidance from the vulnerab
 - `open_questions`
 - `assumptions`
 
-The scanner prompt sequence currently preserves these behaviors:
+Scanner persistence is currently split into two artifacts:
+
+- `scan_memory.json` persists resume/progress state via `ScanMemory`
+- `conversations/iteration_<n>_output_summary.json` stores per-iteration compression summaries, which may include `shared_memory_hits`, `rejected_hypotheses`, `next_best_queries`, `evidence_gaps`, and `files_completed_this_iteration`
+
+The scanner prompt sequence currently emphasizes these behaviors:
 
 - identify the vulnerability pattern from the structured guidance instead of reconstructing it from prose only
-- use focused `read_shared_public_memory` queries before broader reads when shared observations are available
+- prompt the agent to prefer focused `read_shared_public_memory` queries before broader reads when shared observations are available
 - search `PRIORITY-1` scope before widening to related or repo-wide scope
-- retain iteration-compression summaries with `shared_memory_hits`, `rejected_hypotheses`, `next_best_queries`, `evidence_gaps`, and `files_completed_this_iteration`
+- record iteration-compression summaries separately from `scan_memory.json`
 
 ## Checker Outputs
 
-`exploitability.json` stores richer top-level analysis sections for each result:
+The current stable checker contract centers on these richer top-level analysis sections:
 
 - `verdict`
 - `confidence`
@@ -115,7 +120,7 @@ The scanner prompt sequence currently preserves these behaviors:
 - `docker_verification`
 - `open_questions`
 
-`exploitability.json` also retains legacy compatibility sections that are still emitted and consumed by downstream report generation:
+When the model provides them, `exploitability.json` may also include legacy compatibility sections that downstream report generation still consumes:
 
 - `sink_analysis`
 - `source_analysis`
@@ -125,7 +130,7 @@ The scanner prompt sequence currently preserves these behaviors:
 Current report generation consumes both groups of checker fields:
 
 - richer sections render dedicated evidence-oriented report sections
-- legacy compatibility sections still provide sink/source summaries, attack-scenario rendering, and remediation text
+- legacy compatibility sections still provide sink/source summaries, attack-scenario rendering, and remediation text when present
 - `docker_verification` remains part of the persisted checker result and report output
 
 ## Validation Evidence

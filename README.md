@@ -352,7 +352,7 @@ Agent 特性：
 - **Priority-1 提前停止**：当高优先级发现完成时可提前结束（支持 `min` / `max` 策略）
 - **模块优先级排序**：根据漏洞画像自动计算目标模块的扫描优先级
 - **结构化漏洞引导**：扫描 prompt 直接消费 `query_terms`、`dangerous_apis`、`source_indicators`、`sink_indicators`、`variant_hypotheses`、`negative_constraints`、`likely_false_positive_patterns`、`scan_start_points`、`open_questions`、`assumptions`
-- **Shared public memory 聚焦读取**：当同一 run 已有共享 observation 时，Agent 会先用聚焦 query 调用 `read_shared_public_memory`，证据不足时再扩大搜索范围
+- **Shared public memory 聚焦读取引导**：当同一 run 已有共享 observation 时，scanner prompt 会引导 agent 优先使用聚焦 query 调用 `read_shared_public_memory`，证据不足时再扩大搜索范围
 - **可恢复**：`AgentMemoryManager` 跟踪已处理文件/模块，支持断点续扫
 
 ### 7.3 可恢复性设计
@@ -489,13 +489,17 @@ repo 锁的行为：
 |------|------|
 | `<scan-dir>/<cve>/<repo>-<commit12>/agentic_vuln_findings.json` | 扫描原始发现 |
 | `.../conversation_history.json` | Agent 对话历史 |
-| `.../scan_memory.json` | 扫描续跑状态与迭代压缩摘要 |
+| `.../scan_memory.json` | 扫描续跑所需的状态与进度持久化 |
+| `.../conversations/iteration_<n>_output_summary.json` | 每轮对话压缩摘要，单独保存迭代分析补充信息 |
 | `.../target_similarity.json` | 目标选择时的相似度详情，仅在目标由相似度检索/排序选出时生成 |
-| `<scan-dir>/_runs/<run-id>/shared-public-memory/<repo>-<commit12>/observations/*.json` | 同一 batch run 内共享的公共 observation；agent 会优先用聚焦 query 按需读取，不影响私有 `scan_memory.json` |
+| `<scan-dir>/_runs/<run-id>/shared-public-memory/<repo>-<commit12>/observations/*.json` | 同一 batch run 内共享的公共 observation；scanner prompt 会引导 agent 在合适时优先用聚焦 query 按需读取，不影响私有 `scan_memory.json` |
 | `<scan-dir>/batch-summary-<timestamp>.json` | 批量扫描汇总信息（jobs、target 时序、覆盖率统计等） |
 
 `scan_memory.json`
-- 迭代压缩摘要会保留 `shared_memory_hits`、`rejected_hypotheses`、`next_best_queries`、`evidence_gaps`、`files_completed_this_iteration`
+- 仅用于持久化续跑所需的 `ScanMemory` 状态，例如文件进度、模块优先级、finding 列表、issues 和摘要
+
+`conversations/iteration_<n>_output_summary.json`
+- 单独保存每轮压缩摘要，可能包含 `shared_memory_hits`、`rejected_hypotheses`、`next_best_queries`、`evidence_gaps`、`files_completed_this_iteration`
 
 ### 可利用性验证阶段
 
@@ -507,9 +511,9 @@ repo 锁的行为：
 | `.../reports/ghsa_*.md` | GHSA 格式漏洞报告，仅在 `--generate-report` 时生成 |
 
 `exploitability.json`
-- `results[]` 中的每条 finding 会保留 richer sections：`verdict`、`confidence`、`verdict_rationale`、`preconditions`、`static_evidence`、`dynamic_plan`、`docker_verification`、`open_questions`
-- 同时仍保留 legacy compatibility sections：`sink_analysis`、`source_analysis`、`attack_scenario`、`remediation`
-- `reports/security_report.md` 与 `reports/ghsa_*.md` 会同时消费 richer sections 和 legacy compatibility sections，而不是只保留单行 verdict
+- 当前稳定的 checker contract 以 richer sections 为主：`verdict`、`confidence`、`verdict_rationale`、`preconditions`、`static_evidence`、`dynamic_plan`、`docker_verification`、`open_questions`
+- 模型若额外提供 `sink_analysis`、`source_analysis`、`attack_scenario`、`remediation` 这些 legacy compatibility sections，结果会继续透传它们，并被报告路径消费
+- `reports/security_report.md` 与 `reports/ghsa_*.md` 会稳定消费 richer sections；若结果里包含 legacy compatibility sections，也会继续使用它们，而不是只保留单行 verdict
 
 ### 聚合提交产物
 
