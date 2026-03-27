@@ -121,6 +121,8 @@ def test_generate_profile_loads_cached_final_result(tmp_path, monkeypatch):
             "name": "demo",
             "version": "abc123",
             "description": "cached",
+            "target_application": ["inference"],
+            "target_user": ["platform engineer"],
             "capabilities": ["serve inference traffic"],
             "interfaces": ["HTTP API"],
             "deployment_style": ["containerized service"],
@@ -144,6 +146,40 @@ def test_generate_profile_loads_cached_final_result(tmp_path, monkeypatch):
     assert profile.description == "cached"
     assert profile.capabilities == ["serve inference traffic"]
     assert profile.external_surfaces == ["REST endpoints"]
+
+
+def test_generate_profile_rejects_cached_final_result_with_incomplete_basic_info(tmp_path, monkeypatch):
+    repo_dir = tmp_path / "demo"
+    repo_dir.mkdir()
+    _stub_git(monkeypatch)
+
+    cached_profile = {
+        "basic_info": {"name": "demo", "version": "abc123", "description": "cached"},
+        "repo_info": {"files": ["app.py"]},
+        "modules": [{"name": "api", "files": ["app.py"]}],
+        "metadata": {"profile_fingerprint": {"hash": "expected"}},
+    }
+    profiler = _stub_profiler(StubStorageManager(final_result=json.dumps(cached_profile)))
+    profiler._build_profile_fingerprint = lambda: {"hash": "expected"}
+
+    regenerated = SoftwareProfile(
+        name="demo",
+        version="abc123",
+        description="regenerated",
+        capabilities=["serve inference traffic"],
+        interfaces=["HTTP API"],
+        deployment_style=["containerized service"],
+        operator_inputs=["model configuration"],
+        external_surfaces=["REST endpoints"],
+        evidence_summary="Regenerated from valid Task 5 basic info.",
+        confidence="high",
+        open_questions=["Does it support gRPC?"],
+    )
+    profiler._generate_profile_full = lambda *args, **kwargs: regenerated
+
+    profile = profiler.generate_profile(str(repo_dir))
+
+    assert profile is regenerated
 
 
 def test_generate_profile_rejects_cached_final_result_with_empty_modules(tmp_path, monkeypatch):

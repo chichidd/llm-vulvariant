@@ -278,6 +278,34 @@ def test_compute_profile_similarity_uses_richer_basic_info_in_description_dimens
     assert matching_metrics.overall_sim > non_matching_metrics.overall_sim
 
 
+def test_compute_profile_similarity_sparse_profiles_do_not_gain_boilerplate_similarity():
+    source = _mk_profile("src", "alpha beta", [ModuleInfo(name="m")])
+    target = _mk_profile("dst", "alpha gamma", [ModuleInfo(name="m")])
+
+    metrics = compute_profile_similarity(source, target, text_retriever=None)
+
+    assert metrics.description_sim == pytest.approx(1 / 3)
+
+
+def test_compute_profile_similarity_ignores_confidence_only_differences():
+    source = _mk_profile(
+        "src",
+        "generic platform",
+        [ModuleInfo(name="m")],
+        confidence="high",
+    )
+    target = _mk_profile(
+        "dst",
+        "generic platform",
+        [ModuleInfo(name="m")],
+        confidence="low",
+    )
+
+    metrics = compute_profile_similarity(source, target, text_retriever=None)
+
+    assert metrics.description_sim == 1.0
+
+
 def test_rank_similar_profiles_excludes_same_repo_and_uses_tie_break(monkeypatch):
     source = ProfileRef("repo-a", "aaaaaaaaaaaa1111", _mk_profile("a", "x", [ModuleInfo(name="m")]))
     candidate_1 = ProfileRef("repo-b", "bbbb", _mk_profile("b", "x", [ModuleInfo(name="m")]))

@@ -335,6 +335,10 @@ class SoftwareProfiler:
         if not getattr(cached_profile, "modules", []):
             logger.info("Cached software profile is empty, regenerating...")
             return None
+        cached_basic_info = cached_profile.to_dict().get("basic_info", {})
+        if not is_valid_software_basic_info(cached_basic_info):
+            logger.info("Cached software profile basic info is incomplete, regenerating...")
+            return None
         if profile_fingerprint_matches(cached_profile, expected_fingerprint):
             logger.info("Found completed profile with matching fingerprint, loading from cache...")
             return cached_profile

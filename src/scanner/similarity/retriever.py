@@ -282,36 +282,8 @@ def compute_profile_similarity(
     """
     weights = weights or DEFAULT_SIMILARITY_WEIGHTS
 
-    source_description_text = "\n".join(
-        part
-        for part in (
-            source_profile.description,
-            f"capabilities: {' | '.join(source_profile.capabilities or [])}",
-            f"interfaces: {' | '.join(source_profile.interfaces or [])}",
-            f"deployment: {' | '.join(source_profile.deployment_style or [])}",
-            f"operator_inputs: {' | '.join(source_profile.operator_inputs or [])}",
-            f"external_surfaces: {' | '.join(source_profile.external_surfaces or [])}",
-            f"evidence: {source_profile.evidence_summary}",
-            f"confidence: {source_profile.confidence}",
-            f"open_questions: {' | '.join(source_profile.open_questions or [])}",
-        )
-        if part and part.strip()
-    )
-    target_description_text = "\n".join(
-        part
-        for part in (
-            target_profile.description,
-            f"capabilities: {' | '.join(target_profile.capabilities or [])}",
-            f"interfaces: {' | '.join(target_profile.interfaces or [])}",
-            f"deployment: {' | '.join(target_profile.deployment_style or [])}",
-            f"operator_inputs: {' | '.join(target_profile.operator_inputs or [])}",
-            f"external_surfaces: {' | '.join(target_profile.external_surfaces or [])}",
-            f"evidence: {target_profile.evidence_summary}",
-            f"confidence: {target_profile.confidence}",
-            f"open_questions: {' | '.join(target_profile.open_questions or [])}",
-        )
-        if part and part.strip()
-    )
+    source_description_text = _profile_description_text(source_profile)
+    target_description_text = _profile_description_text(target_profile)
     description_sim = _text_similarity(
         source_description_text,
         target_description_text,
@@ -360,6 +332,30 @@ def compute_profile_similarity(
         module_dependency_import_sim=module_dependency_import_sim,
         overall_sim=overall_sim,
     )
+
+
+def _profile_description_text(profile: SoftwareProfile) -> str:
+    """Build description text from semantic repo-level basic-info fields only."""
+    parts: List[str] = []
+    for value in (
+        profile.description,
+        profile.evidence_summary,
+    ):
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+
+    for values in (
+        profile.capabilities or [],
+        profile.interfaces or [],
+        profile.deployment_style or [],
+        profile.operator_inputs or [],
+        profile.external_surfaces or [],
+    ):
+        for item in values:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+
+    return "\n".join(parts)
 
 
 def rank_similar_profiles(
