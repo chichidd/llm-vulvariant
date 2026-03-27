@@ -492,7 +492,7 @@ repo 锁的行为：
 | `.../scan_memory.json` | 扫描续跑所需的状态与进度持久化 |
 | `.../conversations/iteration_<n>_output_summary.json` | 每轮对话压缩摘要，单独保存迭代分析补充信息 |
 | `.../target_similarity.json` | 目标选择时的相似度详情，仅在目标由相似度检索/排序选出时生成 |
-| `<scan-dir>/_runs/<run-id>/shared-public-memory/<repo>-<commit12>/observations/*.json` | 同一 batch run 内共享的公共 observation；scanner prompt 会引导 agent 在合适时优先用聚焦 query 按需读取，不影响私有 `scan_memory.json` |
+| `<scan-dir>/_runs/<run-id>/shared-public-memory/<repo>-<commit12>-<repo-scope-key>/observations/*.json` | 同一 batch run 内共享的公共 observation；repo 目录名会附加 `repo_scope_key` 后缀，scanner prompt 会引导 agent 在合适时优先用聚焦 query 按需读取，不影响私有 `scan_memory.json` |
 | `<scan-dir>/batch-summary-<timestamp>.json` | 批量扫描汇总信息（jobs、target 时序、覆盖率统计等） |
 
 `scan_memory.json`
