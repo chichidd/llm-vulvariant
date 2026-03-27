@@ -183,18 +183,44 @@ def build_initial_user_message(
     # Count priority stats
     p1_count = sum(1 for p, _ in prioritized_modules if p == 1)
     p2_count = sum(1 for p, _ in prioritized_modules if p == 2)
-    related_scope_line = (
-        "- 🟡 RELATED "
-        f"({p2_count} modules): Follow-up scope only after all PRIORITY-1 files are complete"
-        if normalized_max_priority == 1
-        else f"- 🟡 RELATED ({p2_count} modules): Calls or is called by priority-1 modules - scan next"
-    )
-    analysis_scope_line = (
-        "This run's critical scope is 🔴 PRIORITY-1 modules only. "
-        "Do not spend analysis turns on 🟡 RELATED modules while any 🔴 file is still pending."
-        if normalized_max_priority == 1
-        else "Do not skip any PRIORITY-1 or RELATED modules."
-    )
+    no_priority_one_modules = p1_count == 0
+    if no_priority_one_modules and p2_count > 0:
+        related_scope_line = (
+            f"- 🟡 RELATED ({p2_count} modules): Highest-priority concrete scan targets for this run "
+            "because no PRIORITY-1 modules were identified"
+        )
+        analysis_scope_line = (
+            "No PRIORITY-1 modules were identified for this run. Use 🟡 RELATED modules as the "
+            "highest-priority concrete scan targets before broad repo-wide searches."
+        )
+        widening_scope_line = (
+            "- Use 🟡 RELATED modules as the highest-priority concrete scan targets before widening "
+            "to repo-wide searches"
+        )
+    elif no_priority_one_modules:
+        related_scope_line = "- 🟡 RELATED (0 modules): None currently identified"
+        analysis_scope_line = (
+            "No PRIORITY-1 or RELATED modules were identified for this run. Start from shared memory, "
+            "scan_start_points, and focused repo-wide searches."
+        )
+        widening_scope_line = (
+            "- No scoped PRIORITY-1 or RELATED modules are currently identified; rely on shared memory, "
+            "scan_start_points, and focused repo-wide searches"
+        )
+    else:
+        related_scope_line = (
+            "- 🟡 RELATED "
+            f"({p2_count} modules): Follow-up scope only after all PRIORITY-1 files are complete"
+            if normalized_max_priority == 1
+            else f"- 🟡 RELATED ({p2_count} modules): Calls or is called by priority-1 modules - scan next"
+        )
+        analysis_scope_line = (
+            "This run's critical scope is 🔴 PRIORITY-1 modules only. "
+            "Do not spend analysis turns on 🟡 RELATED modules while any 🔴 file is still pending."
+            if normalized_max_priority == 1
+            else "Do not skip any PRIORITY-1 or RELATED modules."
+        )
+        widening_scope_line = "- Widen to 🟡 RELATED modules only when 🔴 PRIORITY-1 evidence is insufficient"
 
     shared_memory_section = ""
     if shared_observation_count > 0:
@@ -204,7 +230,6 @@ def build_initial_user_message(
             "- Use focused query terms derived from the current vulnerability pattern instead of an empty query whenever possible.\n"
         )
     shared_memory_priority_line = ""
-    no_priority_one_modules = p1_count == 0
     if shared_observation_count > 0 and no_priority_one_modules:
         shared_memory_priority_line = (
             "No PRIORITY-1 modules are currently identified. Start by calling read_shared_public_memory "
@@ -261,7 +286,7 @@ def build_initial_user_message(
 {shared_memory_priority_line}{module_scan_line}
 {shared_memory_section}- Look for alternative APIs that perform similar dangerous operations
 - Trace data flow from user input/config to dangerous sinks
-- Widen to 🟡 RELATED modules only when 🔴 PRIORITY-1 evidence is insufficient
+{widening_scope_line}
 - Record rejected hypotheses, evidence gaps, shared-memory hits, and next best queries as you go
 - {analysis_scope_line}
 - Keep scan progress accurate by calling mark_file_completed as soon as a file is fully analyzed

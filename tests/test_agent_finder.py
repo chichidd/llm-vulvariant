@@ -233,10 +233,15 @@ def test_extract_complementary_summary_structured(monkeypatch):
     assert "Summary" in text
     assert "Reasoning" in text
     assert "Shared Memory Hits" in text
+    assert "query=os.system hit src/api.py" in text
     assert "Rejected Hypotheses" in text
+    assert "subprocess path is sanitized" in text
     assert "Next Best Queries" in text
+    assert "shell=True" in text
     assert "Evidence Gaps" in text
+    assert "need source-to-sink trace" in text
     assert "Files Completed This Iteration" in text
+    assert "src/api.py" in text
 
 
 def test_extract_complementary_summary_non_dict_fallback(monkeypatch):
@@ -351,6 +356,30 @@ def test_get_user_message_initial_includes_structured_vulnerability_guidance(mon
     assert '"query_terms": [' in message
     assert '"scan_start_points": [' in message
     assert "subprocess.run(..., shell=True)" in message
+
+
+def test_get_user_message_iteration_keeps_structured_vulnerability_guidance(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.vulnerability_profile = SimpleNamespace(
+        to_dict=lambda: {
+            "query_terms": ["pickle.loads"],
+            "dangerous_apis": ["pickle.loads"],
+            "scan_start_points": ["src/api.py:load_model"],
+        }
+    )
+    finder.memory = SimpleNamespace(
+        get_pending_files=lambda max_priority=2: [],
+        format_progress_info=lambda: "1/3 files scanned, 0 findings. Priority-1: 0/0, Priority-2: 0/0.",
+        get_scanned_files=lambda: ["done.py"],
+        get_findings_summary=lambda: [],
+    )
+
+    message = finder._get_user_message(iteration=1)
+
+    assert message.startswith("## Structured Vulnerability Guidance\n")
+    assert '"query_terms": [' in message
+    assert '"scan_start_points": [' in message
+    assert "Continue your vulnerability analysis:" in message
 
 
 def test_run_passes_shared_observation_count_to_system_prompt(monkeypatch):

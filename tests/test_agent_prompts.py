@@ -277,6 +277,27 @@ def test_build_initial_message_guides_shared_memory_first_when_priority_one_empt
     assert "For each PRIORITY-1 module" not in initial
 
 
+def test_build_initial_message_handles_no_priority_one_with_related_modules():
+    software_profile = {
+        "basic_info": {"name": "demo"},
+        "modules": [
+            {"name": "m2", "files": ["b.py"], "description": "related", "key_functions": []},
+            {"name": "m3", "files": ["c.py"], "description": "other", "key_functions": []},
+        ],
+    }
+
+    initial = build_initial_user_message(
+        software_profile,
+        {"m2": 2, "m3": 3},
+        shared_observation_count=1,
+    )
+
+    assert "No PRIORITY-1 modules are currently identified" in initial
+    assert "🟡 RELATED (1 modules): Follow-up scope only after all PRIORITY-1 files are complete" not in initial
+    assert "Widen to 🟡 RELATED modules only when 🔴 PRIORITY-1 evidence is insufficient" not in initial
+    assert "Use 🟡 RELATED modules as the highest-priority concrete scan targets" in initial
+
+
 def test_build_priority_one_messages_keep_focus_on_priority_one_modules():
     software_profile = {
         "basic_info": {"name": "demo"},
