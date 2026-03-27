@@ -92,6 +92,23 @@ def test_moduleinfo_uses_depends_on_as_legacy_dependencies_when_needed():
     assert module.to_dict()["dependencies"] == ["core"]
 
 
+def test_moduleinfo_normalizes_conflicting_dependency_fields_to_depends_on():
+    module = ModuleInfo.from_dict(
+        {
+            "name": "api",
+            "files": ["src/api.py"],
+            "depends_on": ["core"],
+            "dependencies": ["legacy"],
+        }
+    )
+
+    assert module.depends_on == ["core"]
+    assert module.dependencies == ["core"]
+    assert module.to_dict()["depends_on"] == ["core"]
+    assert module.to_dict()["dependencies"] == ["core"]
+    assert ModuleInfo.from_dict(module.to_dict()) == module
+
+
 def test_software_profiler_enhancement_preserves_richer_module_contract():
     profiler = SoftwareProfiler.__new__(SoftwareProfiler)
     profiler.detection_rules = {

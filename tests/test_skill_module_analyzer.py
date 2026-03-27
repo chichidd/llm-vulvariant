@@ -137,8 +137,8 @@ def test_skill_dependency_enrichment_keeps_depends_on_aligned_with_dependencies(
             "files": ["src/a.py"],
             "key_functions": [],
             "interfaces": [],
-            "depends_on": [],
-            "dependencies": [],
+            "depends_on": ["seed.module"],
+            "dependencies": ["seed.module"],
             "boundary_rationale": "",
             "evidence_paths": ["src/a.py"],
             "confidence": "medium",
@@ -173,10 +173,46 @@ def test_skill_dependency_enrichment_keeps_depends_on_aligned_with_dependencies(
 
     enriched = analyzer._attach_key_functions_and_dependencies(modules, repo_info, Path("/tmp/repo"))
 
-    assert enriched[0]["dependencies"] == ["module.b"]
-    assert enriched[0]["depends_on"] == ["module.b"]
+    assert enriched[0]["dependencies"] == ["module.b", "seed.module"]
+    assert enriched[0]["depends_on"] == ["module.b", "seed.module"]
     assert enriched[1]["dependencies"] == []
     assert enriched[1]["depends_on"] == []
+
+
+def test_skill_dependency_enrichment_preserves_existing_task6_dependencies_without_call_edges():
+    analyzer = SkillModuleAnalyzer()
+    modules = [
+        {
+            "name": "module.a",
+            "category": "module",
+            "description": "",
+            "responsibility": "",
+            "entry_points": [],
+            "files": ["src/a.py"],
+            "key_functions": [],
+            "interfaces": [],
+            "depends_on": ["core.runtime"],
+            "dependencies": ["core.runtime"],
+            "boundary_rationale": "",
+            "evidence_paths": ["src/a.py"],
+            "confidence": "medium",
+        }
+    ]
+    repo_info = {
+        "repo_analysis": {
+            "functions": [
+                {"file": "src/a.py", "name": "<module>"},
+                {"file": "src/a.py", "name": "run"},
+            ],
+            "call_graph_edges": [],
+        }
+    }
+
+    enriched = analyzer._attach_key_functions_and_dependencies(modules, repo_info, Path("/tmp/repo"))
+
+    assert enriched[0]["key_functions"] == ["run"]
+    assert enriched[0]["dependencies"] == ["core.runtime"]
+    assert enriched[0]["depends_on"] == ["core.runtime"]
 
 
 def test_module_analyzer_finalize_rejects_legacy_minimal_payload():
@@ -266,6 +302,43 @@ def test_skill_build_modules_falls_back_when_persisted_profile_uses_legacy_minim
             "files": ["src/app.py"],
         }
     ]
+
+
+def test_skill_build_modules_filters_file_index_when_persisted_profile_is_valid():
+    analyzer = SkillModuleAnalyzer(code_extensions=[".py"], excluded_folders=["vendor"])
+    analyzer.taxonomy = {"coarse": {"fine": {}}}
+
+    modules, filtered_index = analyzer._build_modules(
+        module_profile={
+            "modules": [
+                {
+                    "name": "coarse.fine",
+                    "category": "coarse",
+                    "description": "Fine responsibilities within Coarse. Key areas: src.",
+                    "responsibility": "Fine responsibilities within Coarse. Key areas: src.",
+                    "entry_points": [],
+                    "files": ["src/app.py", "vendor/lib.py", "docs/readme.md"],
+                    "key_functions": [],
+                    "interfaces": [],
+                    "depends_on": ["core.runtime"],
+                    "dependencies": ["core.runtime"],
+                    "boundary_rationale": "Grouped by inferred taxonomy ownership and observed file locality.",
+                    "evidence_paths": ["src/app.py"],
+                    "confidence": "medium",
+                }
+            ]
+        },
+        module_map={},
+        file_index={
+            "src/app.py": "coarse.fine",
+            "vendor/lib.py": "coarse.fine",
+            "docs/readme.md": "coarse.fine",
+        },
+        repo_info={"files": ["src/app.py", "vendor/lib.py", "docs/readme.md"]},
+    )
+
+    assert modules[0]["files"] == ["src/app.py"]
+    assert filtered_index == {"src/app.py": "coarse.fine"}
 
 
 class _StorageManagerStub:

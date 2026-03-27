@@ -136,16 +136,18 @@ class ModuleInfo:
     calls_modules: List[str] = field(default_factory=list)            # 调用哪些模块
 
     def __post_init__(self) -> None:
-        if not self.depends_on and self.dependencies:
+        if self.depends_on and self.dependencies:
+            self.dependencies = list(self.depends_on)
+        elif not self.depends_on and self.dependencies:
             self.depends_on = list(self.dependencies)
-        if not self.dependencies and self.depends_on:
+        elif self.depends_on and not self.dependencies:
             self.dependencies = list(self.depends_on)
         if not self.confidence:
             self.confidence = "unknown"
     
     def to_dict(self) -> Dict[str, Any]:
-        resolved_depends_on = self.depends_on or self.dependencies
-        resolved_dependencies = self.dependencies or self.depends_on
+        resolved_depends_on = list(self.depends_on or self.dependencies)
+        resolved_dependencies = list(resolved_depends_on)
         data = {
             "name": self.name,
             "category": self.category,
@@ -181,9 +183,11 @@ class ModuleInfo:
         if not isinstance(dependencies, list):
             dependencies = []
 
-        if not depends_on and dependencies:
+        if depends_on and dependencies:
+            dependencies = list(depends_on)
+        elif not depends_on and dependencies:
             depends_on = list(dependencies)
-        if not dependencies and depends_on:
+        elif depends_on and not dependencies:
             dependencies = list(depends_on)
 
         return cls(

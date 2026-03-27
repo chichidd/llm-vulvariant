@@ -440,19 +440,15 @@ class SkillModuleAnalyzer:
         file_index: Dict[str, str],
         repo_info: Dict[str, Any],
     ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+        code_files, filtered_index = self._build_filtered_file_index(file_index, repo_info)
         modules = self._extract_modules(module_profile)
         if self._modules_follow_task6_contract(modules):
-            return self._normalize_modules(modules, file_index, repo_info), file_index
+            return self._normalize_modules(modules, filtered_index, repo_info), filtered_index
         if modules:
             logger.warning(
                 "Ignoring persisted module_profile modules that do not satisfy the Task 6 contract; "
                 "falling back to module_map/file_index synthesis"
             )
-
-        code_files = [
-            f for f in repo_info.get("files", [])
-            if self._is_included_code_path(f)
-        ]
 
         module_scores = self._module_scores(module_map)
         default_coarse = self._pick_default_module(module_scores)
@@ -460,12 +456,9 @@ class SkillModuleAnalyzer:
         default_module_name = self._module_name(default_coarse, default_fine)
 
         module_to_files: Dict[Tuple[str, str], List[str]] = {}
-        filtered_index: Dict[str, str] = {}
 
         for file_path in code_files:
-            module_name = file_index.get(file_path)
-            if not module_name:
-                module_name = self._lookup_file_index(file_path, file_index)
+            module_name = filtered_index.get(file_path)
             if not module_name:
                 module_name = default_module_name
 
@@ -521,6 +514,24 @@ class SkillModuleAnalyzer:
             if isinstance(modules, list):
                 return modules
         return []
+
+    def _build_filtered_file_index(
+        self,
+        file_index: Dict[str, str],
+        repo_info: Dict[str, Any],
+    ) -> Tuple[List[str], Dict[str, str]]:
+        code_files = [
+            f for f in repo_info.get("files", [])
+            if self._is_included_code_path(f)
+        ]
+        filtered_index: Dict[str, str] = {}
+        for file_path in code_files:
+            module_name = file_index.get(file_path)
+            if not module_name:
+                module_name = self._lookup_file_index(file_path, file_index)
+            if module_name:
+                filtered_index[file_path] = module_name
+        return code_files, filtered_index
 
     def _modules_follow_task6_contract(self, modules: List[Dict[str, Any]]) -> bool:
         required_fields = (
@@ -793,7 +804,19 @@ class SkillModuleAnalyzer:
             funcs = module_functions.get(module_name, [])
             ordered = _unique_preserve_order(funcs)
             module["key_functions"] = ordered[: self.max_key_functions]
-            deps = sorted(module_dependencies.get(module_name, []))
+            existing_depends_on = module.get("depends_on", [])
+            if not isinstance(existing_depends_on, list):
+                existing_depends_on = []
+            existing_dependencies = module.get("dependencies", [])
+            if not isinstance(existing_dependencies, list):
+                existing_dependencies = []
+            merged_dependencies = {
+                dep_name.strip()
+                for dep_name in (existing_depends_on or existing_dependencies)
+                if isinstance(dep_name, str) and dep_name.strip()
+            }
+            merged_dependencies.update(module_dependencies.get(module_name, set()))
+            deps = sorted(merged_dependencies)
             module["dependencies"] = deps
             module["depends_on"] = list(deps)
 
