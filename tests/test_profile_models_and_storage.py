@@ -195,6 +195,45 @@ def test_vulnerability_profile_dict_roundtrip():
     assert restored.metadata == {"llm_calls": 4}
 
 
+def test_vulnerability_profile_roundtrip_preserves_summary_contract_fields():
+    original = VulnerabilityProfile(
+        repo_name="repo",
+        vuln_description="summary",
+        affected_modules={"src/api.py": "api"},
+        query_terms=["pickle.loads", "load_model"],
+        dangerous_apis=["pickle.loads"],
+        source_indicators=["request.files"],
+        sink_indicators=["pickle.loads"],
+        variant_hypotheses=["alternate deserialization path"],
+        negative_constraints=["requires attacker-controlled artifact"],
+        likely_false_positive_patterns=["trusted internal fixture loading"],
+        scan_start_points=["src/api.py:load_model"],
+        confidence="medium",
+        evidence=["call chain reaches pickle.loads"],
+        evidence_summary="User-controlled model path reaches deserialization sink.",
+        open_questions=["Is there a trusted-only gate before loading?"],
+        assumptions=["Attackers can upload model artifacts."],
+        status="draft",
+    )
+
+    restored = VulnerabilityProfile.from_dict(original.to_dict())
+
+    assert restored.query_terms == ["pickle.loads", "load_model"]
+    assert restored.dangerous_apis == ["pickle.loads"]
+    assert restored.source_indicators == ["request.files"]
+    assert restored.sink_indicators == ["pickle.loads"]
+    assert restored.variant_hypotheses == ["alternate deserialization path"]
+    assert restored.negative_constraints == ["requires attacker-controlled artifact"]
+    assert restored.likely_false_positive_patterns == ["trusted internal fixture loading"]
+    assert restored.scan_start_points == ["src/api.py:load_model"]
+    assert restored.confidence == "medium"
+    assert restored.evidence == ["call chain reaches pickle.loads"]
+    assert restored.evidence_summary == "User-controlled model path reaches deserialization sink."
+    assert restored.open_questions == ["Is there a trusted-only gate before loading?"]
+    assert restored.assumptions == ["Attackers can upload model artifacts."]
+    assert restored.status == "draft"
+
+
 def test_profile_storage_manager_checkpoint_conversation_and_result(tmp_path):
     manager = ProfileStorageManager(base_dir=tmp_path, profile_type="test")
 
