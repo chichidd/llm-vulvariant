@@ -86,6 +86,22 @@ class ReportGenerator:
             return []
         return [item for item in value if isinstance(item, dict)]
 
+    @classmethod
+    def _normalize_text_list(cls, value: Any) -> List[str]:
+        """Normalize list-shaped text sections into non-empty rendered strings."""
+        if not isinstance(value, list):
+            return []
+
+        normalized_items: List[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                rendered = cls._format_path_step(item)
+            else:
+                rendered = str(item).strip()
+            if rendered:
+                normalized_items.append(rendered)
+        return normalized_items
+
     @staticmethod
     def _format_path_step(step: Any) -> str:
         """Render one structured path step into stable text."""
@@ -358,6 +374,32 @@ class ReportGenerator:
                 else:
                     sources_text += f"- `{str(s).strip()}`\n"
 
+        verdict_rationale = str(exploitability.get("verdict_rationale") or "").strip()
+        preconditions = self._normalize_text_list(exploitability.get("preconditions"))
+        static_evidence = self._normalize_text_list(exploitability.get("static_evidence"))
+        dynamic_plan = self._normalize_text_list(exploitability.get("dynamic_plan"))
+        open_questions = self._normalize_text_list(exploitability.get("open_questions"))
+
+        evidence_contract_text = ""
+        if verdict_rationale:
+            evidence_contract_text += f"\n### Verdict Rationale\n\n{verdict_rationale}\n"
+        if preconditions:
+            evidence_contract_text += "\n### Preconditions\n\n"
+            for item in preconditions:
+                evidence_contract_text += f"- {item}\n"
+        if static_evidence:
+            evidence_contract_text += "\n### Static Evidence\n\n"
+            for item in static_evidence:
+                evidence_contract_text += f"- {item}\n"
+        if dynamic_plan:
+            evidence_contract_text += "\n### Dynamic Verification Plan\n\n"
+            for item in dynamic_plan:
+                evidence_contract_text += f"- {item}\n"
+        if open_questions:
+            evidence_contract_text += "\n### Open Questions\n\n"
+            for item in open_questions:
+                evidence_contract_text += f"- {item}\n"
+
         # Remediation
         remediation = self._normalize_mapping(exploitability.get("remediation"))
         remediation_text = remediation.get("recommendation", "No specific remediation provided.")
@@ -409,6 +451,7 @@ class ReportGenerator:
 ## Attack Scenario
 
 {attack_scenario}
+{evidence_contract_text}
 
 ## Impact
 
@@ -744,6 +787,11 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
 
         source_analysis = self._normalize_mapping(result.get("source_analysis"))
         attack_path = self._normalize_path_steps(source_analysis.get("attack_path", []))
+        verdict_rationale = str(result.get("verdict_rationale") or "").strip()
+        preconditions = self._normalize_text_list(result.get("preconditions"))
+        static_evidence = self._normalize_text_list(result.get("static_evidence"))
+        dynamic_plan = self._normalize_text_list(result.get("dynamic_plan"))
+        open_questions = self._normalize_text_list(result.get("open_questions"))
 
         lines = [
             f"#### Finding {index}: {vuln_type.replace('_', ' ').title()} in `{file_path}`",
@@ -775,6 +823,37 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
                 f"> {attack_scenario[:500]}",
                 "",
             ])
+
+        if verdict_rationale:
+            lines.extend([
+                "**Verdict Rationale**:",
+                verdict_rationale,
+                "",
+            ])
+
+        if preconditions:
+            lines.append("**Preconditions**:")
+            for item in preconditions:
+                lines.append(f"- {item}")
+            lines.append("")
+
+        if static_evidence:
+            lines.append("**Static Evidence**:")
+            for item in static_evidence:
+                lines.append(f"- {item}")
+            lines.append("")
+
+        if dynamic_plan:
+            lines.append("**Dynamic Verification Plan**:")
+            for item in dynamic_plan:
+                lines.append(f"- {item}")
+            lines.append("")
+
+        if open_questions:
+            lines.append("**Open Questions**:")
+            for item in open_questions:
+                lines.append(f"- {item}")
+            lines.append("")
 
         # Docker verification results
         if docker_verification:

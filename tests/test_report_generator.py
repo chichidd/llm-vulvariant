@@ -239,6 +239,46 @@ def test_generate_reports_render_analysis_attack_scenario_payload():
     assert "Impact: remote code execution" in full_report
 
 
+def test_generate_reports_render_structured_checker_evidence_sections():
+    gen = _generator()
+    data = {
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "CONDITIONALLY_EXPLOITABLE",
+                "confidence": "medium",
+                "verdict_rationale": "User input reaches a shell sink, but only after authentication.",
+                "preconditions": ["Attacker can authenticate to the admin endpoint."],
+                "static_evidence": [
+                    "api.py: handle() forwards request.json['cmd'] into subprocess.run(..., shell=True)."
+                ],
+                "dynamic_plan": [
+                    "Start the vulnerable service.",
+                    "Send a crafted authenticated request with shell metacharacters.",
+                ],
+                "open_questions": ["Whether the admin endpoint is exposed in default deployments."],
+                "original_finding": {
+                    "file_path": "src/app.py",
+                    "vulnerability_type": "command_injection",
+                    "description": "Unsafe shell invocation",
+                    "evidence": "subprocess.run(user_cmd, shell=True)",
+                },
+            }
+        ],
+    }
+
+    ghsa_report = gen.generate_ghsa_reports(data)[0]["content"]
+    full_report = gen.generate_full_report(data)
+
+    assert "Verdict Rationale" in ghsa_report
+    assert "User input reaches a shell sink" in ghsa_report
+    assert "Preconditions" in full_report
+    assert "Attacker can authenticate to the admin endpoint." in full_report
+    assert "Static Evidence" in full_report
+    assert "Dynamic Verification Plan" in full_report
+    assert "Open Questions" in full_report
+
+
 def test_generate_ghsa_reports_tolerates_type_drifted_analysis_payloads():
     gen = _generator()
     data = {

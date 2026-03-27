@@ -44,6 +44,12 @@ VALID_EXPLOITABILITY_VERDICTS = {
 VALID_CONFIDENCE_VALUES = {"high", "medium", "low"}
 RETRYABLE_RESULT_VERDICTS = {"ERROR", "UNKNOWN"}
 STRUCTURED_EXPLOITABILITY_VERDICTS = VALID_EXPLOITABILITY_VERDICTS | RETRYABLE_RESULT_VERDICTS
+STRUCTURED_ANALYSIS_LIST_FIELDS = (
+    "preconditions",
+    "static_evidence",
+    "dynamic_plan",
+    "open_questions",
+)
 EXPLOITABILITY_OUTPUT_STATE_MISSING = "missing"
 EXPLOITABILITY_OUTPUT_STATE_INVALID = "invalid"
 EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS = "in_progress"
@@ -271,6 +277,49 @@ class SkillExploitabilityChecker:
         if confidence not in VALID_CONFIDENCE_VALUES:
             return False
         return verdict in STRUCTURED_EXPLOITABILITY_VERDICTS
+
+    @staticmethod
+    def _normalize_analysis_list(value: Any) -> List[str]:
+        """Normalize list-shaped evidence sections into non-empty strings."""
+        if not isinstance(value, list):
+            return []
+
+        normalized_items: List[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                rendered = str(
+                    item.get("step")
+                    or item.get("description")
+                    or item.get("summary")
+                    or item.get("location")
+                    or item.get("function")
+                    or ""
+                ).strip()
+                if not rendered:
+                    rendered = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            else:
+                rendered = str(item).strip()
+
+            if rendered:
+                normalized_items.append(rendered)
+        return normalized_items
+
+    @classmethod
+    def _normalize_analysis_contract(cls, payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Fill the richer evidence contract while preserving legacy fields."""
+        if not isinstance(payload, dict):
+            return None
+
+        normalized = dict(payload)
+        normalized["verdict"] = normalize_exploitability_verdict(normalized.get("verdict"))
+        normalized["confidence"] = str(normalized.get("confidence", "")).strip().lower()
+        normalized["verdict_rationale"] = str(normalized.get("verdict_rationale") or "").strip()
+        for field in STRUCTURED_ANALYSIS_LIST_FIELDS:
+            normalized[field] = cls._normalize_analysis_list(normalized.get(field))
+
+        docker_verification = normalized.get("docker_verification")
+        normalized["docker_verification"] = docker_verification if isinstance(docker_verification, dict) else None
+        return normalized
 
     @staticmethod
     def _looks_like_example_payload(
@@ -584,7 +633,7 @@ class SkillExploitabilityChecker:
             commit_hash=commit_hash,
         )
 
-        return analysis
+        return self._normalize_analysis_contract(analysis) or analysis
 
     def _build_prompt(
         self,
@@ -614,15 +663,24 @@ class SkillExploitabilityChecker:
             "Do not emit markdown, code fences, or prose.",
             "If any required evidence is missing, use the most conservative verdict ",
             "and set confidence to low, with explicit unknown gaps.",
+            "Ground every claim in the provided repository evidence.",
+            "If evidence is missing, say so explicitly in the relevant field.",
             "Never invent sink/source details or verdicts not supported by code evidence.",
             "Do not emit prose; return one single JSON object only.",
             "Do not add explanatory text outside the JSON object.",
             '{"verdict":"EXPLOITABLE|CONDITIONALLY_EXPLOITABLE|LIBRARY_RISK|NOT_EXPLOITABLE",',
             '"confidence":"high|medium|low",',
+            '"verdict_rationale":"...",',
+            '"preconditions":["..."],',
+            '"static_evidence":["..."],',
+            '"dynamic_plan":["..."],',
+            '"docker_verification":{"verification_verdict":"VERIFIED_EXPLOITABLE|PARTIAL_VERIFICATION|VERIFICATION_FAILED|NOT_VERIFIED|GENERATION_FAILED"},',
+            '"open_questions":["..."],',
             '"sink_analysis":{"confirmed":true/false,"sink_type":"...","protection_status":"none|partial|full"},',
             '"source_analysis":{"sources_found":[{"type":"cli|file|api","location":"..."}],"attack_path":["..."]},',
             '"attack_scenario":{"description":"...","steps":["..."],"impact":"..."},',
             '"remediation":{"recommendation":"..."}}',
+            "Keep the legacy compatibility sections above when you have concrete evidence for them.",
         ]
 
         if result_json_path:
@@ -683,7 +741,7 @@ class SkillExploitabilityChecker:
         payload = self._extract_analysis_payload(text)
 
         if payload is not None:
-            payload["verdict"] = normalize_exploitability_verdict(payload.get("verdict"))
+            payload = self._normalize_analysis_contract(payload)
             logger.info(f"Loaded analysis JSON from file fallback: {output_json_path}")
         return payload
 
@@ -758,8 +816,7 @@ class SkillExploitabilityChecker:
         result_text = claude_output["result"]
         parsed = self._extract_analysis_payload(result_text)
         if parsed is not None:
-            parsed["verdict"] = normalize_exploitability_verdict(parsed.get("verdict"))
-            return parsed
+            return self._normalize_analysis_contract(parsed)
 
         logger.warning("Failed to parse analysis JSON: no concrete analysis payload found")
         logger.debug(f"JSON text: {str(result_text)[:500]}")
@@ -1221,19 +1278,28 @@ class SkillExploitabilityChecker:
         error_msg: str,
     ) -> Dict[str, Any]:
         """Create error result for a failed vulnerability analysis."""
-        return {
+        normalized_result = self._normalize_analysis_contract({
             "finding_id": finding_id,
             "original_finding": vuln,
             "verdict": "ERROR",
             "confidence": "low",
             "error": error_msg,
+            "verdict_rationale": error_msg,
+            "preconditions": [],
+            "static_evidence": [],
+            "dynamic_plan": [],
+            "docker_verification": None,
+            "open_questions": [],
             "sink_analysis": None,
             "source_analysis": None,
             "sanitizer_analysis": None,
             "attack_scenario": None,
             "payload": None,
             "remediation": None,
-        }
+        })
+        if normalized_result is None:
+            raise RuntimeError("Failed to build error result contract")
+        return normalized_result
 
     def _error_result(self, message: str) -> Dict[str, Any]:
         """Create an error result."""

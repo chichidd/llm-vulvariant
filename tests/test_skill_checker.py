@@ -281,6 +281,29 @@ def test_build_prompt_uses_ny_api_key_when_openai_proxy_env_is_set(monkeypatch, 
     assert "ny-proxy-key" not in prompt
 
 
+def test_build_prompt_requests_structured_evidence_contract(tmp_path):
+    checker = _checker()
+
+    prompt = checker._build_prompt(
+        vuln={
+            "file_path": "src/app.py",
+            "vulnerability_type": "command_injection",
+            "evidence": "dangerous",
+            "description": "unsafe input",
+        },
+        repo_path=tmp_path,
+    )
+
+    assert '"verdict_rationale":"..."' in prompt
+    assert '"preconditions":["..."]' in prompt
+    assert '"static_evidence":["..."]' in prompt
+    assert '"dynamic_plan":["..."]' in prompt
+    assert '"docker_verification":{' in prompt
+    assert '"open_questions":["..."]' in prompt
+    assert "Ground every claim in the provided repository evidence." in prompt
+    assert "If evidence is missing, say so explicitly in the relevant field." in prompt
+
+
 def test_strip_inline_json_objects_removes_nested_payload_once():
     checker = _checker()
     text = (
@@ -343,6 +366,24 @@ def test_load_analysis_from_output_path_keeps_structured_error_json(tmp_path):
     assert parsed is not None
     assert parsed["verdict"] == "ERROR"
     assert parsed["attack_scenario"]["description"] == "tool failed"
+
+
+def test_create_error_vuln_result_includes_structured_evidence_fields():
+    checker = _checker()
+
+    result = checker._create_error_vuln_result(
+        vuln={"file_path": "src/app.py"},
+        finding_id="vuln_000",
+        error_msg="Claude analysis failed",
+    )
+
+    assert result["verdict"] == "ERROR"
+    assert result["verdict_rationale"] == "Claude analysis failed"
+    assert result["preconditions"] == []
+    assert result["static_evidence"] == []
+    assert result["dynamic_plan"] == []
+    assert result["docker_verification"] is None
+    assert result["open_questions"] == []
 
 
 def test_build_prompt_includes_output_json_path(tmp_path):
