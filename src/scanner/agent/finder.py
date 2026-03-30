@@ -561,7 +561,7 @@ class AgenticVulnFinder:
             if field_value
         }
         guidance_prefix = ""
-        if structured_guidance:
+        if structured_guidance and iteration == 0:
             guidance_prefix = (
                 "## Structured Vulnerability Guidance\n"
                 "Use these concrete anchors when choosing shared-memory queries, modules, and search patterns.\n"
@@ -574,6 +574,8 @@ class AgenticVulnFinder:
                 critical_stop_max_priority=self.critical_stop_max_priority,
                 shared_observation_count=shared_observation_count,
             )
+        has_priority_one = any(priority == 1 for priority in self.module_priorities.values())
+        has_related = any(priority == 2 for priority in self.module_priorities.values())
         # Include progress info and already-scanned context for subsequent iterations
         progress_info = ""
         scanned_files = []
@@ -584,7 +586,7 @@ class AgenticVulnFinder:
                 max_priority=self.critical_stop_max_priority
             )
             progress_info = self.memory.format_progress_info()
-            if self.critical_stop_max_priority == 1:
+            if self.critical_stop_max_priority == 1 and pending:
                 progress_info = (
                     "Critical scope: priority-1 modules only (directly affected or embedding-similar). "
                     "Do not spend turns on RELATED modules until all priority-1 files are complete.\n"
@@ -603,6 +605,8 @@ class AgenticVulnFinder:
             progress_info=progress_info,
             critical_stop_max_priority=self.critical_stop_max_priority,
             shared_observation_count=shared_observation_count,
+            has_priority_one=has_priority_one,
+            has_related=has_related,
         )
 
     def _finalize_iteration_progress(self, iteration: int) -> None:

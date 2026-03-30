@@ -267,12 +267,16 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
         progress_info,
         critical_stop_max_priority=2,
         shared_observation_count=0,
+        has_priority_one=True,
+        has_related=True,
     ):
         captured["scanned_files"] = scanned_files
         captured["findings"] = findings
         captured["progress_info"] = progress_info
         captured["critical_stop_max_priority"] = critical_stop_max_priority
         captured["shared_observation_count"] = shared_observation_count
+        captured["has_priority_one"] = has_priority_one
+        captured["has_related"] = has_related
         return "intermediate"
 
     finder.memory = SimpleNamespace(
@@ -301,9 +305,50 @@ def test_get_user_message_iteration_uses_progress_context(monkeypatch):
     assert captured["findings"][0]["type"] == "cmd"
     assert captured["critical_stop_max_priority"] == 1
     assert captured["shared_observation_count"] == 4
+    assert captured["has_priority_one"] is False
+    assert captured["has_related"] is False
     assert "3/10 files scanned" in captured["progress_info"]
     assert "Critical scope: priority-1 modules only" in captured["progress_info"]
     assert pending_priorities == [1]
+
+
+def test_get_user_message_iteration_skips_priority_one_progress_prefix_when_no_priority_one_pending(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.critical_stop_max_priority = 1
+
+    captured = {}
+
+    def fake_build_intermediate_user_message(
+        scanned_files,
+        findings,
+        progress_info,
+        critical_stop_max_priority=2,
+        shared_observation_count=0,
+        has_priority_one=True,
+        has_related=True,
+    ):
+        captured["progress_info"] = progress_info
+        captured["critical_stop_max_priority"] = critical_stop_max_priority
+        captured["has_priority_one"] = has_priority_one
+        captured["has_related"] = has_related
+        return "intermediate"
+
+    finder.memory = SimpleNamespace(
+        format_progress_info=lambda: "3/10 files scanned, 1 findings. Priority-1: 0/0, Priority-2: 1/3.",
+        get_pending_files=lambda max_priority=2: [],
+        get_scanned_files=lambda: ["done.py"],
+        get_findings_summary=lambda: [],
+    )
+
+    monkeypatch.setattr(finder_module, "build_intermediate_user_message", fake_build_intermediate_user_message)
+
+    msg = finder._get_user_message(iteration=1)
+
+    assert msg == "intermediate"
+    assert captured["critical_stop_max_priority"] == 1
+    assert captured["has_priority_one"] is False
+    assert captured["has_related"] is False
+    assert "Critical scope: priority-1 modules only" not in captured["progress_info"]
 
 
 def test_get_user_message_initial_passes_critical_stop_priority(monkeypatch):
@@ -358,7 +403,7 @@ def test_get_user_message_initial_includes_structured_vulnerability_guidance(mon
     assert "subprocess.run(..., shell=True)" in message
 
 
-def test_get_user_message_iteration_keeps_structured_vulnerability_guidance(monkeypatch):
+def test_get_user_message_iteration_does_not_repeat_structured_vulnerability_guidance(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
     finder.vulnerability_profile = SimpleNamespace(
         to_dict=lambda: {
@@ -376,9 +421,9 @@ def test_get_user_message_iteration_keeps_structured_vulnerability_guidance(monk
 
     message = finder._get_user_message(iteration=1)
 
-    assert message.startswith("## Structured Vulnerability Guidance\n")
-    assert '"query_terms": [' in message
-    assert '"scan_start_points": [' in message
+    assert "Structured Vulnerability Guidance" not in message
+    assert '"query_terms": [' not in message
+    assert '"scan_start_points": [' not in message
     assert "Continue your vulnerability analysis:" in message
 
 

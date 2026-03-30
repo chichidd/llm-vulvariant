@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from scanner.agent.prompts import (
     build_initial_user_message,
     build_intermediate_user_message,
@@ -200,6 +202,35 @@ def test_build_system_prompt_defines_structured_search_contract():
     assert "Record rejected hypotheses, evidence gaps, and next best queries" in prompt
 
 
+def test_build_system_prompt_includes_summary_level_contract_fields():
+    prompt = build_system_prompt(
+        {
+            "cve_id": "CVE-2026-0001",
+            "sink_features": {"type": "command_injection"},
+            "vuln_description": "desc",
+            "vuln_cause": "cause",
+            "payload": "payload",
+            "source_features": {},
+            "flow_features": {},
+            "exploit_scenarios": [],
+            "exploit_conditions": [],
+            "status": "ok",
+            "confidence": "medium",
+            "evidence": ["api.py:12"],
+            "evidence_summary": "The known sink is grounded in api.py.",
+            "uncertainty": "low",
+        },
+        _DummyToolkit(),
+    )
+
+    assert '"status": "ok"' in prompt
+    assert '"confidence": "medium"' in prompt
+    assert '"evidence_summary": "The known sink is grounded in api.py."' in prompt
+    assert '"evidence_samples": [' in prompt
+    assert '"evidence_count": 1' in prompt
+    assert '"uncertainty": "low"' in prompt
+
+
 def test_build_initial_and_intermediate_messages_reinforce_completion_tracking():
     software_profile = {
         "basic_info": {"name": "demo"},
@@ -296,6 +327,30 @@ def test_build_initial_message_handles_no_priority_one_with_related_modules():
     assert "🟡 RELATED (1 modules): Follow-up scope only after all PRIORITY-1 files are complete" not in initial
     assert "Widen to 🟡 RELATED modules only when 🔴 PRIORITY-1 evidence is insufficient" not in initial
     assert "Use 🟡 RELATED modules as the highest-priority concrete scan targets" in initial
+    assert "then use 🟡 RELATED modules as the highest-priority concrete scan scope" in initial
+    assert (
+        "Begin analysis now. Start by reading shared public memory with a focused query, then use the 🟡 "
+        "RELATED modules as the highest-priority concrete scope before any repo-wide widening."
+    ) in initial
+
+
+def test_build_initial_message_uses_module_priorities_when_profile_is_attribute_based():
+    software_profile = SimpleNamespace(
+        name="demo",
+        modules=[
+            {"name": "m2", "files": ["b.py"], "description": "related", "key_functions": []},
+        ],
+    )
+
+    initial = build_initial_user_message(
+        software_profile,
+        {"m2": 2},
+        shared_observation_count=0,
+    )
+
+    assert "Use 🟡 RELATED modules as the highest-priority concrete scan targets" in initial
+    assert '"project_name": "demo"' in initial
+    assert '"priority": "🟡 RELATED"' in initial
 
 
 def test_build_initial_message_starts_with_related_modules_when_no_priority_one_and_no_shared_memory():
@@ -346,3 +401,30 @@ def test_build_priority_one_messages_keep_focus_on_priority_one_modules():
     assert "Do not spend analysis turns on 🟡 RELATED modules" in initial
     assert "Have you checked RELATED" not in intermediate
     assert "Do not spend turns on RELATED (🟡) modules" in intermediate
+
+
+def test_build_intermediate_message_handles_no_priority_one_with_related_modules():
+    intermediate = build_intermediate_user_message(
+        scanned_files=["b.py"],
+        shared_observation_count=2,
+        has_priority_one=False,
+        has_related=True,
+    )
+
+    assert "No PRIORITY-1 modules are currently identified" in intermediate
+    assert "scan ALL files in 🟡 RELATED modules before any repo-wide widening" in intermediate
+    assert "Have you scanned ALL files in PRIORITY-1" not in intermediate
+    assert "Have you checked RELATED" not in intermediate
+
+
+def test_build_intermediate_message_handles_no_priority_one_or_related_without_shared_memory():
+    intermediate = build_intermediate_user_message(
+        scanned_files=["done.py"],
+        shared_observation_count=0,
+        has_priority_one=False,
+        has_related=False,
+    )
+
+    assert "No PRIORITY-1 or RELATED modules are currently identified" in intermediate
+    assert "scan_start_points and focused repo-wide searches" in intermediate
+    assert "shared-memory queries" not in intermediate

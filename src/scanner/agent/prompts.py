@@ -14,6 +14,8 @@ def build_system_prompt(
     shared_observation_count: int = 0,
 ) -> str:
     vuln_dict = _to_dict(vulnerability_profile)
+    raw_evidence = vuln_dict.get("evidence", [])
+    evidence_samples = raw_evidence[:3] if isinstance(raw_evidence, list) else []
     vuln_summary = {
         "cve_id": vuln_dict.get("cve_id"),
         "vulnerability_type": vuln_dict.get("sink_features", {}).get("type", "unknown")
@@ -37,6 +39,12 @@ def build_system_prompt(
         "scan_start_points": vuln_dict.get("scan_start_points", []),
         "open_questions": vuln_dict.get("open_questions", []),
         "assumptions": vuln_dict.get("assumptions", []),
+        "status": vuln_dict.get("status", "unknown"),
+        "confidence": vuln_dict.get("confidence", "unknown"),
+        "evidence_summary": vuln_dict.get("evidence_summary", ""),
+        "evidence_samples": evidence_samples,
+        "evidence_count": len(raw_evidence) if isinstance(raw_evidence, list) else 0,
+        "uncertainty": vuln_dict.get("uncertainty", "low"),
     }
 
     tools_desc = "\n".join(
@@ -149,9 +157,21 @@ def build_initial_user_message(
     software_dict = _to_dict(software_profile)
     module_priorities = module_priorities or {}
     normalized_max_priority = 1 if critical_stop_max_priority == 1 else 2
+    modules = software_dict.get("modules")
+    if not isinstance(modules, list):
+        modules = getattr(software_profile, "modules", [])
+        if not isinstance(modules, list):
+            modules = []
+    basic_info = software_dict.get("basic_info", {})
+    if not isinstance(basic_info, dict):
+        basic_info = {}
+    project_name = str(
+        basic_info.get("name")
+        or getattr(software_profile, "name", "")
+        or ""
+    )
     
     # Build prioritized module list
-    modules = software_dict.get("modules", [])
     prioritized_modules = []
     
     for module in modules:
@@ -176,13 +196,13 @@ def build_initial_user_message(
         })
     
     project_info = {
-        "project_name": software_dict.get("basic_info", {}).get("name", ""),
+        "project_name": project_name,
         "modules": key_modules,
     }
     
     # Count priority stats
-    p1_count = sum(1 for p, _ in prioritized_modules if p == 1)
-    p2_count = sum(1 for p, _ in prioritized_modules if p == 2)
+    p1_count = sum(1 for priority in module_priorities.values() if priority == 1)
+    p2_count = sum(1 for priority in module_priorities.values() if priority == 2)
     no_priority_one_modules = p1_count == 0
     if no_priority_one_modules and p2_count > 0:
         related_scope_line = (
@@ -199,14 +219,24 @@ def build_initial_user_message(
         )
     elif no_priority_one_modules:
         related_scope_line = "- 🟡 RELATED (0 modules): None currently identified"
-        analysis_scope_line = (
-            "No PRIORITY-1 or RELATED modules were identified for this run. Start from shared memory, "
-            "scan_start_points, and focused repo-wide searches."
-        )
-        widening_scope_line = (
-            "- No scoped PRIORITY-1 or RELATED modules are currently identified; rely on shared memory, "
-            "scan_start_points, and focused repo-wide searches"
-        )
+        if shared_observation_count > 0:
+            analysis_scope_line = (
+                "No PRIORITY-1 or RELATED modules were identified for this run. Start from shared memory, "
+                "scan_start_points, and focused repo-wide searches."
+            )
+            widening_scope_line = (
+                "- No scoped PRIORITY-1 or RELATED modules are currently identified; rely on shared memory, "
+                "scan_start_points, and focused repo-wide searches"
+            )
+        else:
+            analysis_scope_line = (
+                "No PRIORITY-1 or RELATED modules were identified for this run. Start from scan_start_points "
+                "and focused repo-wide searches."
+            )
+            widening_scope_line = (
+                "- No scoped PRIORITY-1 or RELATED modules are currently identified; rely on scan_start_points "
+                "and focused repo-wide searches"
+            )
     else:
         related_scope_line = (
             "- 🟡 RELATED "
@@ -231,16 +261,28 @@ def build_initial_user_message(
         )
     shared_memory_priority_line = ""
     if shared_observation_count > 0 and no_priority_one_modules:
-        shared_memory_priority_line = (
-            "No PRIORITY-1 modules are currently identified. Start by calling read_shared_public_memory "
-            "with focused query terms derived from the current vulnerability pattern before broad "
-            "repo-wide searches.\n"
-        )
+        if p2_count > 0:
+            shared_memory_priority_line = (
+                "No PRIORITY-1 modules are currently identified. Start by calling read_shared_public_memory "
+                "with focused query terms derived from the current vulnerability pattern, then use 🟡 RELATED "
+                "modules as the highest-priority concrete scan scope before any repo-wide widening.\n"
+            )
+        else:
+            shared_memory_priority_line = (
+                "No PRIORITY-1 modules are currently identified. Start by calling read_shared_public_memory "
+                "with focused query terms derived from the current vulnerability pattern before broad "
+                "repo-wide searches.\n"
+            )
     no_priority_one_with_related_modules = no_priority_one_modules and p2_count > 0
     task_start_line = (
         "1. **Start by reading shared public memory**: No PRIORITY-1 modules are currently identified, "
-        "so begin with focused shared-memory queries and then widen carefully"
-        if shared_memory_priority_line
+        "so begin with focused shared-memory queries and then use 🟡 RELATED modules as the highest-priority "
+        "concrete scan scope"
+        if shared_memory_priority_line and no_priority_one_with_related_modules
+        else (
+            "1. **Start by reading shared public memory**: No PRIORITY-1 modules are currently identified, "
+            "so begin with focused shared-memory queries and then widen carefully"
+            if shared_memory_priority_line
         else (
             "1. **Start with 🟡 RELATED modules**: No PRIORITY-1 modules are currently identified, so use "
             "the RELATED scope as the highest-priority concrete starting point and focus those checks with "
@@ -253,17 +295,37 @@ def build_initial_user_message(
                 else "1. **Start with PRIORITY-1 modules**: These are directly affected or embedding-similar to the known vulnerable module"
             )
         )
+        )
     )
     module_scan_line = (
-        "- No PRIORITY-1 modules are currently identified; use shared memory, scan_start_points, and focused repo-wide "
-        "searches to establish the best candidate modules"
-        if no_priority_one_modules
+        "- No PRIORITY-1 modules are currently identified; use shared memory to focus the 🟡 RELATED module checks, "
+        "then widen to repo-wide searches only if those concrete targets are exhausted without enough evidence"
+        if no_priority_one_with_related_modules and shared_observation_count > 0
+        else (
+            "- No PRIORITY-1 modules are currently identified; use 🟡 RELATED modules as the highest-priority "
+            "concrete scan scope before repo-wide widening"
+            if no_priority_one_with_related_modules
+            else (
+                "- No PRIORITY-1 modules are currently identified; use shared memory, scan_start_points, and focused repo-wide "
+                "searches to establish the best candidate modules"
+                if no_priority_one_modules and shared_observation_count > 0
+                else (
+                    "- No PRIORITY-1 modules are currently identified; use scan_start_points and focused repo-wide "
+                    "searches to establish the best candidate modules"
+                    if no_priority_one_modules
         else "- For each PRIORITY-1 module, scan ALL files for the vulnerability pattern"
+                )
+            )
+        )
     )
     start_instruction = (
-        "Begin analysis now. Start by reading shared public memory with a focused query, then widen "
-        "to repo-wide searches."
-        if shared_memory_priority_line
+        "Begin analysis now. Start by reading shared public memory with a focused query, then use the 🟡 "
+        "RELATED modules as the highest-priority concrete scope before any repo-wide widening."
+        if shared_memory_priority_line and no_priority_one_with_related_modules
+        else (
+            "Begin analysis now. Start by reading shared public memory with a focused query, then widen "
+            "to repo-wide searches."
+            if shared_memory_priority_line
         else (
             "Begin analysis now. Start with the 🟡 RELATED modules as the highest-priority concrete scope."
             if no_priority_one_with_related_modules
@@ -273,6 +335,7 @@ def build_initial_user_message(
                 if no_priority_one_modules
                 else "Begin analysis now. Start with the 🔴 PRIORITY-1 modules."
             )
+        )
         )
     )
 
@@ -311,10 +374,42 @@ def build_intermediate_user_message(
     progress_info: str = "",
     critical_stop_max_priority: int = 2,
     shared_observation_count: int = 0,
+    has_priority_one: bool = True,
+    has_related: bool = True,
 ) -> str:
     """Build intermediate prompt with context about what's already been scanned."""
     normalized_max_priority = 1 if critical_stop_max_priority == 1 else 2
-    if normalized_max_priority == 1:
+    if not has_priority_one and has_related:
+        if shared_observation_count > 0:
+            msg = """Continue your vulnerability analysis:
+1. No PRIORITY-1 modules are currently identified; use focused shared-memory queries first, then scan ALL files in 🟡 RELATED modules before any repo-wide widening
+2. Mark each fully analyzed file with mark_file_completed, even when it has no finding
+3. Widen to repo-wide searches only when RELATED-module evidence is insufficient
+4. Record rejected hypotheses, evidence gaps, shared-memory hits, and next best queries
+5. Do NOT repeat previous analysis - see scanned files and findings below."""
+        else:
+            msg = """Continue your vulnerability analysis:
+1. No PRIORITY-1 modules are currently identified; scan ALL files in 🟡 RELATED modules before any repo-wide widening
+2. Mark each fully analyzed file with mark_file_completed, even when it has no finding
+3. Widen to repo-wide searches only when RELATED-module evidence is insufficient
+4. Record rejected hypotheses, evidence gaps, shared-memory hits, and next best queries
+5. Do NOT repeat previous analysis - see scanned files and findings below."""
+    elif not has_priority_one:
+        if shared_observation_count > 0:
+            msg = """Continue your vulnerability analysis:
+1. No PRIORITY-1 or RELATED modules are currently identified; continue from focused shared-memory queries, scan_start_points, and focused repo-wide searches
+2. Mark each fully analyzed file with mark_file_completed, even when it has no finding
+3. Widen only when the current evidence is insufficient
+4. Record rejected hypotheses, evidence gaps, shared-memory hits, and next best queries
+5. Do NOT repeat previous analysis - see scanned files and findings below."""
+        else:
+            msg = """Continue your vulnerability analysis:
+1. No PRIORITY-1 or RELATED modules are currently identified; continue from scan_start_points and focused repo-wide searches
+2. Mark each fully analyzed file with mark_file_completed, even when it has no finding
+3. Widen only when the current evidence is insufficient
+4. Record rejected hypotheses, evidence gaps, shared-memory hits, and next best queries
+5. Do NOT repeat previous analysis - see scanned files and findings below."""
+    elif normalized_max_priority == 1:
         msg = """Continue your vulnerability analysis:
 1. Have you scanned ALL files in PRIORITY-1 (🔴) modules?
 2. Do not spend turns on RELATED (🟡) modules while any PRIORITY-1 file remains pending
