@@ -28,6 +28,7 @@ from config import (
 from llm import LLMConfig, create_llm_client
 from profiler.fingerprint import extract_profile_fingerprint, stable_data_hash
 from scanner.agent import AgenticVulnFinder, load_software_profile, load_vulnerability_profile
+from scanner.agent.priority import resolve_module_similarity_config
 from scanner.agent.shared_memory import SharedPublicMemoryManager
 from scanner.agent.utils import make_serializable
 from scanner.similarity.embedding import (
@@ -486,6 +487,7 @@ def build_scan_fingerprint(
     scan_languages: List[str],
     codeql_database_names: Dict[str, str],
     shared_public_memory_scope: Optional[Dict[str, Any]] = None,
+    module_similarity_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a reproducibility fingerprint for one target scan result."""
     llm_config = getattr(llm_client, "config", None)
@@ -493,6 +495,7 @@ def build_scan_fingerprint(
     agent_root = cli_root.parent / "scanner" / "agent"
     similarity_root = cli_root.parent / "scanner" / "similarity"
     shared_memory_scope = shared_public_memory_scope or {}
+    resolved_module_similarity_config = resolve_module_similarity_config(module_similarity_config)
     payload = {
         "schema_version": SCAN_FINGERPRINT_SCHEMA_VERSION,
         "kind": "scan_result",
@@ -521,11 +524,11 @@ def build_scan_fingerprint(
                 "state_hash": str(shared_memory_scope.get("state_hash", "")).strip(),
             },
             "module_similarity": {
-                "threshold": float(_scanner_config.get("module_similarity", {}).get("threshold", 0.8)),
-                "model_name": str(_scanner_config.get("module_similarity", {}).get("model_name", "")).strip(),
-                "device": str(_scanner_config.get("module_similarity", {}).get("device", "cpu")).strip(),
+                "threshold": float(resolved_module_similarity_config.get("threshold", 0.8)),
+                "model_name": str(resolved_module_similarity_config.get("model_name", "")).strip(),
+                "device": str(resolved_module_similarity_config.get("device", "cpu")).strip(),
                 **embedding_model_artifact_signature(
-                    str(_scanner_config.get("module_similarity", {}).get("model_name", "")).strip() or None
+                    str(resolved_module_similarity_config.get("model_name", "")).strip() or None
                 ),
             },
         },
@@ -626,6 +629,7 @@ def run_single_target_scan(
     profile_base_path: Optional[str] = None,
     software_profile_dirname: Optional[str] = None,
     shared_public_memory_dir: Optional[str | Path] = None,
+    module_similarity_config: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Run one target scan through a stable public interface used by both CLIs."""
     resolved_repo_base_path = Path(repo_base_path).expanduser()
@@ -761,6 +765,9 @@ def run_single_target_scan(
                             if shared_public_memory_manager is not None
                             else {"enabled": False, "root_hash": "", "scope_key": "", "state_hash": ""}
                         )
+                        resolved_module_similarity_config = resolve_module_similarity_config(
+                            module_similarity_config
+                        )
                         finder = AgenticVulnFinder(
                             llm_client=llm_client,
                             repo_path=target_repo_path,
@@ -776,6 +783,7 @@ def run_single_target_scan(
                             codeql_database_names=codeql_database_names,
                             shared_public_memory_manager=shared_public_memory_manager,
                             shared_public_memory_scope=shared_public_memory_scope,
+                            module_similarity_config=resolved_module_similarity_config,
                         )
                         scan_fingerprint = build_scan_fingerprint(
                             vulnerability_profile=vulnerability_profile,
@@ -788,6 +796,7 @@ def run_single_target_scan(
                             scan_languages=scan_languages,
                             codeql_database_names=codeql_database_names,
                             shared_public_memory_scope=shared_public_memory_scope,
+                            module_similarity_config=resolved_module_similarity_config,
                         )
                         results = finder.run()
                         _save_scan_outputs(
@@ -900,6 +909,10 @@ def main() -> int:
             critical_stop_max_priority=getattr(args, "critical_stop_max_priority", 2),
             profile_base_path=getattr(args, "profile_base_path", None),
             software_profile_dirname=getattr(args, "software_profile_dirname", None),
+            module_similarity_config={
+                "model_name": getattr(args, "similarity_model_name", None),
+                "device": getattr(args, "similarity_device", None),
+            },
         )
         success_count += int(success)
 

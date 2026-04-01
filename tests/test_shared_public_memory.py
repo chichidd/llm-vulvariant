@@ -118,6 +118,41 @@ def test_shared_public_memory_scope_excludes_current_producer(tmp_path):
     assert payload["observations"][0]["summary"]["file_path"] == "foreign.py"
 
 
+def test_shared_public_memory_ignores_comment_only_search_matches(tmp_path):
+    manager = SharedPublicMemoryManager(
+        root_dir=tmp_path,
+        repo_name="demo",
+        repo_commit="a" * 40,
+        producer_id="scan-a",
+    )
+
+    persisted = manager.record_observation(
+        "search_in_folder",
+        {"folder_path": ".", "pattern": "shell\\s*=\\s*True", "max_results": 50},
+        {
+            "folder_path": ".",
+            "pattern": "shell\\s*=\\s*True",
+            "match_count": 2,
+            "files": ["cli.py", "runner.py"],
+            "matches": [
+                {
+                    "file_path": "cli.py",
+                    "line_number": 10,
+                    "line_text": "# NOTE: DO NOT USE shell=True to avoid security risk",
+                },
+                {
+                    "file_path": "runner.py",
+                    "line_number": 20,
+                    "line_text": "   // shell=True is dangerous here",
+                },
+            ],
+        },
+    )
+
+    assert persisted is None
+    assert manager.describe_scope()["observation_count"] == 0
+
+
 def test_shared_public_memory_visibility_is_not_order_dependent_across_producers(tmp_path):
     first_attempt = SharedPublicMemoryManager(
         root_dir=tmp_path,

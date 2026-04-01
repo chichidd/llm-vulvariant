@@ -441,10 +441,22 @@ class AgentMemoryManager:
             return ""
         
         progress = self.get_progress()
+        critical_stop_max_priority = self._normalize_critical_stop_max_priority(
+            self.memory.critical_stop_max_priority
+        )
+        critical_complete = self.is_critical_complete(max_priority=critical_stop_max_priority)
+        if critical_complete:
+            coverage_status = "complete"
+        elif int(progress.get("completed", 0)) > 0 or int(progress.get("findings", 0)) > 0:
+            coverage_status = "partial"
+        else:
+            coverage_status = "empty"
         prompt = f"""Summarize this vulnerability scan in 3-5 sentences:
 
 Target: {self.memory.target_repo}@{self.memory.target_commit}
 CVE: {self.memory.cve_id}
+Coverage status: {coverage_status}
+Critical scope complete: {critical_complete}
 Files scanned: {progress['completed']}/{progress['total_files']}
 Vulnerabilities found: {progress['findings']}
 Priority-1 modules: {progress['priority_1']['completed']}/{progress['priority_1']['total']} complete
@@ -453,7 +465,9 @@ Issues encountered: {len(self.memory.issues)}
 Findings: {json.dumps(self.memory.findings[-5:], indent=2) if self.memory.findings else 'None'}
 Issues: {self.memory.issues[-5:] if self.memory.issues else 'None'}
 
-Provide a concise technical summary."""
+Provide a concise technical summary.
+Treat the findings as scan-stage candidates, not confirmed exploitable vulnerabilities.
+If coverage status is partial or empty, explicitly say the scan is incomplete and avoid definitive language such as confirmed flaw, critical flaw, or no other vulnerabilities remain."""
 
         try:
             response = self.llm_client.complete(prompt)

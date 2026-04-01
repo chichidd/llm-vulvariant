@@ -304,6 +304,23 @@ def test_build_prompt_requests_structured_evidence_contract(tmp_path):
     assert "If evidence is missing, say so explicitly in the relevant field." in prompt
 
 
+def test_build_prompt_handles_missing_evidence_and_description(tmp_path):
+    checker = _checker()
+
+    prompt = checker._build_prompt(
+        vuln={
+            "file_path": "src/a.py",
+            "vulnerability_type": "command_injection",
+            "evidence": None,
+            "description": None,
+        },
+        repo_path=tmp_path,
+    )
+
+    assert "Evidence: " in prompt
+    assert "Description: " in prompt
+
+
 def test_parse_claude_result_promotes_string_evidence_fields_to_single_item_lists():
     checker = _checker()
     output = {

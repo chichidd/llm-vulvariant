@@ -746,6 +746,80 @@ def test_run_turn_accepts_dict_tool_arguments(monkeypatch):
     assert finder.conversation_history[-1]["role"] == "tool"
 
 
+def test_run_turn_rejects_mismatched_vulnerability_type(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.max_tokens = 256
+    toolkit = _ToolAwareToolkit()
+    finder.toolkit = toolkit
+    finder.vulnerability_profile = SimpleNamespace(
+        cve_id="CVE-2025-0001",
+        to_dict=lambda: {"cve_id": "CVE-2025-0001", "sink_features": {"type": "command_injection"}},
+    )
+    finder.llm_client = _UsageDrivenLLM(
+        responses=[
+            SimpleNamespace(
+                content="reporting",
+                reasoning_content=None,
+                tool_calls=[
+                    _tool_call(
+                        name="report_vulnerability",
+                        arguments={
+                            "file_path": "app.py",
+                            "vulnerability_type": "code_injection",
+                            "description": "desc",
+                            "evidence": "evidence",
+                            "similarity_to_known": "same impact but different sink type",
+                            "confidence": "medium",
+                        },
+                    )
+                ],
+            )
+        ],
+        input_tokens=[3500],
+        context_limit=4096,
+        max_tokens=256,
+    )
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 1
+    assert toolkit.executed and toolkit.executed[0][0] == "report_vulnerability"
+    assert finder.found_vulnerabilities == []
+    assert finder.conversation_history[-1]["role"] == "tool"
+    assert "same vulnerability type" in finder.conversation_history[-1]["content"]
+
+
+def test_get_user_message_does_not_rescan_related_scope_when_no_related_files_pending(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.module_priorities = {"p2": 2}
+    finder.file_to_module = {"b.py": "p2"}
+
+    class _Memory:
+        def get_pending_files(self, max_priority=None):
+            assert max_priority == 2
+            return []
+
+        def format_progress_info(self):
+            return "1/1 files scanned, 0 findings. Priority-1: 0/0, Priority-2: 1/1."
+
+        def get_scanned_files(self):
+            return ["b.py"]
+
+        def get_findings_summary(self):
+            return []
+
+    finder.memory = _Memory()
+
+    message = finder._get_user_message(iteration=1)
+
+    assert "scan ALL files in 🟡 RELATED modules before any repo-wide widening" not in message
+    assert "Priority-2: 1/1" in message
+
+
 def test_run_turn_uses_api_usage_to_stop_before_next_request(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
     finder.max_tokens = 256

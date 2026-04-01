@@ -549,6 +549,53 @@ def test_build_scan_fingerprint_changes_when_module_similarity_config_changes(mo
     assert primary["hash"] != secondary["hash"]
 
 
+def test_build_scan_fingerprint_uses_module_similarity_override(monkeypatch):
+    base_profile = SimpleNamespace(
+        cve_id="CVE-2026-0001",
+        to_dict=lambda: {"cve_id": "CVE-2026-0001"},
+    )
+    software_profile = _mk_profile("repo", version="abc")
+    llm_client = SimpleNamespace(
+        config=SimpleNamespace(
+            provider="deepseek",
+            model="deepseek-chat",
+            base_url="https://primary.example/v1",
+            temperature=0.1,
+            top_p=0.9,
+            max_tokens=4096,
+            enable_thinking=True,
+        )
+    )
+
+    monkeypatch.setitem(agent_scanner._path_config, "repo_root", Path("/tmp"))
+    monkeypatch.setitem(agent_scanner._path_config, "repo_base_path", Path("/tmp"))
+    monkeypatch.setattr(
+        agent_scanner,
+        "embedding_model_artifact_signature",
+        lambda model_name: {"artifact_hash": f"artifact::{model_name}"},
+    )
+
+    fingerprint = agent_scanner.build_scan_fingerprint(
+        vulnerability_profile=base_profile,
+        software_profile=software_profile,
+        llm_client=llm_client,
+        max_iterations=5,
+        stop_when_critical_complete=True,
+        critical_stop_mode="max",
+        critical_stop_max_priority=2,
+        scan_languages=["python"],
+        codeql_database_names={"python": "db"},
+        module_similarity_config={"threshold": 0.8, "model_name": "mini-model", "device": "cuda"},
+    )
+
+    assert fingerprint["scan_config"]["module_similarity"] == {
+        "threshold": 0.8,
+        "model_name": "mini-model",
+        "device": "cuda",
+        "artifact_hash": "artifact::mini-model",
+    }
+
+
 def test_build_scan_fingerprint_changes_when_shared_public_memory_is_enabled():
     base_profile = SimpleNamespace(
         cve_id="CVE-2026-0001",
@@ -1236,6 +1283,72 @@ def test_run_single_target_scan_passes_critical_stop_flag(monkeypatch, tmp_path)
     assert captured["codeql_database_names"] == {
         "python": f"target-repo-{expected_path_hash}-targetha-python",
         "javascript": f"target-repo-{expected_path_hash}-targetha-javascript",
+    }
+
+
+def test_run_single_target_scan_passes_module_similarity_override(monkeypatch, tmp_path):
+    repo_base = tmp_path / "repos"
+    repo_dir = repo_base / "target-repo"
+    repo_dir.mkdir(parents=True)
+
+    monkeypatch.setitem(agent_scanner._path_config, "repo_base_path", repo_base)
+    monkeypatch.setitem(agent_scanner._path_config, "repo_root", tmp_path)
+    monkeypatch.setattr(agent_scanner, "get_git_commit", lambda repo_path: "origcommit9999")
+    monkeypatch.setattr(agent_scanner, "get_git_restore_target", lambda repo_path: "master")
+    monkeypatch.setattr(agent_scanner, "has_uncommitted_changes", lambda repo_path: False)
+    monkeypatch.setattr(agent_scanner, "restore_git_position", lambda *args, **kwargs: True)
+    monkeypatch.setattr(agent_scanner, "checkout_commit", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        agent_scanner,
+        "load_software_profile",
+        lambda *args, **kwargs: _mk_profile("target-repo", "targethash"),
+    )
+    monkeypatch.setattr(agent_scanner, "detect_repo_languages", lambda repo_path: ["python"])
+
+    captured = {}
+    captured_fingerprint = {}
+
+    class DummyFinder:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.conversation_history = [{"role": "assistant", "content": "done"}]
+            self.memory = _mk_complete_finder_memory()
+
+        def run(self):
+            return {"vulnerabilities": []}
+
+    monkeypatch.setattr(agent_scanner, "AgenticVulnFinder", DummyFinder)
+
+    def fake_build_scan_fingerprint(**kwargs):
+        captured_fingerprint.update(kwargs)
+        return {"hash": "scan"}
+
+    monkeypatch.setattr(agent_scanner, "build_scan_fingerprint", fake_build_scan_fingerprint)
+
+    target = agent_scanner.ScanTarget(repo_name="target-repo", commit_hash="targethash1234")
+
+    ok = agent_scanner.run_single_target_scan(
+        cve_id="CVE-2025-0001",
+        output_base=tmp_path / "scan-out",
+        repo_base_path=repo_base,
+        max_iterations=2,
+        vulnerability_profile=SimpleNamespace(),
+        llm_client=object(),
+        target=target,
+        module_similarity_config={"threshold": 0.8, "model_name": "mini-model", "device": "cuda"},
+        verbose=False,
+    )
+
+    assert ok is True
+    assert captured["module_similarity_config"] == {
+        "threshold": 0.8,
+        "model_name": "mini-model",
+        "device": "cuda",
+    }
+    assert captured_fingerprint["module_similarity_config"] == {
+        "threshold": 0.8,
+        "model_name": "mini-model",
+        "device": "cuda",
     }
 
 

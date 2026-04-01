@@ -91,6 +91,7 @@ A similar vulnerability means: the vulnerability type is the same, but the imple
 Key point: 
 1. What matters is the vulnerability "pattern", not a specific API name.
 2. Pay attention to directly affected modules and embedding-similar modules in the target software.
+3. Do not report a different sink class just because the impact is also RCE; command_injection, code_injection/code_execution, deserialization, template_injection, etc. remain distinct vulnerability types.
 
 ## Available tools
 {tools_desc}
@@ -174,8 +175,20 @@ def build_initial_user_message(
     # Build prioritized module list
     prioritized_modules = []
     
-    for module in modules:
-        name = module.get("name", "")
+    for raw_module in modules:
+        if isinstance(raw_module, dict):
+            module = raw_module
+        else:
+            module = {
+                "name": str(getattr(raw_module, "name", "") or ""),
+                "files": list(getattr(raw_module, "files", []) or []),
+                "description": str(getattr(raw_module, "description", "") or ""),
+                "key_functions": list(getattr(raw_module, "key_functions", []) or []),
+                "external_dependencies": list(
+                    getattr(raw_module, "external_dependencies", []) or []
+                ),
+            }
+        name = str(module.get("name", "") or "")
         priority = module_priorities.get(name, 3)
         prioritized_modules.append((priority, module))
     

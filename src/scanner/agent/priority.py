@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from config import _scanner_config
 from scanner.similarity.retriever import (
@@ -19,12 +19,14 @@ logger = get_logger(__name__)
 def calculate_module_priorities(
     software_profile: Any,
     vulnerability_profile: Any,
+    module_similarity_config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, int], Dict[str, str]]:
     """Calculate module priorities for one scan target.
 
     Args:
         software_profile: Target software profile with modules.
         vulnerability_profile: Vulnerability profile with affected modules.
+        module_similarity_config: Optional module-similarity override.
 
     Returns:
         Tuple of module priorities and file-to-module mappings.
@@ -54,6 +56,7 @@ def calculate_module_priorities(
         modules,
         affected_module_names,
         direct_priority_one_modules,
+        module_similarity_config=module_similarity_config,
     )
     priority_one_modules = direct_priority_one_modules | promoted_priority_one_modules
 
@@ -155,11 +158,10 @@ def _find_embedding_similar_modules(
     modules: List[Dict[str, Any]],
     affected_module_names: Set[str],
     direct_priority_one_modules: Set[str],
+    module_similarity_config: Optional[Dict[str, Any]] = None,
 ) -> Set[str]:
     """Promote target modules whose semantic similarity exceeds the configured threshold."""
-    module_similarity_config = _scanner_config.get("module_similarity", {})
-    if not isinstance(module_similarity_config, dict):
-        module_similarity_config = {}
+    module_similarity_config = resolve_module_similarity_config(module_similarity_config)
 
     try:
         threshold = float(module_similarity_config.get("threshold", 0.8))
@@ -200,6 +202,42 @@ def _find_embedding_similar_modules(
                 best_score,
             )
     return promoted_modules
+
+
+def resolve_module_similarity_config(
+    module_similarity_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Resolve module-similarity config with optional per-run overrides.
+
+    Args:
+        module_similarity_config: Optional override payload.
+
+    Returns:
+        Normalized module-similarity config.
+    """
+    default_config = _scanner_config.get("module_similarity", {})
+    if not isinstance(default_config, dict):
+        default_config = {}
+    override_config = module_similarity_config if isinstance(module_similarity_config, dict) else {}
+
+    try:
+        threshold = float(
+            override_config.get("threshold", default_config.get("threshold", 0.8))
+        )
+    except (TypeError, ValueError):
+        threshold = 0.8
+
+    model_name = str(
+        override_config.get("model_name", default_config.get("model_name", "") or "")
+    ).strip()
+    device = str(
+        override_config.get("device", default_config.get("device", "cpu") or "cpu")
+    ).strip() or "cpu"
+    return {
+        "threshold": threshold,
+        "model_name": model_name,
+        "device": device,
+    }
 
 
 def _is_related_to_priority_one(module: Dict[str, Any], priority_one_modules: Set[str]) -> bool:

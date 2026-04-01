@@ -21,7 +21,7 @@ from scanner.agent.utils import (
 )
 
 from .memory import AgentMemoryManager
-from .priority import calculate_module_priorities
+from .priority import calculate_module_priorities, resolve_module_similarity_config
 from .prompts import (
     build_initial_user_message,
     build_intermediate_user_message,
@@ -60,6 +60,7 @@ class AgenticVulnFinder:
         codeql_database_names: Optional[Dict[str, str]] = None,
         shared_public_memory_manager: Optional[Any] = None,
         shared_public_memory_scope: Optional[Dict[str, Any]] = None,
+        module_similarity_config: Optional[Dict[str, Any]] = None,
     ):
         self.llm_client = llm_client
         self.repo_path = repo_path
@@ -89,6 +90,7 @@ class AgenticVulnFinder:
         self.scan_languages = list(languages or [])
         self.codeql_database_names = dict(codeql_database_names or {})
         self.shared_public_memory_scope = dict(shared_public_memory_scope or {})
+        self.module_similarity_config = resolve_module_similarity_config(module_similarity_config)
         self.toolkit = AgenticToolkit(
             repo_path,
             shared_public_memory_manager=shared_public_memory_manager,
@@ -106,10 +108,19 @@ class AgenticVulnFinder:
     
     def _init_memory(self):
         """Initialize memory manager with priority information."""
-        self.module_priorities, self.file_to_module = calculate_module_priorities(
-            self.software_profile,
-            self.vulnerability_profile,
-        )
+        try:
+            self.module_priorities, self.file_to_module = calculate_module_priorities(
+                self.software_profile,
+                self.vulnerability_profile,
+                module_similarity_config=self.module_similarity_config,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument 'module_similarity_config'" not in str(exc):
+                raise
+            self.module_priorities, self.file_to_module = calculate_module_priorities(
+                self.software_profile,
+                self.vulnerability_profile,
+            )
         self.toolkit.set_software_profile(self.software_profile)
         if not self.output_dir:
             return
@@ -215,17 +226,11 @@ class AgenticVulnFinder:
                     "state_hash": str(self.shared_public_memory_scope.get("state_hash", "")).strip(),
                 },
                 "module_similarity": {
-                    "threshold": float(
-                        _scanner_config.get("module_similarity", {}).get("threshold", 0.8)
-                    ),
-                    "model_name": str(
-                        _scanner_config.get("module_similarity", {}).get("model_name", "")
-                    ).strip(),
-                    "device": str(
-                        _scanner_config.get("module_similarity", {}).get("device", "cpu")
-                    ).strip(),
+                    "threshold": float(self.module_similarity_config.get("threshold", 0.8)),
+                    "model_name": str(self.module_similarity_config.get("model_name", "")).strip(),
+                    "device": str(self.module_similarity_config.get("device", "cpu")).strip(),
                     **embedding_model_artifact_signature(
-                        str(_scanner_config.get("module_similarity", {}).get("model_name", "")).strip() or None
+                        str(self.module_similarity_config.get("model_name", "")).strip() or None
                     ),
                 },
             },
@@ -356,7 +361,13 @@ class AgenticVulnFinder:
                     logger.debug("LLM signaled completion.")
                 self._commit_messages(messages)
                 return sub_turn
-            
+            if hasattr(self.vulnerability_profile, "to_dict"):
+                vulnerability_dict = self.vulnerability_profile.to_dict()
+            elif isinstance(self.vulnerability_profile, dict):
+                vulnerability_dict = self.vulnerability_profile
+            else:
+                vulnerability_dict = {}
+
             for tool in tool_calls:
                 tool_name = tool.function.name
                 parameters, argument_error = self._parse_tool_arguments(
@@ -381,6 +392,45 @@ class AgenticVulnFinder:
                 
                 if tool_name == "report_vulnerability" and result.success:
                     vuln_report = json.loads(result.content)
+                    sink_features = vulnerability_dict.get("sink_features", {})
+                    raw_known_type = ""
+                    if isinstance(sink_features, dict):
+                        raw_known_type = str(sink_features.get("type", "") or "")
+                    normalized_known_type = raw_known_type.strip().lower().replace("-", "_").replace(" ", "_")
+                    normalized_reported_type = str(
+                        vuln_report.get("vulnerability_type", "") or ""
+                    ).strip().lower().replace("-", "_").replace(" ", "_")
+                    type_aliases = {
+                        "cmd_injection": "command_injection",
+                        "os_command_injection": "command_injection",
+                        "unsafe_deserialization": "deserialization",
+                        "directory_traversal": "path_traversal",
+                        "server_side_request_forgery": "ssrf",
+                    }
+                    normalized_known_type = type_aliases.get(
+                        normalized_known_type,
+                        normalized_known_type,
+                    )
+                    normalized_reported_type = type_aliases.get(
+                        normalized_reported_type,
+                        normalized_reported_type,
+                    )
+                    if (
+                        normalized_known_type
+                        and normalized_reported_type
+                        and normalized_reported_type != normalized_known_type
+                    ):
+                        tool_result_content = (
+                            "Error: report_vulnerability must keep the same vulnerability type as "
+                            f"the known vulnerability ({normalized_known_type}); got "
+                            f"{vuln_report.get('vulnerability_type', 'unknown')}."
+                        )
+                        if len(tool_result_content) > 10000:
+                            tool_result_content = tool_result_content[:10000] + "\n... [truncated]"
+                        messages.append(
+                            {"role": "tool", "tool_call_id": tool.id, "content": tool_result_content}
+                        )
+                        continue
                     # Check for duplicate before adding
                     is_duplicate = False
                     if self.memory:
@@ -574,12 +624,11 @@ class AgenticVulnFinder:
                 critical_stop_max_priority=self.critical_stop_max_priority,
                 shared_observation_count=shared_observation_count,
             )
-        has_priority_one = any(priority == 1 for priority in self.module_priorities.values())
-        has_related = any(priority == 2 for priority in self.module_priorities.values())
         # Include progress info and already-scanned context for subsequent iterations
         progress_info = ""
         scanned_files = []
         findings = []
+        pending: List[str] = []
         
         if self.memory:
             pending = self.memory.get_pending_files(
@@ -598,6 +647,19 @@ class AgenticVulnFinder:
             # Get already scanned files and findings to avoid duplicates
             scanned_files = self.memory.get_scanned_files()
             findings = self.memory.get_findings_summary()
+        pending_module_priorities = {
+            self.module_priorities.get(self.file_to_module.get(file_path, ""), 3)
+            for file_path in pending
+        }
+        if pending_module_priorities:
+            has_priority_one = 1 in pending_module_priorities
+            has_related = 2 in pending_module_priorities
+        elif self.memory:
+            has_priority_one = False
+            has_related = False
+        else:
+            has_priority_one = any(priority == 1 for priority in self.module_priorities.values())
+            has_related = any(priority == 2 for priority in self.module_priorities.values())
         
         return guidance_prefix + build_intermediate_user_message(
             scanned_files=scanned_files,

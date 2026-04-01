@@ -99,6 +99,16 @@ def _resolve_software_profile_locator(
     )
 
 
+def _resolve_module_similarity_config_from_args(
+    batch_args: argparse.Namespace,
+) -> Dict[str, Any]:
+    """Resolve module-similarity overrides passed through batch CLI args."""
+    return {
+        "model_name": getattr(batch_args, "similarity_model_name", None),
+        "device": getattr(batch_args, "similarity_device", None),
+    }
+
+
 def _scan_output_signature(output_dir: Path) -> Tuple[Tuple[str, int, int], ...]:
     """Capture a lightweight signature for persisted scan outputs."""
     signatures: List[Tuple[str, int, int]] = []
@@ -185,6 +195,7 @@ def _build_expected_scan_fingerprint_for_skip(
                     repo_name=scan_target.repo_name,
                     repo_commit=scan_target.commit_hash,
                 ),
+                module_similarity_config=_resolve_module_similarity_config_from_args(batch_args),
             )
         finally:
             if changed_commit and original_restore_target:
@@ -253,6 +264,7 @@ def _build_profile_based_scan_fingerprint_for_skip(
             repo_name=scan_target.repo_name,
             repo_commit=scan_target.commit_hash,
         ),
+        module_similarity_config=_resolve_module_similarity_config_from_args(batch_args),
     )
 
 
@@ -371,6 +383,7 @@ def _run_target_scan(
         profile_base_path=profile_base_path,
         software_profile_dirname=software_profile_dirname,
         shared_public_memory_dir=_resolve_shared_public_memory_dir_from_args(batch_args),
+        module_similarity_config=_resolve_module_similarity_config_from_args(batch_args),
     )
     if scan_succeeded:
         return "ok"

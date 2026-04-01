@@ -648,10 +648,10 @@ class SkillExploitabilityChecker:
     ) -> str:
         """Build Claude prompt for single vulnerability analysis."""
         # Build concise vulnerability summary
-        file_path = vuln.get('file_path', 'unknown')
-        vuln_type = vuln.get('vulnerability_type', 'unknown')
-        evidence = vuln.get('evidence', '')[:400]
-        description = vuln.get('description', '')[:200]
+        file_path = str(vuln.get('file_path', 'unknown') or 'unknown')
+        vuln_type = str(vuln.get('vulnerability_type', 'unknown') or 'unknown')
+        evidence = str(vuln.get('evidence') or '')[:400]
+        description = str(vuln.get('description') or '')[:200]
         
         lines = [
             f"Quick vulnerability check using {self.skill_name} skill:",

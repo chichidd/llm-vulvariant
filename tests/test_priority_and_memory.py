@@ -74,6 +74,38 @@ def test_calculate_module_priorities_promotes_embedding_similar_modules(monkeypa
     }
 
 
+def test_calculate_module_priorities_respects_module_similarity_override(monkeypatch):
+    software = SoftwareProfile(
+        name="repo",
+        modules=[
+            ModuleInfo(name="webui", files=["web.py"], description="serve browser interface"),
+            ModuleInfo(name="cliui", files=["cli.py"], description="serve terminal interface"),
+        ],
+    )
+    vulnerability = type("V", (), {"affected_modules": {"web.py": "webui"}})()
+    captured = {}
+
+    class DummyRetriever:
+        def similarity(self, left, right):
+            return 0.9 if "cliui" in left or "cliui" in right else 0.2
+
+    def fake_build_text_retriever(**kwargs):
+        captured.update(kwargs)
+        return DummyRetriever()
+
+    monkeypatch.setattr(priority_module, "build_text_retriever", fake_build_text_retriever)
+
+    priorities, _ = calculate_module_priorities(
+        software,
+        vulnerability,
+        module_similarity_config={"threshold": 0.8, "model_name": "mini-model", "device": "cuda"},
+    )
+
+    assert priorities["webui"] == 1
+    assert priorities["cliui"] == 1
+    assert captured == {"model_name": "mini-model", "device": "cuda"}
+
+
 def test_calculate_module_priorities_accepts_plain_attribute_module_objects():
     plain_module = type(
         "PlainModule",
@@ -218,6 +250,43 @@ def test_agent_memory_manager_discards_stale_resume_inputs(tmp_path):
     assert resumed is False
     assert mgr2.get_scanned_files() == []
     assert mgr2.memory.file_status == {"y.py": "pending"}
+
+
+def test_agent_memory_generate_summary_uses_cautious_language_for_partial_coverage(tmp_path):
+    class _LLM:
+        def __init__(self):
+            self.prompt = ""
+
+        def complete(self, prompt):
+            self.prompt = prompt
+            return type("Resp", (), {"content": "summary"})()
+
+    llm = _LLM()
+    mgr = AgentMemoryManager(output_dir=tmp_path, llm_client=llm)
+    mgr.initialize(
+        target_repo="repo",
+        target_commit="abcdef1234567890",
+        cve_id="CVE-2025-0001",
+        module_priorities={"api": 1, "core": 2},
+        file_to_module={"a.py": "api", "b.py": "core"},
+        critical_stop_max_priority=2,
+    )
+    mgr.add_finding(
+        {
+            "file_path": "a.py",
+            "function_name": "f",
+            "vulnerability_type": "command_injection",
+            "line_number": 12,
+            "confidence": "high",
+        }
+    )
+    mgr.mark_file_completed("a.py")
+
+    summary = mgr.generate_summary()
+
+    assert summary == "summary"
+    assert "Coverage status: partial" in llm.prompt
+    assert "Treat the findings as scan-stage candidates" in llm.prompt
 
 
 def test_agent_memory_manager_discards_resume_when_scan_signature_changes(tmp_path):

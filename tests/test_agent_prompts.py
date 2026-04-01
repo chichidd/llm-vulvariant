@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from profiler.software.models import ModuleInfo
 from scanner.agent.prompts import (
     build_initial_user_message,
     build_intermediate_user_message,
@@ -351,6 +352,31 @@ def test_build_initial_message_uses_module_priorities_when_profile_is_attribute_
     assert "Use 🟡 RELATED modules as the highest-priority concrete scan targets" in initial
     assert '"project_name": "demo"' in initial
     assert '"priority": "🟡 RELATED"' in initial
+
+
+def test_build_initial_message_accepts_repo_native_module_objects():
+    software_profile = SimpleNamespace(
+        name="demo",
+        modules=[
+            ModuleInfo(
+                name="m2",
+                files=["b.py"],
+                description="related",
+                key_functions=["run"],
+            ),
+        ],
+    )
+
+    initial = build_initial_user_message(
+        software_profile,
+        {"m2": 2},
+        shared_observation_count=0,
+    )
+
+    assert '"project_name": "demo"' in initial
+    assert '"name": "m2"' in initial
+    assert '"priority": "🟡 RELATED"' in initial
+    assert '"files": [' in initial
 
 
 def test_build_initial_message_starts_with_related_modules_when_no_priority_one_and_no_shared_memory():

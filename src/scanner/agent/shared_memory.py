@@ -32,6 +32,14 @@ def _compact_text(value: str, *, max_length: int = 160) -> str:
     return normalized[: max_length - 3] + "..."
 
 
+def _is_comment_only_line(value: str) -> bool:
+    """Return whether one matched line is comment-only noise."""
+    normalized = " ".join(str(value or "").split()).strip()
+    if not normalized:
+        return True
+    return normalized.startswith(("#", "//", "/*", "*", "<!--"))
+
+
 class SharedPublicMemoryManager:
     """Persist scan-time observations shared across target scans in one batch run."""
 
@@ -298,9 +306,6 @@ class SharedPublicMemoryManager:
     def _compact_summary(self, tool_name: str, summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Compact structured tool output into reusable shared memory."""
         if tool_name == "search_in_file":
-            match_count = int(summary.get("match_count", 0))
-            if match_count <= 0:
-                return None
             matches = [
                 {
                     "line_number": int(match.get("line_number", 0)),
@@ -308,17 +313,17 @@ class SharedPublicMemoryManager:
                 }
                 for match in summary.get("matches", [])[:10]
                 if isinstance(match, dict)
+                and not _is_comment_only_line(match.get("line_text", ""))
             ]
+            if not matches:
+                return None
             return {
                 "file_path": str(summary.get("file_path", "")).strip(),
                 "pattern": str(summary.get("pattern", "")).strip(),
-                "match_count": match_count,
+                "match_count": len(matches),
                 "matches": matches,
             }
         if tool_name == "search_in_folder":
-            match_count = int(summary.get("match_count", 0))
-            if match_count <= 0:
-                return None
             matches = [
                 {
                     "file_path": str(match.get("file_path", "")).strip(),
@@ -327,15 +332,23 @@ class SharedPublicMemoryManager:
                 }
                 for match in summary.get("matches", [])[:20]
                 if isinstance(match, dict)
+                and not _is_comment_only_line(match.get("line_text", ""))
             ]
+            if not matches:
+                return None
             return {
                 "folder_path": str(summary.get("folder_path", "")).strip(),
                 "pattern": str(summary.get("pattern", "")).strip(),
-                "match_count": match_count,
+                "match_count": len(matches),
                 "files": [
-                    str(file_path).strip()
-                    for file_path in summary.get("files", [])[:20]
-                    if str(file_path).strip()
+                    file_path
+                    for file_path in sorted(
+                        {
+                            str(match.get("file_path", "")).strip()
+                            for match in matches
+                            if str(match.get("file_path", "")).strip()
+                        }
+                    )
                 ],
                 "matches": matches,
             }

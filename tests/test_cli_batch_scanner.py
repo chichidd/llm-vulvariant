@@ -394,6 +394,8 @@ def test_run_target_scan_passes_profile_base_path_and_dirname(monkeypatch, tmp_p
         run_id="run-123",
         profile_base_path=str(tmp_path / "profiles"),
         target_soft_profiles_dir="soft-nvidia",
+        similarity_model_name="mini-model",
+        similarity_device="cuda",
     )
     target = SimilarProfileCandidate(
         profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
@@ -417,6 +419,10 @@ def test_run_target_scan_passes_profile_base_path_and_dirname(monkeypatch, tmp_p
     assert captured["shared_public_memory_dir"] == (
         tmp_path / "scan-out" / "_runs" / "run-123" / "shared-public-memory"
     )
+    assert captured["module_similarity_config"] == {
+        "model_name": "mini-model",
+        "device": "cuda",
+    }
 
 
 def test_ensure_software_profile_delegates_cache_validation_to_generator(monkeypatch, tmp_path):
@@ -955,6 +961,8 @@ def test_run_target_scan_builds_skip_existing_fingerprint_from_checked_out_targe
         force_regenerate_profiles=False,
         profile_base_path=str(tmp_path / "profiles"),
         target_soft_profiles_dir="soft-nvidia",
+        similarity_model_name="mini-model",
+        similarity_device="cuda",
     )
     target_commit = "t" * 40
     target = SimilarProfileCandidate(
@@ -979,6 +987,10 @@ def test_run_target_scan_builds_skip_existing_fingerprint_from_checked_out_targe
     assert status == "skipped"
     assert marker_path.read_text(encoding="utf-8") == "current"
     assert captured_fingerprint["critical_stop_max_priority"] == 1
+    assert captured_fingerprint["module_similarity_config"] == {
+        "model_name": "mini-model",
+        "device": "cuda",
+    }
 
 
 def test_build_expected_scan_fingerprint_for_skip_raises_when_restore_fails(
