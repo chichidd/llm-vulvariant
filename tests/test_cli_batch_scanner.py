@@ -2511,6 +2511,28 @@ def test_resolve_scan_workers_guarantees_at_least_one():
     assert batch_scanner._resolve_scan_workers(args) == 1
 
 
+def test_parse_args_supports_scan_all_profiled_targets(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_scanner.py",
+            "--vuln-json",
+            "vuln.json",
+            "--source-repos-root",
+            "source",
+            "--target-repos-root",
+            "target",
+            "--profile-base-path",
+            "profiles",
+            "--scan-all-profiled-targets",
+        ],
+    )
+    args = batch_scanner.parse_args()
+
+    assert args.scan_all_profiled_targets is True
+
+
 def test_build_scan_tasks_deduplicates_duplicate_target_candidates():
     target = ProfileRef(
         repo_name="target-repo",
@@ -2790,6 +2812,7 @@ def test_main_summary_counts_are_aggregated_after_scan_task_dedup(monkeypatch, t
     monkeypatch.setitem(batch_scanner._path_config, "repo_root", tmp_path)
     monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
     monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
     monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
     monkeypatch.setattr(batch_scanner, "build_text_retriever", lambda model_name, device: object())
     monkeypatch.setattr(batch_scanner, "_load_vuln_entries", lambda vuln_json, limit=None: [(0, {"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"})])
@@ -2815,6 +2838,254 @@ def test_main_summary_counts_are_aggregated_after_scan_task_dedup(monkeypatch, t
     assert summary["successful_scans"] == 1
     assert summary["failed_scans"] == 0
     assert summary["entries"][0]["scan_results"][0]["status"] == "ok"
+
+
+def test_main_scan_all_profiled_targets_bypasses_similarity_ranking(monkeypatch, tmp_path):
+    vuln_json = tmp_path / "vuln.json"
+    vuln_json.write_text(
+        json.dumps([{"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"}]),
+        encoding="utf-8",
+    )
+    target_repos_root = tmp_path / "targets"
+    target_repos_root.mkdir()
+    profile_base_path = tmp_path / "profiles"
+    args = Namespace(
+        vuln_json=str(vuln_json),
+        source_repos_root=str(tmp_path / "sources"),
+        target_repos_root=str(target_repos_root),
+        profile_base_path=str(profile_base_path),
+        source_soft_profiles_dir="soft",
+        target_soft_profiles_dir="soft-nvidia",
+        vuln_profiles_dir="vuln",
+        scan_output_dir=str(tmp_path / "scan-out"),
+        similarity_threshold=0.7,
+        max_targets=5,
+        fallback_top_n=5,
+        include_same_repo=False,
+        scan_all_profiled_targets=True,
+        similarity_model_name="stub-model",
+        similarity_device="cpu",
+        llm_provider="deepseek",
+        llm_name=None,
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        force_regenerate_profiles=False,
+        skip_existing_scans=True,
+        limit=None,
+        verbose=False,
+        max_workers=2,
+        scan_workers=2,
+        jobs=2,
+        run_id="run-1",
+        shared_public_memory_dir=str(tmp_path / "scan-out" / "_runs" / "run-1" / "shared-public-memory"),
+    )
+    target_one = ProfileRef("target-one", "b" * 40, _mk_profile("target-one"))
+    target_two = ProfileRef("target-two", "c" * 40, _mk_profile("target-two"))
+
+    monkeypatch.setitem(batch_scanner._path_config, "repo_root", tmp_path)
+    monkeypatch.setattr(batch_scanner, "parse_args", lambda: args)
+    monkeypatch.setattr(batch_scanner, "setup_logging", lambda verbose: None)
+    monkeypatch.setattr(batch_scanner, "create_profile_llm_client", lambda provider, model: object())
+    build_calls = []
+    monkeypatch.setattr(
+        batch_scanner,
+        "build_text_retriever",
+        lambda model_name, device: build_calls.append((model_name, device)) or object(),
+    )
+    monkeypatch.setattr(
+        batch_scanner,
+        "_load_vuln_entries",
+        lambda vuln_json, limit=None: [(0, {"repo_name": "source-repo", "commit": "a" * 40, "cve_id": "CVE-2026-0001"})],
+    )
+    monkeypatch.setattr(batch_scanner, "_ensure_source_inputs_available", lambda **kwargs: True)
+    monkeypatch.setattr(batch_scanner, "_ensure_software_profile", lambda **kwargs: _mk_profile("source"))
+    monkeypatch.setattr(batch_scanner, "_ensure_vulnerability_profile", lambda **kwargs: object())
+    monkeypatch.setattr(
+        batch_scanner,
+        "_discover_existing_profiled_repo_refs",
+        lambda **kwargs: {
+            "source-repo": ProfileRef("source-repo", "a" * 40, _mk_profile("same")),
+            "target-one": target_one,
+            "target-two": target_two,
+        },
+    )
+
+    def _unexpected_rank(**kwargs):
+        raise AssertionError("similarity ranking should not run in all-profile mode")
+
+    monkeypatch.setattr(batch_scanner, "_rank_similar_candidates", _unexpected_rank)
+    monkeypatch.setattr(
+        batch_scanner,
+        "run_thread_pool_tasks",
+        lambda **kwargs: [
+            Namespace(
+                status="success",
+                payload={
+                    "repo_name": task["target"].profile_ref.repo_name,
+                    "commit_hash": task["target"].profile_ref.commit_hash,
+                    "overall_similarity": (
+                        task["target"].metrics.overall_sim
+                        if task["target"].metrics is not None
+                        else None
+                    ),
+                    "similarity_computed": task["target"].metrics is not None,
+                    "status": "ok",
+                    "coverage_status": "complete",
+                },
+                error_message="",
+            )
+            for task in kwargs["tasks"]
+        ],
+    )
+
+    assert batch_scanner.main() == 0
+    assert build_calls == []
+
+    summary_files = sorted((tmp_path / "scan-out").glob("batch-summary-*.json"))
+    summary = json.loads(summary_files[0].read_text(encoding="utf-8"))
+
+    assert summary["entries"][0]["selection_mode"] == "all_profiled"
+    selected_targets = summary["entries"][0]["selected_targets"]
+    assert [target["repo_name"] for target in selected_targets] == ["target-one", "target-two"]
+    assert all(target["similarity_computed"] is False for target in selected_targets)
+    assert all(target["metrics"] is None for target in selected_targets)
+    assert all(result["overall_similarity"] is None for result in summary["entries"][0]["scan_results"])
+    assert all(result["similarity_computed"] is False for result in summary["entries"][0]["scan_results"])
+    assert summary["total_scans"] == 2
+
+
+def test_discover_existing_profiled_repo_refs_tolerates_profile_removed_during_latest_selection(monkeypatch, tmp_path):
+    repos_root = tmp_path / "repos"
+    repo_profiles_dir = tmp_path / "profiles"
+    (repos_root / "target-one").mkdir(parents=True)
+
+    profile_path = repo_profiles_dir / "target-one" / ("a" * 40) / "software_profile.json"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(json.dumps({"marker": "x"}), encoding="utf-8")
+
+    ref = ProfileRef(
+        repo_name="target-one",
+        commit_hash="a" * 40,
+        profile=_mk_profile("target-one"),
+        profile_path=profile_path,
+    )
+
+    monkeypatch.setattr(batch_scanner, "load_all_software_profiles", lambda _path: [ref])
+
+    class _MissingThenGone:
+        def __init__(self):
+            self.exists_calls = 0
+
+        def exists(self):
+            self.exists_calls += 1
+            return True
+
+        def stat(self):
+            raise FileNotFoundError("profile disappeared")
+
+    object.__setattr__(ref, "profile_path", _MissingThenGone())
+
+    refs = batch_scanner._discover_existing_profiled_repo_refs(
+        repos_root=repos_root,
+        repo_profiles_dir=repo_profiles_dir,
+    )
+
+    assert set(refs.keys()) == {"target-one"}
+    assert refs["target-one"].commit_hash == "a" * 40
+
+
+def test_discover_existing_profiled_repo_refs_reloads_repo_when_initial_snapshot_misses_profile(
+    monkeypatch,
+    tmp_path,
+):
+    repos_root = tmp_path / "repos"
+    repo_profiles_dir = tmp_path / "profiles"
+    (repos_root / "target-one").mkdir(parents=True)
+    (repo_profiles_dir / "target-one" / ("a" * 40)).mkdir(parents=True)
+
+    monkeypatch.setattr(batch_scanner, "load_all_software_profiles", lambda _path: [])
+    monkeypatch.setattr(batch_scanner, "resolve_profile_commit", lambda base_dir, repo_name: "a" * 40)
+    monkeypatch.setattr(batch_scanner, "load_software_profile", lambda repo_name, commit_hash, base_dir=None: _mk_profile(repo_name))
+
+    refs = batch_scanner._discover_existing_profiled_repo_refs(
+        repos_root=repos_root,
+        repo_profiles_dir=repo_profiles_dir,
+    )
+
+    assert set(refs.keys()) == {"target-one"}
+    assert refs["target-one"].commit_hash == "a" * 40
+
+
+def test_discover_existing_profiled_repo_refs_reloads_selected_profile_after_latest_pick(
+    monkeypatch,
+    tmp_path,
+):
+    repos_root = tmp_path / "repos"
+    repo_profiles_dir = tmp_path / "profiles"
+    (repos_root / "target-one").mkdir(parents=True)
+
+    profile_path = repo_profiles_dir / "target-one" / ("a" * 40) / "software_profile.json"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("{}", encoding="utf-8")
+
+    stale_ref = ProfileRef(
+        repo_name="target-one",
+        commit_hash="a" * 40,
+        profile=_mk_profile("stale-profile"),
+        profile_path=profile_path,
+    )
+
+    monkeypatch.setattr(batch_scanner, "load_all_software_profiles", lambda _path: [stale_ref])
+    monkeypatch.setattr(batch_scanner, "load_software_profile", lambda repo_name, commit_hash, base_dir=None: _mk_profile("fresh-profile"))
+
+    refs = batch_scanner._discover_existing_profiled_repo_refs(
+        repos_root=repos_root,
+        repo_profiles_dir=repo_profiles_dir,
+    )
+
+    assert set(refs.keys()) == {"target-one"}
+    assert refs["target-one"].profile.name == "fresh-profile"
+
+
+def test_discover_existing_profiled_repo_refs_refreshes_repo_when_newer_profile_appears_after_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    repos_root = tmp_path / "repos"
+    repo_profiles_dir = tmp_path / "profiles"
+    (repos_root / "target-one").mkdir(parents=True)
+
+    old_path = repo_profiles_dir / "target-one" / ("a" * 40) / "software_profile.json"
+    new_path = repo_profiles_dir / "target-one" / ("b" * 40) / "software_profile.json"
+    old_path.parent.mkdir(parents=True)
+    new_path.parent.mkdir(parents=True)
+    old_path.write_text("{}", encoding="utf-8")
+    new_path.write_text("{}", encoding="utf-8")
+
+    stale_ref = ProfileRef(
+        repo_name="target-one",
+        commit_hash="a" * 40,
+        profile=_mk_profile("stale-profile"),
+        profile_path=old_path,
+    )
+
+    monkeypatch.setattr(batch_scanner, "load_all_software_profiles", lambda _path: [stale_ref])
+    monkeypatch.setattr(batch_scanner, "resolve_profile_commit", lambda base_dir, repo_name: "b" * 40)
+    monkeypatch.setattr(
+        batch_scanner,
+        "load_software_profile",
+        lambda repo_name, commit_hash, base_dir=None: _mk_profile(f"reloaded-{commit_hash[:1]}"),
+    )
+
+    refs = batch_scanner._discover_existing_profiled_repo_refs(
+        repos_root=repos_root,
+        repo_profiles_dir=repo_profiles_dir,
+    )
+
+    assert set(refs.keys()) == {"target-one"}
+    assert refs["target-one"].commit_hash == "b" * 40
+    assert refs["target-one"].profile.name == "reloaded-b"
 
 
 def test_main_summary_preserves_per_target_timing_and_coverage_metadata(monkeypatch, tmp_path):

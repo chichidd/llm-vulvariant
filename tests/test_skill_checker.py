@@ -1,6 +1,10 @@
 import json
 from pathlib import Path
 
+from scanner.checker.threat_model_guardrails import (
+    apply_threat_model_guardrails,
+    extract_threat_model_facts,
+)
 from scanner.checker.skill_checker import (
     SkillExploitabilityChecker,
     compute_findings_signature,
@@ -443,6 +447,19 @@ def test_build_prompt_includes_output_json_path(tmp_path):
     assert "return JSON only on stdout" in prompt
 
 
+def test_build_prompt_includes_verification_guardrails(tmp_path):
+    checker = _checker()
+
+    prompt = checker._build_prompt(
+        vuln={"file_path": "x.py", "vulnerability_type": "x", "evidence": "line", "description": "desc"},
+        repo_path=tmp_path,
+    )
+
+    assert "Do not count simulated, simplified, source-reading, or echo-only PoCs as verified exploitation." in prompt
+    assert "If output contains EXPLOIT_FAILED, the verification must not be marked as verified." in prompt
+    assert "Treat trusted-local-only config/example/test inputs conservatively" in prompt
+
+
 def test_analyze_single_vuln_falls_back_to_output_file(monkeypatch, tmp_path):
     checker = _checker()
     evidence_dir = tmp_path / "evidence"
@@ -532,6 +549,28 @@ def test_analyze_single_vuln_ignores_stale_output_file(monkeypatch, tmp_path):
     assert result["verdict"] == "ERROR"
     assert result.get("error") == "Claude analysis failed"
     assert result["claude_cli_record_path"].endswith("claude_cli_invocation.json")
+
+
+def test_analyze_single_vuln_ignores_stale_docker_evidence_from_previous_attempt(monkeypatch, tmp_path):
+    checker = _checker()
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+
+    (evidence_dir / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
+    (evidence_dir / "execution_output.txt").write_text("VULNERABILITY_CONFIRMED", encoding="utf-8")
+    (evidence_dir / "exploit.py").write_text("print('stale')", encoding="utf-8")
+
+    monkeypatch.setattr(checker, "_run_claude", lambda prompt, record_path=None: (False, None, {}))
+
+    result = checker._analyze_single_vuln(
+        vuln={"file_path": "x.py", "vulnerability_type": "x"},
+        finding_id="vuln_000",
+        repo_path=tmp_path,
+        evidence_dir=evidence_dir,
+    )
+
+    assert result["verdict"] == "ERROR"
+    assert result.get("error") == "Claude analysis failed"
 
 
 def test_analyze_single_vuln_fails_closed_when_result_path_prep_fails(monkeypatch, tmp_path):
@@ -666,6 +705,7 @@ def test_build_docker_verification_from_evidence_confirmed(tmp_path):
     assert dv["build_success"] is True
     assert dv["run_success"] is True
     assert dv["exploit_confirmed"] is True
+    assert dv["verification_verdict"] == "VERIFIED_EXPLOITABLE"
     assert dv["error"] is None
     assert dv["docker_image"].startswith("exploit-test:")
 
@@ -699,10 +739,135 @@ def test_build_docker_verification_promotes_build_success_if_exec_exists(tmp_pat
     assert dv["build_success"] is True
     assert dv["run_success"] is True
     assert dv["exploit_confirmed"] is False
+    assert dv["verification_verdict"] == "VERIFICATION_FAILED"
     assert "did not confirm" in (dv["error"] or "")
 
 
-def test_recover_docker_verification_upgrades_unknown_to_exploitable(tmp_path):
+def test_build_docker_verification_rejects_failed_marker_even_with_confirmation_token(tmp_path):
+    checker = _checker()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+
+    (evidence / "Dockerfile.exploit").write_text("FROM python:3.11", encoding="utf-8")
+    (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
+    (evidence / "execution_output.txt").write_text(
+        "VULNERABILITY_CONFIRMED: looked promising\nEXPLOIT_FAILED: command never reached real sink",
+        encoding="utf-8",
+    )
+
+    dv = checker._build_docker_verification_from_evidence(evidence, commit_hash="deadbeef")
+
+    assert dv is not None
+    assert dv["run_success"] is True
+    assert dv["exploit_confirmed"] is False
+    assert dv["verification_verdict"] == "VERIFICATION_FAILED"
+    assert "EXPLOIT_FAILED" in (dv["error"] or "")
+
+
+def test_build_docker_verification_rejects_simulated_poc_output(tmp_path):
+    checker = _checker()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+
+    (evidence / "Dockerfile.exploit").write_text("FROM python:3.11", encoding="utf-8")
+    (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
+    (evidence / "execution_output.txt").write_text(
+        "Simulated exploit:\n"
+        "Testing with: echo 'VULNERABILITY_CONFIRMED: demo'\n"
+        "VULNERABILITY_CONFIRMED: demo",
+        encoding="utf-8",
+    )
+
+    dv = checker._build_docker_verification_from_evidence(evidence, commit_hash="feedface")
+
+    assert dv is not None
+    assert dv["run_success"] is True
+    assert dv["exploit_confirmed"] is False
+    assert dv["verification_verdict"] == "VERIFICATION_FAILED"
+    assert "simulated" in (dv["error"] or "").lower()
+
+
+def test_build_docker_verification_downgrades_structured_verified_output_with_failure_markers(tmp_path):
+    checker = _checker()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+
+    (evidence / "analysis_output.json").write_text(
+        json.dumps(
+            {
+                "docker_verification": {
+                    "verification_verdict": "VERIFIED_EXPLOITABLE",
+                    "build_success": True,
+                    "run_success": True,
+                    "exploit_confirmed": True,
+                    "execution_output": "VULNERABILITY_CONFIRMED\nEXPLOIT_FAILED: simulated failure",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dv = checker._build_docker_verification_from_evidence(evidence, commit_hash="b16b00b5")
+
+    assert dv is not None
+    assert dv["exploit_confirmed"] is False
+    assert dv["verification_verdict"] == "VERIFICATION_FAILED"
+    assert "EXPLOIT_FAILED" in (dv["error"] or "")
+
+
+def test_build_docker_verification_ignores_placeholder_structured_output_without_real_activity(tmp_path):
+    checker = _checker()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+
+    (evidence / "analysis_output.json").write_text(
+        json.dumps(
+            {
+                "docker_verification": {
+                    "enabled": False,
+                    "verification_verdict": "VERIFICATION_FAILED",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dv = checker._build_docker_verification_from_evidence(evidence, commit_hash="deadbeef")
+
+    assert dv is None
+
+
+def test_build_docker_verification_prefers_real_runtime_evidence_over_stale_structured_verdict(tmp_path):
+    checker = _checker()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+
+    (evidence / "analysis_output.json").write_text(
+        json.dumps(
+            {
+                "docker_verification": {
+                    "verification_verdict": "VERIFICATION_FAILED",
+                    "build_success": True,
+                    "run_success": True,
+                    "exploit_confirmed": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
+    (evidence / "execution_output.txt").write_text("VULNERABILITY_CONFIRMED", encoding="utf-8")
+
+    dv = checker._build_docker_verification_from_evidence(evidence, commit_hash="deadbeef")
+
+    assert dv is not None
+    assert dv["build_success"] is True
+    assert dv["run_success"] is True
+    assert dv["exploit_confirmed"] is True
+    assert dv["verification_verdict"] == "VERIFIED_EXPLOITABLE"
+
+
+def test_recover_docker_verification_upgrades_retryable_verdict_when_runtime_confirms_exploit(tmp_path):
     checker = _checker()
     evidence = tmp_path / "evidence"
     evidence.mkdir()
@@ -710,12 +875,494 @@ def test_recover_docker_verification_upgrades_unknown_to_exploitable(tmp_path):
     (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
     (evidence / "execution_output.txt").write_text("VULNERABILITY_CONFIRMED", encoding="utf-8")
 
-    analysis = {"verdict": "UNKNOWN", "confidence": ""}
+    analysis = {
+        "verdict": "UNKNOWN",
+        "confidence": "",
+        "docker_verification": {"verification_verdict": ""},
+    }
     recovered = checker._recover_docker_verification(analysis, evidence_dir=evidence, commit_hash="deadbeef")
 
     assert recovered["verdict"] == "EXPLOITABLE"
-    assert recovered["confidence"] in ("high", "")
+    assert recovered["confidence"] == "high"
     assert recovered["docker_verification"]["exploit_confirmed"] is True
+    assert recovered["docker_verification"]["verification_verdict"] == "VERIFIED_EXPLOITABLE"
+
+
+def test_recover_docker_verification_prefers_on_disk_failure_markers_over_stale_claude_success(tmp_path):
+    checker = _checker()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+
+    (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
+    (evidence / "execution_output.txt").write_text(
+        "VULNERABILITY_CONFIRMED\nEXPLOIT_FAILED: simulated failure marker from runtime output",
+        encoding="utf-8",
+    )
+
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "build_success": True,
+            "run_success": True,
+            "exploit_confirmed": True,
+            "execution_output": "VULNERABILITY_CONFIRMED",
+        },
+    }
+
+    recovered = checker._recover_docker_verification(
+        analysis,
+        evidence_dir=evidence,
+        commit_hash="deadbeef",
+    )
+
+    assert recovered["docker_verification"]["build_success"] is True
+    assert recovered["docker_verification"]["run_success"] is True
+    assert recovered["docker_verification"]["exploit_confirmed"] is False
+    assert recovered["docker_verification"]["verification_verdict"] == "VERIFICATION_FAILED"
+    assert "EXPLOIT_FAILED" in (recovered["docker_verification"]["error"] or "")
+
+
+def test_recover_docker_verification_prefers_on_disk_success_over_stale_claude_failure(tmp_path):
+    checker = _checker()
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+
+    (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
+    (evidence / "execution_output.txt").write_text("VULNERABILITY_CONFIRMED", encoding="utf-8")
+
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "docker_verification": {
+            "verification_verdict": "VERIFICATION_FAILED",
+            "build_success": True,
+            "run_success": True,
+            "exploit_confirmed": False,
+            "execution_output": "EXPLOIT_FAILED",
+            "error": "old failure",
+        },
+    }
+
+    recovered = checker._recover_docker_verification(
+        analysis,
+        evidence_dir=evidence,
+        commit_hash="deadbeef",
+    )
+
+    assert recovered["docker_verification"]["build_success"] is True
+    assert recovered["docker_verification"]["run_success"] is True
+    assert recovered["docker_verification"]["exploit_confirmed"] is True
+    assert recovered["docker_verification"]["verification_verdict"] == "VERIFIED_EXPLOITABLE"
+    assert recovered["docker_verification"]["error"] is None
+
+
+def test_apply_threat_model_guardrails_downgrades_developer_local_scripts():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "verdict_rationale": "Shell injection is possible.",
+        "preconditions": ["User runs script with --config malicious.json"],
+        "source_analysis": {
+            "sources_found": [{"type": "file", "location": "JSON configuration file provided via --config"}],
+            "attack_path": ["exp.py parse_args()", "subprocess.Popen()"],
+        },
+        "attack_scenario": {
+            "description": "Attacker supplies a local config file to the script.",
+            "steps": ["1. Create malicious config", "2. User runs local script"],
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/benchmark/exp_utils.py"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "LIBRARY_RISK"
+    assert guarded["confidence"] == "medium"
+    assert "Threat-model guardrail" in guarded["verdict_rationale"]
+    assert guarded["docker_verification"]["verification_verdict"] == "NOT_VERIFIED"
+    assert guarded["docker_verification"]["exploit_confirmed"] is False
+
+
+def test_apply_threat_model_guardrails_avoids_false_public_hint_matches_inside_filenames():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "source_analysis": {
+            "sources_found": [
+                {"type": "cli", "location": "args.config (JSON config file path)"},
+                {"type": "file", "location": "JSON config file content (args dictionary)"},
+            ],
+            "attack_path": [
+                "exp.py:parse_args()",
+                "exp_utils.py:_build_cmd()/_build_eval_cmd()",
+                "exp_utils.py:run()",
+            ],
+        },
+        "attack_scenario": {
+            "description": "Command injection via malicious JSON configuration file",
+            "steps": ["User runs python exp.py --config malicious.json"],
+        },
+        "docker_verification": {
+            "verification_verdict": "NOT_VERIFIED",
+            "exploit_confirmed": False,
+        },
+    }
+    vuln = {"file_path": "scripts/benchmark/exp_utils.py"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "LIBRARY_RISK"
+
+
+def test_apply_threat_model_guardrails_does_not_treat_web_ui_identifier_as_public_exposure():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "verdict_rationale": "Unsanitized local config value reaches the shell.",
+        "source_analysis": {
+            "sources_found": [
+                {
+                    "type": "file",
+                    "location": "web_ui JSON configuration value loaded from developer-local settings",
+                }
+            ],
+            "attack_path": [
+                "scripts/web_ui/launcher.py:load_config()",
+                "scripts/web_ui/launcher.py:build_command()",
+            ],
+        },
+        "attack_scenario": {
+            "description": "Developer edits a local web_ui JSON configuration file before running the script.",
+            "steps": [
+                "1. Modify local web_ui config",
+                "2. Run the developer helper script",
+            ],
+        },
+        "preconditions": ["web_ui configuration file is attacker controlled on the local machine"],
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/web_ui/launcher.py", "vulnerability_type": "command_injection"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "LIBRARY_RISK"
+    assert guarded["confidence"] == "medium"
+    assert "Threat-model guardrail" in guarded["verdict_rationale"]
+    assert guarded["docker_verification"]["verification_verdict"] == "NOT_VERIFIED"
+    assert guarded["docker_verification"]["exploit_confirmed"] is False
+
+
+def test_extract_threat_model_facts_normalizes_string_inputs_and_matches_expected_hints():
+    analysis = {
+        "preconditions": "config file is attacker controlled",
+        "source_analysis": {
+            "sources_found": [
+                {"type": "file", "location": "web_ui JSON configuration value loaded from local settings"}
+            ],
+            "attack_path": "scripts/helper.py -> subprocess.Popen",
+        },
+        "attack_scenario": {
+            "description": "Developer-local helper script workflow.",
+            "steps": "run local script with config",
+        },
+    }
+    vuln = {"file_path": "scripts/helper.py", "vulnerability_type": "command_injection"}
+
+    facts = extract_threat_model_facts(analysis, vuln)
+
+    assert facts.developer_local_path is True
+    assert facts.is_script_entrypoint is True
+    assert facts.source_types == {"file"}
+    assert "config" in facts.local_only_hints
+    assert "web_ui" in facts.local_path_traversal_hints
+    assert "ui" not in facts.public_exposure_hints
+
+
+def test_apply_threat_model_guardrails_helper_downgrades_local_script_case():
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "verdict_rationale": "Shell injection is possible.",
+        "preconditions": ["User runs script with --config malicious.json"],
+        "source_analysis": {
+            "sources_found": [{"type": "file", "location": "JSON configuration file provided via --config"}],
+            "attack_path": ["exp.py parse_args()", "subprocess.Popen()"],
+        },
+        "attack_scenario": {
+            "description": "Attacker supplies a local config file to the script.",
+            "steps": ["1. Create malicious config", "2. User runs local script"],
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/benchmark/exp_utils.py"}
+
+    guarded = apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "LIBRARY_RISK"
+    assert guarded["confidence"] == "medium"
+    assert guarded["docker_verification"]["verification_verdict"] == "NOT_VERIFIED"
+    assert guarded["docker_verification"]["exploit_confirmed"] is False
+
+
+def test_apply_threat_model_guardrails_downgrades_string_preconditions_for_local_script():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "preconditions": "config file is attacker controlled",
+        "source_analysis": {
+            "sources_found": [],
+            "attack_path": [],
+        },
+        "attack_scenario": {
+            "description": "Developer-local helper script workflow.",
+            "steps": [],
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/benchmark/helper.py", "vulnerability_type": "command_injection"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "LIBRARY_RISK"
+    assert guarded["docker_verification"]["verification_verdict"] == "NOT_VERIFIED"
+    assert guarded["docker_verification"]["exploit_confirmed"] is False
+
+
+def test_apply_threat_model_guardrails_normalizes_confidence_before_local_downgrade():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "High",
+        "preconditions": ["User runs script with --config malicious.json"],
+        "source_analysis": {
+            "sources_found": [{"type": "file", "location": "JSON configuration file provided via --config"}],
+            "attack_path": ["exp.py parse_args()", "subprocess.Popen()"],
+        },
+        "attack_scenario": {
+            "description": "Attacker supplies a local config file to the script.",
+            "steps": ["1. Create malicious config", "2. User runs local script"],
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/benchmark/exp_utils.py"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+    normalized = checker._normalize_analysis_contract(guarded)
+
+    assert normalized is not None
+    assert normalized["verdict"] == "LIBRARY_RISK"
+    assert normalized["confidence"] == "medium"
+
+
+def test_apply_threat_model_guardrails_treats_string_steps_as_single_evidence_items():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "source_analysis": {
+            "sources_found": [],
+            "attack_path": [],
+        },
+        "attack_scenario": {
+            "description": "Developer-local helper script workflow.",
+            "steps": "config file passed into local script",
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/helper.py", "vulnerability_type": "command_injection"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "LIBRARY_RISK"
+    assert guarded["docker_verification"]["verification_verdict"] == "NOT_VERIFIED"
+    assert guarded["docker_verification"]["exploit_confirmed"] is False
+
+
+def test_apply_threat_model_guardrails_keeps_product_exposed_inputs_exploitable():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "source_analysis": {
+            "sources_found": [{"type": "api", "location": "public web API endpoint"}],
+            "attack_path": ["route handler", "fetch_webpage()"],
+        },
+        "attack_scenario": {
+            "description": "Attacker sends URL through public API.",
+            "steps": ["1. Send request", "2. Server fetches URL"],
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "python/packages/autogen-studio/autogenstudio/gallery/tools/fetch_webpage.py"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "EXPLOITABLE"
+    assert guarded["docker_verification"]["verification_verdict"] == "VERIFIED_EXPLOITABLE"
+
+
+def test_apply_threat_model_guardrails_keeps_non_local_path_traversal_exploitable_for_cli_inputs():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "source_analysis": {
+            "sources_found": [{"type": "cli_argument", "location": "--output_dir argument controlled by the user"}],
+            "attack_path": ["src/cli/exporter.py", "path join", "file write"],
+        },
+        "attack_scenario": {
+            "description": "User controls the output_dir argument of the product CLI.",
+            "steps": ["Run src/cli/exporter.py --output_dir ../../tmp"],
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "src/cli/exporter.py", "vulnerability_type": "path_traversal"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "EXPLOITABLE"
+    assert guarded["docker_verification"]["verification_verdict"] == "VERIFIED_EXPLOITABLE"
+    assert guarded["docker_verification"]["exploit_confirmed"] is True
+
+
+def test_apply_threat_model_guardrails_keeps_script_artifact_file_inputs_exploitable():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "source_analysis": {
+            "sources_found": [{"type": "cli", "location": "cfg.hyps_cache_file parameter"}],
+            "attack_path": ["eval script", "pickle.load()"],
+        },
+        "attack_scenario": {
+            "description": "Attacker provides malicious pickle file via hyps_cache_file parameter",
+            "steps": ["1. Create malicious pickle", "2. User runs script with hyps_cache_file=malicious.pkl"],
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/asr_language_modeling/ngram_lm/eval_beamsearch_ngram_ctc.py"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "EXPLOITABLE"
+
+
+def test_apply_threat_model_guardrails_keeps_supported_cli_entrypoints_exploitable():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "source_analysis": {
+            "sources_found": [{"type": "cli", "location": "user-provided --config path"}],
+            "attack_path": ["scripts/deploy.py", "load config", "sink"],
+        },
+        "attack_scenario": {
+            "description": "Attacker supplies a malicious config file to the shipped CLI.",
+            "steps": ["run scripts/deploy.py --config bad.json"],
+        },
+        "preconditions": ["config file is attacker controlled"],
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/deploy.py", "vulnerability_type": "command_injection"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "EXPLOITABLE"
+    assert guarded["confidence"] == "high"
+    assert guarded["docker_verification"]["verification_verdict"] == "VERIFIED_EXPLOITABLE"
+    assert guarded["docker_verification"]["exploit_confirmed"] is True
+
+
+def test_apply_threat_model_guardrails_keeps_nested_supported_cli_entrypoints_exploitable():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "source_analysis": {
+            "sources_found": [{"type": "cli", "location": "user-provided --config path"}],
+            "attack_path": ["scripts/tools/deploy.py", "load config", "sink"],
+        },
+        "attack_scenario": {
+            "description": "Attacker supplies a malicious config file to the shipped nested CLI.",
+            "steps": ["run scripts/tools/deploy.py --config bad.json"],
+        },
+        "preconditions": ["config file is attacker controlled"],
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "scripts/tools/deploy.py", "vulnerability_type": "command_injection"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "EXPLOITABLE"
+    assert guarded["confidence"] == "high"
+    assert guarded["docker_verification"]["verification_verdict"] == "VERIFIED_EXPLOITABLE"
+    assert guarded["docker_verification"]["exploit_confirmed"] is True
+
+
+def test_apply_threat_model_guardrails_downgrades_local_config_path_traversal():
+    checker = _checker()
+    analysis = {
+        "verdict": "EXPLOITABLE",
+        "confidence": "high",
+        "source_analysis": {
+            "sources_found": [{"type": "cli_argument", "location": "cfg['env']['motion_file'] via Hydra configuration"}],
+            "attack_path": ["train.py", "Hydra configuration", "motion_file concatenation"],
+        },
+        "attack_scenario": {
+            "description": "Attacker provides local motion_file path via Hydra configuration",
+            "steps": ["1. User runs local training config", "2. Script reads arbitrary local file"],
+        },
+        "docker_verification": {
+            "verification_verdict": "VERIFIED_EXPLOITABLE",
+            "exploit_confirmed": True,
+        },
+    }
+    vuln = {"file_path": "isaacgymenvs/tasks/humanoid_amp.py", "vulnerability_type": "path_traversal"}
+
+    guarded = checker._apply_threat_model_guardrails(analysis, vuln)
+
+    assert guarded["verdict"] == "LIBRARY_RISK"
+    assert guarded["docker_verification"]["verification_verdict"] == "NOT_VERIFIED"
+    assert guarded["docker_verification"]["exploit_confirmed"] is False
 
 
 def test_update_summary_counts_unknown_as_error():

@@ -741,12 +741,15 @@ def run_single_target_scan(
                             target_commit=target.commit_hash,
                             target_output_dir=target_output_dir,
                         )
+                        shared_public_memory_producer_key = stable_data_hash(
+                            {
+                                "visibility_scope_id": shared_public_memory_visibility_scope_id,
+                                "scan_started_at": datetime.now().isoformat(timespec="microseconds"),
+                            }
+                        )[:16]
                         shared_public_memory_producer_id = (
                             f"{cve_id}:"
-                            f"{stable_data_hash({
-                                'visibility_scope_id': shared_public_memory_visibility_scope_id,
-                                'scan_started_at': datetime.now().isoformat(timespec='microseconds'),
-                            })[:16]}"
+                            f"{shared_public_memory_producer_key}"
                         )
                         shared_public_memory_manager = (
                             SharedPublicMemoryManager(

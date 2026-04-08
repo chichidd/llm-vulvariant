@@ -519,7 +519,8 @@ def _run_selected_target_scans(
         return {
             "repo_name": candidate.profile_ref.repo_name,
             "commit_hash": candidate.profile_ref.commit_hash,
-            "overall_similarity": candidate.metrics.overall_sim,
+            "overall_similarity": candidate.metrics.overall_sim if candidate.metrics is not None else None,
+            "similarity_computed": candidate.metrics is not None,
             "status": task_result["status"],
             "coverage_status": task_result.get("coverage_status", "unknown"),
             "critical_scope_present": task_result.get("critical_scope_present"),

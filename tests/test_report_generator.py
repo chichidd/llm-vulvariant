@@ -15,7 +15,16 @@ def test_docker_verification_verdict_mapping():
 
     assert gen._docker_verification_verdict(None) is None
     assert gen._docker_verification_verdict({"verification_verdict": "NOT_VERIFIED"}) == "NOT_VERIFIED"
+    assert gen._docker_verification_verdict({"verification_verdict": "VERIFIED_EXPLOITABLE"}) == "VERIFIED_EXPLOITABLE"
     assert gen._docker_verification_verdict({"exploit_confirmed": True}) == "VERIFIED_EXPLOITABLE"
+    assert gen._docker_verification_verdict(
+        {
+            "exploit_confirmed": True,
+            "build_success": False,
+            "run_success": False,
+            "execution_output": "simulated exploit: would execute",
+        }
+    ) == "GENERATION_FAILED"
     assert gen._docker_verification_verdict({"run_success": True}) == "VERIFICATION_FAILED"
     assert gen._docker_verification_verdict({"build_success": True}) == "PARTIAL_VERIFICATION"
     assert gen._docker_verification_verdict({}) == "GENERATION_FAILED"
@@ -25,7 +34,10 @@ def test_extract_and_summarize_finding_verifications():
     gen = _generator()
     data = {
         "results": [
-            {"finding_id": "v1", "docker_verification": {"exploit_confirmed": True}},
+            {
+                "finding_id": "v1",
+                "docker_verification": {"verification_verdict": "VERIFIED_EXPLOITABLE", "exploit_confirmed": True},
+            },
             {"finding_id": "v2", "docker_verification": {"build_success": True}},
             {"finding_id": "v3", "docker_verification": {"run_success": True}},
             {"finding_id": "v4"},
@@ -59,6 +71,7 @@ def test_generate_ghsa_reports_filters_findings_and_embeds_docker_section():
                 "source_analysis": {"attack_path": ["a", "b"], "sources_found": []},
                 "sink_analysis": {"sink_type": "command", "confirmed": True},
                 "docker_verification": {
+                    "verification_verdict": "VERIFIED_EXPLOITABLE",
                     "exploit_confirmed": True,
                     "execution_output": "VULNERABILITY_CONFIRMED",
                     "poc_script_path": "/tmp/poc.py",
@@ -137,6 +150,7 @@ def test_generate_full_report_contains_docker_summary_and_findings_sections():
                     "confidence": "high",
                 },
                 "docker_verification": {
+                    "verification_verdict": "VERIFIED_EXPLOITABLE",
                     "exploit_confirmed": True,
                     "execution_output": "VULNERABILITY_CONFIRMED",
                 },
@@ -150,6 +164,73 @@ def test_generate_full_report_contains_docker_summary_and_findings_sections():
     assert "Exploitable Vulnerabilities" in report
     assert "Finding 1" in report
     assert "VERIFIED_EXPLOITABLE" in report
+
+
+def test_generate_full_report_does_not_treat_bare_exploit_confirmed_as_verified():
+    gen = _generator()
+    data = {
+        "summary": {
+            "exploitable": 1,
+            "conditionally_exploitable": 0,
+            "library_risk": 0,
+            "not_exploitable": 0,
+        },
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "source_analysis": {"attack_path": ["entry", "sink"]},
+                "original_finding": {
+                    "file_path": "src/app.py",
+                    "vulnerability_type": "deserialization",
+                    "description": "Unsafe load",
+                    "confidence": "high",
+                },
+                "docker_verification": {
+                    "exploit_confirmed": True,
+                    "execution_output": "VULNERABILITY_CONFIRMED\nEXPLOIT_FAILED: simulated",
+                },
+            }
+        ],
+    }
+
+    report = gen.generate_full_report(data, cve_id="CVE-2025-0001")
+
+    assert "**Docker Verification**: GENERATION_FAILED" in report
+    assert "Exploitation confirmed via automated Docker PoC execution" not in report
+
+
+def test_generate_full_report_treats_legacy_confirmed_payload_as_verified():
+    gen = _generator()
+    data = {
+        "summary": {
+            "exploitable": 1,
+            "conditionally_exploitable": 0,
+            "library_risk": 0,
+            "not_exploitable": 0,
+        },
+        "results": [
+            {
+                "finding_id": "vuln_001",
+                "verdict": "EXPLOITABLE",
+                "source_analysis": {"attack_path": ["entry", "sink"]},
+                "original_finding": {
+                    "file_path": "src/app.py",
+                    "vulnerability_type": "deserialization",
+                    "description": "Unsafe load",
+                    "confidence": "high",
+                },
+                "docker_verification": {
+                    "exploit_confirmed": True,
+                },
+            }
+        ],
+    }
+
+    report = gen.generate_full_report(data, cve_id="CVE-2025-0001")
+
+    assert "**Docker Verification**: VERIFIED_EXPLOITABLE" in report
+    assert "Exploitation confirmed via automated Docker PoC execution" in report
 
 
 def test_generate_full_report_only_exploitable_hides_conditional_sections():

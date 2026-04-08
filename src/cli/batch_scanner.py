@@ -17,9 +17,12 @@ from scanner.agent import load_software_profile, load_vulnerability_profile
 from scanner.similarity.embedding import DEFAULT_EMBEDDING_MODEL_NAME
 from scanner.similarity import (
     ProfileRef,
+    ProfileSimilarityMetrics,
     SimilarProfileCandidate,
     build_text_retriever,
     compute_profile_similarity,
+    load_all_software_profiles,
+    resolve_profile_commit,
 )
 from utils.concurrency import RepoPathLockManager, run_thread_pool_tasks
 from utils.git_utils import (
@@ -254,6 +257,14 @@ def parse_args() -> argparse.Namespace:
         "--include-same-repo",
         action="store_true",
         help="Include same repository as source vulnerability during target selection",
+    )
+    parser.add_argument(
+        "--scan-all-profiled-targets",
+        action="store_true",
+        help=(
+            "Scan every target repository that already has a usable latest software profile, "
+            "bypassing similarity ranking and threshold selection."
+        ),
     )
     parser.add_argument(
         "--similarity-model-name",
@@ -608,7 +619,8 @@ def _run_target_scan_task(
         "task_id": task_id,
         "repo_name": target.profile_ref.repo_name,
         "commit_hash": target.profile_ref.commit_hash,
-        "overall_similarity": target.metrics.overall_sim,
+        "overall_similarity": target.metrics.overall_sim if target.metrics is not None else None,
+        "similarity_computed": target.metrics is not None,
         "status": scan_status,
         "coverage_status": saved_quality.get("coverage_status", "unknown"),
         "critical_scope_present": saved_quality.get("critical_scope_present"),
@@ -942,6 +954,90 @@ def _discover_latest_repo_refs(
     return refs
 
 
+def _discover_existing_profiled_repo_refs(
+    *,
+    repos_root: Path,
+    repo_profiles_dir: Path,
+) -> Dict[str, ProfileRef]:
+    """Load the latest parseable persisted target software profile for each repo.
+
+    This mode trusts already-generated target profiles and does not regenerate or
+    validate them against the live repo checkout. Repos without a persisted profile
+    are skipped.
+    """
+    loaded_refs = load_all_software_profiles(repo_profiles_dir)
+    refs_by_repo: Dict[str, List[ProfileRef]] = {}
+    for ref in loaded_refs:
+        refs_by_repo.setdefault(ref.repo_name, []).append(ref)
+
+    selected_refs: Dict[str, ProfileRef] = {}
+    for repo_dir in sorted(repos_root.iterdir()):
+        if not repo_dir.is_dir():
+            continue
+        repo_name = repo_dir.name
+        repo_refs = refs_by_repo.get(repo_name, [])
+        if not repo_refs:
+            resolved_commit = resolve_profile_commit(repo_profiles_dir, repo_name)
+            if resolved_commit:
+                reloaded_profile = load_software_profile(
+                    repo_name,
+                    resolved_commit,
+                    base_dir=repo_profiles_dir,
+                )
+                if reloaded_profile is not None:
+                    selected_refs[repo_name] = ProfileRef(
+                        repo_name=repo_name,
+                        commit_hash=resolved_commit,
+                        profile=reloaded_profile,
+                        profile_path=repo_profiles_dir / repo_name / resolved_commit / "software_profile.json",
+                    )
+                    continue
+            logger.warning("Skip repo without persisted software profile: %s", repo_name)
+            continue
+        latest_ref: Optional[ProfileRef] = None
+        latest_key: Tuple[int, str] = (-1, "")
+        for ref in repo_refs:
+            try:
+                mtime_ns = ref.profile_path.stat().st_mtime_ns if ref.profile_path else -1
+            except OSError:
+                mtime_ns = -1
+            candidate_key = (mtime_ns, ref.commit_hash)
+            if latest_ref is None or candidate_key > latest_key:
+                latest_ref = ref
+                latest_key = candidate_key
+        resolved_commit = resolve_profile_commit(repo_profiles_dir, repo_name)
+        if resolved_commit and (latest_ref is None or resolved_commit != latest_ref.commit_hash):
+            reloaded_profile = load_software_profile(
+                repo_name,
+                resolved_commit,
+                base_dir=repo_profiles_dir,
+            )
+            if reloaded_profile is not None:
+                selected_refs[repo_name] = ProfileRef(
+                    repo_name=repo_name,
+                    commit_hash=resolved_commit,
+                    profile=reloaded_profile,
+                    profile_path=repo_profiles_dir / repo_name / resolved_commit / "software_profile.json",
+                )
+                continue
+        if latest_ref is not None:
+            reloaded_profile = load_software_profile(
+                latest_ref.repo_name,
+                latest_ref.commit_hash,
+                base_dir=repo_profiles_dir,
+            )
+            if reloaded_profile is not None:
+                selected_refs[repo_name] = ProfileRef(
+                    repo_name=latest_ref.repo_name,
+                    commit_hash=latest_ref.commit_hash,
+                    profile=reloaded_profile,
+                    profile_path=latest_ref.profile_path,
+                )
+            else:
+                selected_refs[repo_name] = latest_ref
+    return selected_refs
+
+
 def _rank_similar_candidates(
     *,
     source_ref: ProfileRef,
@@ -949,13 +1045,20 @@ def _rank_similar_candidates(
     text_retriever,
 ) -> List[SimilarProfileCandidate]:
     ranked: List[SimilarProfileCandidate] = []
-    for candidate in candidate_refs:
+    total_candidates = len(candidate_refs)
+    for index, candidate in enumerate(candidate_refs, start=1):
         metrics = compute_profile_similarity(
             source_profile=source_ref.profile,
             target_profile=candidate.profile,
             text_retriever=text_retriever,
         )
         ranked.append(SimilarProfileCandidate(profile_ref=candidate, metrics=metrics))
+        if total_candidates > 10 and (index % 10 == 0 or index == total_candidates):
+            logger.info(
+                "Similarity ranking progress: %s/%s candidates processed",
+                index,
+                total_candidates,
+            )
 
     ranked.sort(
         key=lambda item: (
@@ -1017,23 +1120,34 @@ def main() -> int:
     logger.info(f"Loaded {len(entries)} vulnerabilities from {paths.vuln_json}")
     logger.info("Batch run ID: %s", args.run_id)
     profile_llm = create_profile_llm_client(args.llm_provider, args.llm_name)
-    text_retriever = build_text_retriever(
-        model_name=args.similarity_model_name,
-        device=args.similarity_device,
-    )
+    scan_all_profiled_targets = bool(getattr(args, "scan_all_profiled_targets", False))
+    text_retriever = None
+    if not scan_all_profiled_targets:
+        text_retriever = build_text_retriever(
+            model_name=args.similarity_model_name,
+            device=args.similarity_device,
+        )
 
     caches = _initialize_profile_caches(paths)
 
-    logger.info("Ensuring latest software profiles for candidate repositories...")
-    latest_repo_refs = _discover_latest_repo_refs(
-        repos_root=paths.target_repos_root,
-        repo_profiles_dir=paths.target_repo_profiles_dir,
-        llm_client=profile_llm,
-        force_regenerate_profiles=args.force_regenerate_profiles,
-        software_cache=caches.target_software_cache,
-        regenerated_software_keys=caches.regenerated_target_software_keys,
-    )
-    logger.info(f"Candidate repositories with latest profiles: {len(latest_repo_refs)}")
+    if scan_all_profiled_targets:
+        logger.info("Loading persisted software profiles for all target repositories...")
+        latest_repo_refs = _discover_existing_profiled_repo_refs(
+            repos_root=paths.target_repos_root,
+            repo_profiles_dir=paths.target_repo_profiles_dir,
+        )
+        logger.info("Target repositories with persisted profiles: %s", len(latest_repo_refs))
+    else:
+        logger.info("Ensuring latest software profiles for candidate repositories...")
+        latest_repo_refs = _discover_latest_repo_refs(
+            repos_root=paths.target_repos_root,
+            repo_profiles_dir=paths.target_repo_profiles_dir,
+            llm_client=profile_llm,
+            force_regenerate_profiles=args.force_regenerate_profiles,
+            software_cache=caches.target_software_cache,
+            regenerated_software_keys=caches.regenerated_target_software_keys,
+        )
+        logger.info(f"Candidate repositories with latest profiles: {len(latest_repo_refs)}")
     scan_workers = _resolve_scan_workers(args)
     scan_task_lock_manager = RepoPathLockManager()
 
@@ -1119,44 +1233,71 @@ def main() -> int:
                 for ref in candidate_refs
                 if ref.repo_name != source_ref.repo_name
             ]
-        ranked_candidates = _rank_similar_candidates(
-            source_ref=source_ref,
-            candidate_refs=candidate_refs,
-            text_retriever=text_retriever,
-        )
-        logger.info(f"[Vuln {vuln_index}] Similarity details ({len(ranked_candidates)} candidates):")
-        for i, candidate in enumerate(ranked_candidates, 1):
-            metrics = candidate.metrics
-            threshold_flag = "PASS" if metrics.overall_sim >= args.similarity_threshold else "BELOW"
+        fallback_used = False
+        selection_mode = "all_profiled" if scan_all_profiled_targets else "threshold"
+        if scan_all_profiled_targets:
+            similar_targets = [
+                SimilarProfileCandidate(
+                    profile_ref=ref,
+                    metrics=None,
+                )
+                for ref in candidate_refs
+            ]
             logger.info(
-                f"  {i}. {candidate.profile_ref.label} "
-                f"overall={metrics.overall_sim:.4f} [{threshold_flag}] "
-                f"(desc={metrics.description_sim:.4f}, apps={metrics.target_application_sim:.4f}, "
-                f"users={metrics.target_user_sim:.4f}, module={metrics.module_jaccard_sim:.4f}, "
-                f"dep/import={metrics.module_dependency_import_sim:.4f})"
+                "[Vuln %s] Selected all profiled targets: %s repositories",
+                vuln_index,
+                len(similar_targets),
             )
-        similar_targets, fallback_used = _select_similar_targets(
-            ranked_candidates=ranked_candidates,
-            similarity_threshold=args.similarity_threshold,
-            max_targets=args.max_targets,
-            fallback_top_n=args.fallback_top_n,
-        )
+        else:
+            logger.info(
+                "[Vuln %s] Ranking similarity against %s candidate repositories",
+                vuln_index,
+                len(candidate_refs),
+            )
+            ranked_candidates = _rank_similar_candidates(
+                source_ref=source_ref,
+                candidate_refs=candidate_refs,
+                text_retriever=text_retriever,
+            )
+            logger.info(
+                "[Vuln %s] Similarity ranking completed for %s candidate repositories",
+                vuln_index,
+                len(ranked_candidates),
+            )
+            logger.info(f"[Vuln {vuln_index}] Similarity details ({len(ranked_candidates)} candidates):")
+            for i, candidate in enumerate(ranked_candidates, 1):
+                metrics = candidate.metrics
+                threshold_flag = "PASS" if metrics.overall_sim >= args.similarity_threshold else "BELOW"
+                logger.info(
+                    f"  {i}. {candidate.profile_ref.label} "
+                    f"overall={metrics.overall_sim:.4f} [{threshold_flag}] "
+                    f"(desc={metrics.description_sim:.4f}, apps={metrics.target_application_sim:.4f}, "
+                    f"users={metrics.target_user_sim:.4f}, module={metrics.module_jaccard_sim:.4f}, "
+                    f"dep/import={metrics.module_dependency_import_sim:.4f})"
+                )
+            similar_targets, fallback_used = _select_similar_targets(
+                ranked_candidates=ranked_candidates,
+                similarity_threshold=args.similarity_threshold,
+                max_targets=args.max_targets,
+                fallback_top_n=args.fallback_top_n,
+            )
+            selection_mode = "fallback_top_n" if fallback_used else "threshold"
 
-        logger.info(
-            f"[Vuln {vuln_index}] Selected {len(similar_targets)} targets "
-            f"(threshold={args.similarity_threshold:.3f})"
-        )
-        if fallback_used:
-            logger.warning(
-                f"[Vuln {vuln_index}] No target reached threshold {args.similarity_threshold:.3f}; "
-                f"fallback to top-{args.fallback_top_n}"
-            )
-        for i, candidate in enumerate(similar_targets, 1):
             logger.info(
-                f"  {i}. {candidate.profile_ref.label} overall={candidate.metrics.overall_sim:.4f} "
-                f"(module={candidate.metrics.module_jaccard_sim:.4f}, "
-                f"dep/import={candidate.metrics.module_dependency_import_sim:.4f})"
+                f"[Vuln {vuln_index}] Selected {len(similar_targets)} targets "
+                f"(threshold={args.similarity_threshold:.3f})"
             )
+            if fallback_used:
+                logger.warning(
+                    f"[Vuln {vuln_index}] No target reached threshold {args.similarity_threshold:.3f}; "
+                    f"fallback to top-{args.fallback_top_n}"
+                )
+            for i, candidate in enumerate(similar_targets, 1):
+                logger.info(
+                    f"  {i}. {candidate.profile_ref.label} overall={candidate.metrics.overall_sim:.4f} "
+                    f"(module={candidate.metrics.module_jaccard_sim:.4f}, "
+                    f"dep/import={candidate.metrics.module_dependency_import_sim:.4f})"
+                )
 
         deduplicated_targets: List[SimilarProfileCandidate] = []
         seen_scan_task_ids: Set[str] = set()
@@ -1172,7 +1313,7 @@ def main() -> int:
             "repo_name": repo_name,
             "commit_hash": commit_hash,
             "cve_id": cve_id,
-            "selection_mode": "fallback_top_n" if fallback_used else "threshold",
+            "selection_mode": selection_mode,
             "selected_targets": [candidate.to_dict() for candidate in deduplicated_targets],
             "scan_results": [],
         }
@@ -1230,7 +1371,11 @@ def main() -> int:
                 {
                     "repo_name": payload.get("repo_name", ""),
                     "commit_hash": payload.get("commit_hash", ""),
-                    "overall_similarity": payload.get("overall_similarity", 0.0),
+                    "overall_similarity": payload.get("overall_similarity"),
+                    "similarity_computed": payload.get(
+                        "similarity_computed",
+                        payload.get("overall_similarity") is not None,
+                    ),
                     "status": scan_status,
                     "coverage_status": coverage_status,
                     "critical_scope_present": payload.get("critical_scope_present"),

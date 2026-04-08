@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import _path_config
+from scanner.checker.threat_model_guardrails import (
+    apply_threat_model_guardrails,
+    extract_threat_model_facts,
+)
 from utils.claude_cli import (
     DEFAULT_SELECTED_MODEL_HINT,
     apply_claude_cli_usage_counters,
@@ -50,6 +54,21 @@ STRUCTURED_ANALYSIS_LIST_FIELDS = (
     "dynamic_plan",
     "open_questions",
 )
+VALID_DOCKER_VERIFICATION_VERDICTS = {
+    "VERIFIED_EXPLOITABLE",
+    "PARTIAL_VERIFICATION",
+    "VERIFICATION_FAILED",
+    "NOT_VERIFIED",
+    "GENERATION_FAILED",
+}
+SIMULATED_POC_PATTERNS = (
+    r"\bsimulated exploit\b",
+    r"\bsimplified poc\b",
+    r"\bsimple exploit demonstration\b",
+    r"\bwould be executed\b",
+    r"\bwould execute\b",
+    r"\btesting with:\s*echo\b",
+)
 EXPLOITABILITY_OUTPUT_STATE_MISSING = "missing"
 EXPLOITABILITY_OUTPUT_STATE_INVALID = "invalid"
 EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS = "in_progress"
@@ -65,6 +84,15 @@ def normalize_exploitability_verdict(verdict: Any) -> str:
         return ""
     normalized = re.sub(r"[\s-]+", "_", verdict.strip().upper())
     return re.sub(r"_+", "_", normalized)
+
+
+def normalize_docker_verification_verdict(verdict: Any) -> str:
+    """Normalize docker verification verdict text into the persisted enum format."""
+    if not isinstance(verdict, str):
+        return ""
+    normalized = re.sub(r"[\s-]+", "_", verdict.strip().upper())
+    normalized = re.sub(r"_+", "_", normalized)
+    return normalized if normalized in VALID_DOCKER_VERIFICATION_VERDICTS else ""
 
 
 def order_findings_stably(vulnerabilities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -321,7 +349,14 @@ class SkillExploitabilityChecker:
             normalized[field] = cls._normalize_analysis_list(normalized.get(field))
 
         docker_verification = normalized.get("docker_verification")
-        normalized["docker_verification"] = docker_verification if isinstance(docker_verification, dict) else None
+        if isinstance(docker_verification, dict):
+            normalized_docker_verification = dict(docker_verification)
+            normalized_docker_verification["verification_verdict"] = normalize_docker_verification_verdict(
+                normalized_docker_verification.get("verification_verdict")
+            )
+            normalized["docker_verification"] = normalized_docker_verification
+        else:
+            normalized["docker_verification"] = None
         return normalized
 
     @staticmethod
@@ -635,7 +670,8 @@ class SkillExploitabilityChecker:
             evidence_dir=evidence_dir,
             commit_hash=commit_hash,
         )
-
+        analysis = self._normalize_analysis_contract(analysis) or analysis
+        analysis = self._apply_threat_model_guardrails(analysis, vuln)
         return self._normalize_analysis_contract(analysis) or analysis
 
     def _build_prompt(
@@ -700,6 +736,12 @@ class SkillExploitabilityChecker:
             f"COMMIT_HASH: {commit_hash}" if commit_hash else "COMMIT_HASH: HEAD",
             f"REPO_PATH: {repo_path.resolve()}",
             f"EVIDENCE_DIR: {evidence_dir.resolve() if evidence_dir else str(repo_path.resolve() / 'evidence')}",
+            "Treat trusted-local-only config/example/test inputs conservatively; prefer LIBRARY_RISK or NOT_EXPLOITABLE",
+            "unless the code clearly exposes them as a supported attacker-controlled product workflow.",
+            "Do not count simulated, simplified, source-reading, or echo-only PoCs as verified exploitation.",
+            "If output contains EXPLOIT_FAILED, the verification must not be marked as verified.",
+            "Only treat Docker verification as VERIFIED_EXPLOITABLE when the PoC reaches the original repository",
+            "entrypoint and real sink for this finding.",
             "If Docker verification needs provider credentials, forward the host environment into the container with",
             "`docker run -e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY ...` so Docker copies the current values.",
             "Do not leave `<API_KEY>` placeholders in the command.",
@@ -715,9 +757,28 @@ class SkillExploitabilityChecker:
     def _prepare_result_json_path(self, result_json_path: Path) -> None:
         """Prepare result file path and clear stale output from previous attempts."""
         try:
-            result_json_path.parent.mkdir(parents=True, exist_ok=True)
-            if result_json_path.exists():
-                result_json_path.unlink()
+            evidence_dir = result_json_path.parent
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            stale_artifact_names = (
+                result_json_path.name,
+                "result.json",
+                "docker_build.log",
+                "execution_output.txt",
+                "Dockerfile.exploit",
+                "claude_cli_invocation.json",
+                "exploit.py",
+                "exploit_simple.py",
+                "exploit.go",
+                "exploit.c",
+                "Exploit.java",
+                "exploit.js",
+                "exploit.rb",
+                "exploit.rs",
+            )
+            for artifact_name in stale_artifact_names:
+                artifact_path = evidence_dir / artifact_name
+                if artifact_path.exists():
+                    artifact_path.unlink()
         except Exception as exc:  # pylint: disable=broad-except
             raise RuntimeError(
                 f"Failed to prepare result file {result_json_path}: {exc}"
@@ -877,22 +938,85 @@ class SkillExploitabilityChecker:
         if isinstance(existing, dict):
             # Keep Claude-provided structured result, but fill any empty fields
             # from filesystem evidence for better resilience.
+            evidence_verdict = normalize_docker_verification_verdict(evidence.get("verification_verdict"))
             for key, value in evidence.items():
-                if key not in existing or existing.get(key) is None:
+                existing_value = existing.get(key)
+                if (
+                    key not in existing
+                    or existing_value is None
+                    or existing_value == ""
+                    or (
+                        key == "verification_verdict"
+                        and not normalize_docker_verification_verdict(existing_value)
+                    )
+                ):
                     existing[key] = value
+            if evidence_verdict:
+                for key in (
+                    "build_success",
+                    "run_success",
+                    "exploit_confirmed",
+                    "verification_verdict",
+                    "execution_output",
+                    "error",
+                ):
+                    existing[key] = evidence.get(key)
             analysis["docker_verification"] = existing
         else:
             analysis["docker_verification"] = evidence
 
-        # If Claude failed to return structured JSON but evidence shows exploit
-        # confirmation, upgrade UNKNOWN/ERROR to EXPLOITABLE.
-        verdict = normalize_exploitability_verdict(analysis.get("verdict"))
-        if verdict in {"", "UNKNOWN", "ERROR"}:
-            if analysis["docker_verification"].get("exploit_confirmed"):
-                analysis["verdict"] = "EXPLOITABLE"
-                analysis["confidence"] = analysis.get("confidence") or "high"
+        docker_verification = analysis.get("docker_verification")
+        docker_verdict = (
+            normalize_docker_verification_verdict(docker_verification.get("verification_verdict"))
+            if isinstance(docker_verification, dict)
+            else ""
+        )
+        if (
+            docker_verdict == "VERIFIED_EXPLOITABLE"
+            and normalize_exploitability_verdict(analysis.get("verdict")) in RETRYABLE_RESULT_VERDICTS
+        ):
+            analysis["verdict"] = "EXPLOITABLE"
+            if not str(analysis.get("confidence") or "").strip():
+                analysis["confidence"] = "high"
 
         return analysis
+
+    @classmethod
+    def _apply_threat_model_guardrails(
+        cls,
+        analysis: Dict[str, Any],
+        vuln: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Downgrade findings that only fit developer-local workflows."""
+        verdict = normalize_exploitability_verdict(analysis.get("verdict"))
+        if verdict != "EXPLOITABLE":
+            return analysis
+        return apply_threat_model_guardrails(analysis, vuln)
+
+    @staticmethod
+    def _load_structured_docker_verification(evidence_dir: Path) -> Optional[Dict[str, Any]]:
+        """Load docker_verification from structured verifier outputs when available."""
+        for candidate in ("analysis_output.json", "result.json"):
+            path = evidence_dir / candidate
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            docker_verification = payload.get("docker_verification")
+            if isinstance(docker_verification, dict):
+                return dict(docker_verification)
+        return None
+
+    @staticmethod
+    def _contains_simulated_poc_markers(text: str) -> bool:
+        """Return whether runtime output indicates a simulated/non-runtime PoC."""
+        if not text:
+            return False
+        return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in SIMULATED_POC_PATTERNS)
 
     def _build_docker_verification_from_evidence(
         self,
@@ -906,6 +1030,7 @@ class SkillExploitabilityChecker:
         dockerfile = evidence_dir / "Dockerfile.exploit"
         build_log = evidence_dir / "docker_build.log"
         exec_out = evidence_dir / "execution_output.txt"
+        structured_docker_verification = self._load_structured_docker_verification(evidence_dir)
 
         poc_candidates = [
             evidence_dir / "exploit.py",
@@ -919,7 +1044,18 @@ class SkillExploitabilityChecker:
         ]
         poc_path = next((p for p in poc_candidates if p.exists()), None)
 
-        has_activity = dockerfile.exists() or build_log.exists() or exec_out.exists() or (poc_path is not None)
+        real_activity = (
+            dockerfile.exists()
+            or build_log.exists()
+            or exec_out.exists()
+            or (poc_path is not None)
+        )
+        structured_enabled = True
+        if structured_docker_verification is not None and "enabled" in structured_docker_verification:
+            structured_enabled = bool(structured_docker_verification.get("enabled"))
+        has_activity = real_activity or (
+            structured_docker_verification is not None and structured_enabled
+        )
         if not has_activity:
             return None
 
@@ -936,17 +1072,34 @@ class SkillExploitabilityChecker:
                 run_text = exec_out.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 run_text = ""
+        elif structured_docker_verification:
+            run_text = str(structured_docker_verification.get("execution_output") or "")
 
         build_success = False
         if build_text:
             build_success = bool(
                 re.search(r"writing image sha256:|naming to docker\.io/library/", build_text, flags=re.IGNORECASE)
             )
+        elif structured_docker_verification:
+            build_success = bool(structured_docker_verification.get("build_success"))
 
         # If execution output exists, docker run likely started. Keep it robust
         # even when PoC itself reports EXPLOIT_FAILED.
         run_success = exec_out.exists()
+        if not run_success and structured_docker_verification:
+            run_success = bool(structured_docker_verification.get("run_success"))
         exploit_confirmed = bool(re.search(r"VULNERABILITY_CONFIRMED", run_text))
+        explicit_verdict = normalize_docker_verification_verdict(
+            structured_docker_verification.get("verification_verdict")
+            if structured_docker_verification
+            else None
+        )
+        if not exploit_confirmed and structured_docker_verification:
+            exploit_confirmed = bool(structured_docker_verification.get("exploit_confirmed"))
+        failure_marker_found = bool(re.search(r"\bEXPLOIT_FAILED\b", run_text))
+        simulated_marker_found = self._contains_simulated_poc_markers(run_text)
+        if failure_marker_found or simulated_marker_found:
+            exploit_confirmed = False
 
         short_hash = (commit_hash or "HEAD")[:8]
         execution_excerpt = (run_text[:2000] if run_text else "")
@@ -967,20 +1120,46 @@ class SkillExploitabilityChecker:
         if build_success and not run_success:
             error = "Docker run output not found; exploit command may not have executed."
 
-        if run_success and not exploit_confirmed:
+        if failure_marker_found:
+            error = "EXPLOIT_FAILED marker present in PoC output."
+        elif simulated_marker_found:
+            error = "PoC output indicates a simulated/non-runtime exploit demonstration."
+        elif run_success and not exploit_confirmed:
             error = error or "PoC executed but did not confirm exploitation."
 
-        return {
+        if explicit_verdict == "VERIFIED_EXPLOITABLE" and (
+            failure_marker_found or simulated_marker_found or not (build_success and run_success and exploit_confirmed)
+        ):
+            explicit_verdict = ""
+
+        if explicit_verdict and not real_activity:
+            verification_verdict = explicit_verdict
+        elif build_success and run_success and exploit_confirmed:
+            verification_verdict = "VERIFIED_EXPLOITABLE"
+        elif run_success:
+            verification_verdict = "VERIFICATION_FAILED"
+        elif build_success:
+            verification_verdict = "PARTIAL_VERIFICATION"
+        else:
+            verification_verdict = "GENERATION_FAILED"
+
+        result = {
             "enabled": True,
             "commit_hash": commit_hash or "HEAD",
             "build_success": bool(build_success),
             "run_success": bool(run_success),
             "exploit_confirmed": bool(exploit_confirmed),
+            "verification_verdict": verification_verdict,
             "execution_output": execution_excerpt or None,
             "poc_script_path": str(poc_path) if poc_path else None,
             "docker_image": f"exploit-test:{short_hash}",
             "error": error,
         }
+        if structured_docker_verification:
+            for key in ("docker_image", "poc_script_path", "error", "execution_output"):
+                if key in structured_docker_verification and not result.get(key):
+                    result[key] = structured_docker_verification[key]
+        return result
 
     def _init_or_load_results(
         self,

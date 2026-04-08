@@ -38,7 +38,12 @@ _CONTEXT_LIMIT_ERROR_PATTERNS = (
     "prompt is too long",
     "too many tokens",
     "input is too long",
+    "request entity too large",
+    "entity too large",
+    "http 413",
+    "status code: 413",
 )
+_REQUEST_SIZE_SOFT_LIMIT_BYTES = 512 * 1024
 
 
 class AgenticVulnFinder:
@@ -49,6 +54,7 @@ class AgenticVulnFinder:
         software_profile,
         vulnerability_profile,
         max_iterations: int = 300,
+        max_sub_turns: int = 64,
         stop_when_critical_complete: bool = False,
         critical_stop_mode: str = "max",
         critical_stop_max_priority: int = 2,
@@ -67,6 +73,7 @@ class AgenticVulnFinder:
         self.software_profile = software_profile
         self.vulnerability_profile = vulnerability_profile
         self.max_iterations = max_iterations
+        self.max_sub_turns = max(1, int(max_sub_turns))
         self.stop_when_critical_complete = stop_when_critical_complete
         normalized_stop_mode = (critical_stop_mode or "max").lower()
         if normalized_stop_mode not in {"min", "max"}:
@@ -287,6 +294,18 @@ class AgenticVulnFinder:
         return projected_total >= threshold or projected_total >= context_limit
 
     @staticmethod
+    def _estimate_request_size_bytes(
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+    ) -> int:
+        """Estimate serialized request size before sending it to the provider."""
+        payload = {"messages": messages, "tools": tools}
+        try:
+            return len(json.dumps(payload, ensure_ascii=False, default=make_serializable).encode("utf-8"))
+        except TypeError:
+            return len(json.dumps(make_serializable(payload), ensure_ascii=False).encode("utf-8"))
+
+    @staticmethod
     def _is_context_limit_error(exc: Exception) -> bool:
         message = str(exc).lower()
         return any(pattern in message for pattern in _CONTEXT_LIMIT_ERROR_PATTERNS)
@@ -315,6 +334,14 @@ class AgenticVulnFinder:
                 if isinstance(tool_definition, dict) and isinstance(tool_definition.get("function"), dict)
             }
             llm_provider = getattr(getattr(self.llm_client, "config", None), "provider", None)
+            request_size_bytes = self._estimate_request_size_bytes(messages, tools)
+            if request_size_bytes >= _REQUEST_SIZE_SOFT_LIMIT_BYTES:
+                logger.warning(
+                    "Estimated request body too large (%s bytes); ending current turn before provider call",
+                    request_size_bytes,
+                )
+                self._commit_messages(messages)
+                return sub_turn
             try:
                 message = self.llm_client.chat(
                     messages,
@@ -469,6 +496,13 @@ class AgenticVulnFinder:
                     logger.info(
                         "Stopping current turn because the last successful request is already near the model context limit"
                     )
+                self._commit_messages(messages)
+                return sub_turn
+            if sub_turn >= self.max_sub_turns:
+                logger.warning(
+                    "Stopping current turn after reaching max_sub_turns=%s",
+                    self.max_sub_turns,
+                )
                 self._commit_messages(messages)
                 return sub_turn
             sub_turn += 1

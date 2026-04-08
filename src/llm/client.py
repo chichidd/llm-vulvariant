@@ -310,6 +310,10 @@ class LLMRetryExhaustedError(Exception):
         self.last_error = last_error
 
 
+class LLMNoResultError(Exception):
+    """Raised when a provider returns no usable response payload."""
+
+
 class BaseLLMClient(ABC):
     """Base class for LLM clients."""
     
@@ -455,6 +459,14 @@ class BaseLLMClient(ABC):
         except ImportError:
             pass
         
+        # Preserve parser/validation failures as non-retriable even when their
+        # messages include retry-like words such as "timeout".
+        if isinstance(exception, (TypeError, ValueError)):
+            return False
+
+        if self._is_no_result_error(exception):
+            return True
+
         # Generic network errors
         import socket
         if isinstance(exception, (ConnectionError, TimeoutError, socket.timeout)):
@@ -466,11 +478,6 @@ class BaseLLMClient(ABC):
         exception_name = type(exception).__name__
         if status_code is None and exception_name in {"APIConnectionError", "APITimeoutError"}:
             return True
-
-        # Preserve parser/validation failures as non-retriable even when their
-        # messages include retry-like words such as "timeout".
-        if isinstance(exception, (TypeError, ValueError)):
-            return False
 
         error_msg = str(exception).lower()
         retriable_keywords = [
@@ -506,13 +513,41 @@ class BaseLLMClient(ABC):
     def _get_normalized_fallback_provider(self) -> str:
         return str(self.config.fallback_provider or "").strip().lower()
 
-    def _should_use_provider_fallback(self, exception: Exception) -> bool:
+    def _is_no_result_error(self, exception: Exception) -> bool:
+        return isinstance(exception, LLMNoResultError)
+
+    def _should_use_provider_fallback(self, exception: Exception, *, retries_exhausted: bool) -> bool:
         return (
             self.config.provider == "lab"
-            and bool(self.config.fallback_on_retry_exhausted)
+            and retries_exhausted
             and self._get_normalized_fallback_provider() == "deepseek"
+            and bool(self.config.fallback_on_retry_exhausted)
             and self._should_retry(exception)
         )
+
+    def _extract_chat_message(self, response: Any) -> Any:
+        choices = getattr(response, "choices", None)
+        if choices is None and isinstance(response, dict):
+            choices = response.get("choices")
+        if not choices:
+            raise LLMNoResultError("LLM response contained no choices")
+
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        if message is None and isinstance(first_choice, dict):
+            message = first_choice.get("message")
+        if message is None:
+            raise LLMNoResultError("LLM response contained no message")
+
+        if isinstance(message, dict):
+            content = message.get("content")
+            tool_calls = message.get("tool_calls")
+        else:
+            content = getattr(message, "content", None)
+            tool_calls = getattr(message, "tool_calls", None)
+        if (content is None or content == "") and not tool_calls:
+            raise LLMNoResultError("LLM response contained no content or tool calls")
+        return message
 
     def _execute_with_provider_fallback(
         self,
@@ -646,7 +681,7 @@ class BaseLLMClient(ABC):
                     error_summary = self.get_last_usage_summary()
                     error_summary["is_error"] = True
                 self._set_last_usage_summary(error_summary)
-                
+
                 # Decide whether to retry
                 if not self._should_retry(e):
                     logger.error(f"!!!!\n\n\nNon-retriable error occurred: {type(e).__name__}: {e}\n\n\n!!!!\n\n\n")
@@ -665,7 +700,10 @@ class BaseLLMClient(ABC):
                         f"LLM API error (attempt {attempt + 1}/{self.max_retries}): "
                         f"{type(e).__name__}: {e}. No more retries."
                     )
-                    if request_name and self._should_use_provider_fallback(e):
+                    if request_name and self._should_use_provider_fallback(
+                        e,
+                        retries_exhausted=True,
+                    ):
                         return self._execute_with_provider_fallback(
                             request_name,
                             *args,
@@ -734,7 +772,7 @@ class OpenAIClient(BaseLLMClient):
                 provider=self.config.provider,
             )
         )
-        return response.choices[0].message
+        return self._extract_chat_message(response)
     
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
         """Send a chat request (with retry logic)."""
@@ -811,8 +849,7 @@ class DeepSeekClient(BaseLLMClient):
                 provider=self.config.provider,
             )
         )
-
-        return response.choices[0].message
+        return self._extract_chat_message(response)
 
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
         """Send a chat request (with retry logic).

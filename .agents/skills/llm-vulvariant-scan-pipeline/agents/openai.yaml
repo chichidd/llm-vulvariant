@@ -1,4 +1,0 @@
-interface:
-  display_name: "LLM-VulVariant Scan Pipeline"
-  short_description: "Run and validate full batch vuln scans"
-  default_prompt: "Execute or verify llm-vulvariant batch scanning from vuln.json and repos."

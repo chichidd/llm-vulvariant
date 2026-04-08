@@ -82,14 +82,15 @@ class SimilarProfileCandidate:
     """A candidate target profile with similarity metrics."""
 
     profile_ref: ProfileRef
-    metrics: ProfileSimilarityMetrics
+    metrics: Optional[ProfileSimilarityMetrics]
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "repo_name": self.profile_ref.repo_name,
             "commit_hash": self.profile_ref.commit_hash,
             "label": self.profile_ref.label,
-            "metrics": self.metrics.to_dict(),
+            "similarity_computed": self.metrics is not None,
+            "metrics": self.metrics.to_dict() if self.metrics is not None else None,
         }
 
 

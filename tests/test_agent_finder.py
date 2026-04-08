@@ -569,6 +569,12 @@ class _ToolAwareToolkit:
         return SimpleNamespace(success=True, content=json.dumps(parameters), error=None)
 
 
+class _LargeToolAwareToolkit(_ToolAwareToolkit):
+    def execute_tool(self, tool_name, parameters):
+        self.executed.append((tool_name, parameters))
+        return SimpleNamespace(success=True, content="X" * (600 * 1024), error=None)
+
+
 class _UsageDrivenLLM:
     def __init__(self, responses, input_tokens, *, context_limit=4096, max_tokens=256):
         self._responses = list(responses)
@@ -914,6 +920,78 @@ def test_run_turn_commits_progress_when_next_request_hits_context_limit(monkeypa
     assert finder.toolkit.executed == [("mock_tool", {})]
     assert finder.conversation_history[-2].content == "need tool"
     assert finder.conversation_history[-1]["role"] == "tool"
+
+
+def test_run_turn_stops_before_second_request_when_serialized_payload_is_too_large(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    monkeypatch.setattr(finder_module, "_REQUEST_SIZE_SOFT_LIMIT_BYTES", 8 * 1024)
+    finder.max_tokens = 256
+    finder.llm_client = _UsageDrivenLLM(
+        responses=[
+            SimpleNamespace(
+                content="need tool",
+                reasoning_content=None,
+                tool_calls=[_tool_call()],
+            ),
+            SimpleNamespace(
+                content="done",
+                reasoning_content=None,
+                tool_calls=None,
+            ),
+        ],
+        input_tokens=[1200, 100],
+        context_limit=65536,
+        max_tokens=256,
+    )
+    finder.toolkit = _LargeToolAwareToolkit()
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 2
+    assert finder.llm_client.chat_calls == 1
+    assert finder.toolkit.executed == [("mock_tool", {})]
+    assert finder.conversation_history[-2].content == "need tool"
+    assert finder.conversation_history[-1]["role"] == "tool"
+
+
+def test_run_turn_stops_after_max_sub_turns(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.max_sub_turns = 3
+    finder.max_tokens = 256
+    finder.llm_client = _SequencedLLM(
+        [
+            SimpleNamespace(content="need tool", reasoning_content=None, tool_calls=[_tool_call()]),
+        ],
+        context_limit=65536,
+        max_tokens=256,
+    )
+    finder.toolkit = _ToolAwareToolkit()
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "user"},
+    ]
+
+    sub_turns = finder._run_turn(iteration=0)
+
+    assert sub_turns == 3
+    assert finder.llm_client.chat_calls == 3
+    assert finder.toolkit.executed == [
+        ("mock_tool", {}),
+        ("mock_tool", {}),
+        ("mock_tool", {}),
+    ]
+    assert finder.conversation_history[-1]["role"] == "tool"
+
+
+def test_is_context_limit_error_matches_413_entity_too_large(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+
+    assert finder._is_context_limit_error(RuntimeError("413 Request Entity Too Large"))
+    assert finder._is_context_limit_error(RuntimeError("APIStatusError: entity too large"))
 
 
 def test_run_turn_treats_empty_tool_calls_as_completed_turn(monkeypatch):

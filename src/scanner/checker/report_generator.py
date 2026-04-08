@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from scanner.checker.skill_checker import normalize_docker_verification_verdict
 from utils.language import get_run_cmd
 from utils.logger import get_logger
 
@@ -30,6 +31,38 @@ _EXPLOIT_FILES = {
     "ruby": "exploit.rb",
     "rust": "exploit.rs",
 }
+
+
+def normalize_docker_verification_payload(
+    docker_verification: Any,
+) -> Dict[str, Any]:
+    """Normalize docker_verification payloads across legacy and current schemas."""
+    if not isinstance(docker_verification, dict):
+        return {}
+
+    normalized = dict(docker_verification)
+    explicit_verdict = normalize_docker_verification_verdict(
+        normalized.get("verification_verdict")
+    )
+    if explicit_verdict:
+        normalized["verification_verdict"] = explicit_verdict
+        return normalized
+
+    execution_output = str(normalized.get("execution_output") or "")
+    execution_output_lower = execution_output.lower()
+    has_negative_signal = (
+        "exploit_failed" in execution_output_lower
+        or "simulated exploit" in execution_output_lower
+        or "would execute" in execution_output_lower
+    )
+    if (
+        normalized.get("exploit_confirmed") is True
+        and not has_negative_signal
+        and normalized.get("build_success") is not False
+        and normalized.get("run_success") is not False
+    ):
+        normalized["verification_verdict"] = "VERIFIED_EXPLOITABLE"
+    return normalized
 
 
 class ReportGenerator:
@@ -932,8 +965,8 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         verifications: Dict[str, Dict[str, Any]] = {}
         for result in exploitability_results.get("results", []):
             finding_id = result.get("finding_id")
-            docker_v = result.get("docker_verification")
-            if finding_id and isinstance(docker_v, dict):
+            docker_v = normalize_docker_verification_payload(result.get("docker_verification"))
+            if finding_id and docker_v:
                 verifications[finding_id] = docker_v
         return verifications
 
@@ -944,12 +977,13 @@ docker run --rm --network=none -v $(pwd)/poc:/poc vuln-{self.repo_name.lower()} 
         """Normalize docker verification verdict for old/new result schemas."""
         if not isinstance(docker_verification, dict):
             return None
+        docker_verification = normalize_docker_verification_payload(docker_verification)
+        if not docker_verification:
+            return "GENERATION_FAILED"
 
-        explicit_verdict = str(docker_verification.get("verification_verdict", "")).strip().upper()
+        explicit_verdict = normalize_docker_verification_verdict(docker_verification.get("verification_verdict"))
         if explicit_verdict:
             return explicit_verdict
-        if docker_verification.get("exploit_confirmed"):
-            return "VERIFIED_EXPLOITABLE"
         if docker_verification.get("run_success"):
             return "VERIFICATION_FAILED"
         if docker_verification.get("build_success"):
