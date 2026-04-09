@@ -922,9 +922,9 @@ def test_run_turn_commits_progress_when_next_request_hits_context_limit(monkeypa
     assert finder.conversation_history[-1]["role"] == "tool"
 
 
-def test_run_turn_stops_before_second_request_when_serialized_payload_is_too_large(monkeypatch):
+def test_run_turn_ignores_request_size_soft_limit_and_continues_to_second_request(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
-    monkeypatch.setattr(finder_module, "_REQUEST_SIZE_SOFT_LIMIT_BYTES", 8 * 1024)
+    monkeypatch.setattr(finder_module, "_REQUEST_SIZE_SOFT_LIMIT_BYTES", 8 * 1024, raising=False)
     finder.max_tokens = 256
     finder.llm_client = _UsageDrivenLLM(
         responses=[
@@ -952,10 +952,10 @@ def test_run_turn_stops_before_second_request_when_serialized_payload_is_too_lar
     sub_turns = finder._run_turn(iteration=0)
 
     assert sub_turns == 2
-    assert finder.llm_client.chat_calls == 1
+    assert finder.llm_client.chat_calls == 2
     assert finder.toolkit.executed == [("mock_tool", {})]
-    assert finder.conversation_history[-2].content == "need tool"
-    assert finder.conversation_history[-1]["role"] == "tool"
+    assert finder.conversation_history[-2]["role"] == "tool"
+    assert finder.conversation_history[-1].content == "done"
 
 
 def test_run_turn_stops_after_max_sub_turns(monkeypatch):
@@ -987,11 +987,11 @@ def test_run_turn_stops_after_max_sub_turns(monkeypatch):
     assert finder.conversation_history[-1]["role"] == "tool"
 
 
-def test_is_context_limit_error_matches_413_entity_too_large(monkeypatch):
+def test_is_context_limit_error_does_not_match_413_entity_too_large(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
 
-    assert finder._is_context_limit_error(RuntimeError("413 Request Entity Too Large"))
-    assert finder._is_context_limit_error(RuntimeError("APIStatusError: entity too large"))
+    assert not finder._is_context_limit_error(RuntimeError("413 Request Entity Too Large"))
+    assert not finder._is_context_limit_error(RuntimeError("APIStatusError: entity too large"))
 
 
 def test_run_turn_treats_empty_tool_calls_as_completed_turn(monkeypatch):

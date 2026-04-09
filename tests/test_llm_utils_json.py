@@ -1,3 +1,5 @@
+import logging
+
 from utils.llm_utils import extract_json_from_text, extract_json_object_matches, parse_llm_json
 
 
@@ -81,6 +83,8 @@ def test_parse_llm_json_returns_none_when_repair_remains_invalid():
     )
     assert parsed is None
     assert repair_llm.calls == 2
+
+
 
 
 def test_extract_json_from_text_skips_non_matching_objects():

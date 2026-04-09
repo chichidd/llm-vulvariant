@@ -146,7 +146,7 @@ yarn-error.log*
 repo-profiles*/
 scan-results*/
 vuln-profiles*/
-docs/
+
 
 **/*.bak
 

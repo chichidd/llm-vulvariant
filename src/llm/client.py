@@ -763,7 +763,6 @@ class OpenAIClient(BaseLLMClient):
         if tools is not None:
             request_params["tools"] = tools
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
-        
         response = self.client.chat.completions.create(**request_params)
         self._record_usage_summary(
             summarize_chat_completion_usage(
@@ -839,7 +838,6 @@ class DeepSeekClient(BaseLLMClient):
         if tools is not None:
             request_params["tools"] = tools
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
-        
         # Send request
         response = self.client.chat.completions.create(**request_params)
         self._record_usage_summary(

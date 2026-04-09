@@ -2,587 +2,125 @@
 
 LLM 驱动的漏洞变种发现与可利用性验证框架。
 
-给定一个已知漏洞（call chain + payload + commit），在相似仓库或新版本中发现同类漏洞变种，并自动完成可利用性判定与提交材料生成。
+给定一个已知漏洞条目（源仓库、提交、call chain、payload），项目会先生成软件画像与漏洞画像，再对目标仓库执行 agentic 扫描，最后输出可利用性判定、研究报告和提交材料。
 
----
+## 流水线概览
 
-## 1. 架构与流程
+| 阶段 | 输入 | 输出 | 主要命令 |
+|------|------|------|----------|
+| 1. 软件画像 | 仓库源码 + 提交版本 | `software_profile.json` | `software-profile` |
+| 2. 漏洞画像 | `vuln.json` + 软件画像 | `vulnerability_profile.json` | `vuln-profile` |
+| 3. 变种扫描 | 漏洞画像 + 目标仓库 | `agentic_vuln_findings.json` | `scanner` / `batch-scanner` |
+| 4. 可利用性验证 | 扫描结果 | `exploitability.json`、报告、聚合提交材料 | `python -m cli.exploitability` |
 
-整个流水线分为四个阶段，后一阶段依赖前一阶段的输出：
+## 开始前先看
 
-```
-                       ┌──────────────────────────────────────────────────────────┐
-                       │                  llm-vulvariant 流水线                    │
-                       └──────────────────────────────────────────────────────────┘
+先读 [docs/runtime-requirements.md](docs/runtime-requirements.md)。当前版本有几条容易漏掉的前提：
 
-  ┌───────────────┐   ┌───────────────┐   ┌──────────────────┐   ┌────────────────────┐
-  │  Stage 1      │   │  Stage 2      │   │  Stage 3         │   │  Stage 4           │
-  │  软件画像     │   │  漏洞画像     │   │  Agentic 扫描    │   │  可利用性验证      │
-  │               │   │               │   │                  │   │  + 报告生成        │
-  │  仓库 ──►     │   │ vuln.json +   │   │  漏洞画像 +      │   │  扫描发现 ──►      │
-  │  software_    │   │ 软件画像 ──►  │   │  目标仓库 ──►    │   │  exploitability    │
-  │  profile.json │   │ vuln_         │   │  agentic_vuln_   │   │  .json + report    │
-  │               │   │ profile.json  │   │  findings.json   │   │  + submission      │
-  └───────────────┘   └───────────────┘   └──────────────────┘   └────────────────────┘
-        │                    │                     │                        │
-        │              ┌─────┘                     │                        │
-        ▼              ▼                           ▼                        ▼
-  ┌──────────────────────────┐   ┌──────────────────────────────────────────────────┐
-  │  profiles/               │   │  results/                                        │
-  │  ├── soft/<repo>/<hash>/ │   │  ├── <scan-output-dir>/<cve>/<repo>-<hash12>/   │
-  │  │   └── software_       │   │  │   ├── agentic_vuln_findings.json             │
-  │  │       profile.json    │   │  │   ├── conversation_history.json              │
-  │  └── vuln/<repo>/<cve>/  │   │  │   ├── exploitability.json                    │
-  │      └── vulnerability_  │   │  │   ├── reports/security_report.md*            │
-  │          profile.json    │   │  │   └── evidence/<finding>/                    │
-  │                          │   │  └── <submission-output-dir>/<prefix>_<run-id>[_strict].* │
-  └──────────────────────────┘   └──────────────────────────────────────────────────┘
-```
+- 默认 `software-profile` 模块分析和 `python -m cli.exploitability` 都依赖本仓库自带的 `.claude/skills/*`，以及可非交互运行的 `claude -p`。
+- `python -m cli.exploitability` 会为 `EXPLOITABLE` finding 自动执行 Docker PoC；并发时 `--jobs > 1` 必须配 `--claude-runtime-mode folder`。
+- 自动目标选择不只需要 `transformers` / `sentence-transformers` / `torch`，还需要 `paths.embedding_model_path/<model_name>` 的本地模型目录真实存在。
+- `scanner`、`batch-scanner`、`exploitability` 都可能临时切换仓库 commit；目标仓库应保持为可 checkout 的 git 工作树，`exploitability` 明确要求 clean worktree。
 
-说明：
-- `reports/*.md` 仅在 `cli.exploitability --generate-report` 时生成
-- `<submission-output-dir>/<prefix>_<run-id>[_strict].*` 仅在设置 `--submission-output-dir` 时写出
-- 使用 `--report-only-exploitable` 时，聚合提交文件名会追加 `_strict`
+## 快速开始
 
-### 各阶段说明
-
-| 阶段 | 输入 | 处理 | 输出 |
-|------|------|------|------|
-| **Stage 1: 软件画像** | 仓库源码 | LLM 分析仓库描述、模块结构、依赖、数据流 | `software_profile.json` |
-| **Stage 2: 漏洞画像** | `vuln.json` + 软件画像 | LLM 提取 Source / Sink / Flow 特征、利用条件 | `vulnerability_profile.json` |
-| **Stage 3: Agentic 扫描** | 漏洞画像 + 目标仓库 | Agent 使用工具集（读文件、CodeQL、函数提取等）搜索变种 | `agentic_vuln_findings.json` |
-| **Stage 4: 可利用性验证** | 扫描发现 | Claude Skill 判定 + Docker PoC 验证 | 判定结果、安全报告、提交材料 |
-
----
-
-## 2. 项目结构
-
-```
-llm-vulvariant/
-├── src/
-│   ├── cli/                            # CLI 入口
-│   │   ├── software.py                 #   software-profile 命令
-│   │   ├── vulnerability.py            #   vuln-profile 命令
-│   │   ├── agent_scanner.py            #   scanner 命令（单目标/自动目标）
-│   │   ├── batch_scanner.py            #   batch-scanner 命令（批量）
-│   │   ├── exploitability.py           #   可利用性验证 + 报告
-│   │   └── common.py                   #   共享 CLI 工具
-│   ├── profiler/                       # 画像生成
-│   │   ├── software/                   #   软件画像（模块分析、仓库分析、数据流提取）
-│   │   ├── vulnerability/              #   漏洞画像（Source/Sink/Flow 特征提取）
-│   │   └── profile_storage.py          #   通用存储管理（checkpoint、恢复）
-│   ├── scanner/                        # 扫描与验证
-│   │   ├── agent/                      #   AgenticVulnFinder + 工具集（文件读取、CodeQL、函数提取）
-│   │   ├── similarity/                 #   5 维画像相似度匹配与目标选择
-│   │   └── checker/                    #   可利用性检查 + 安全报告生成
-│   ├── llm/                            # LLM 客户端（Deepseek / OpenAI / Anthropic）
-│   └── utils/                          # 工具库（日志、Git、CodeQL、语言检测等）
-├── config/
-│   ├── paths.yaml                      # 路径配置
-│   ├── llm_config.yaml                 # LLM provider 配置
-│   ├── codeql_config.yaml              # CodeQL 配置
-│   ├── scanner_config.yaml             # scanner 行为配置
-│   └── software_profile_rule.yaml      # 软件画像规则（模块分析器类型、语言、排除项）
-├── scripts/                            # 端到端运行脚本
-├── tests/                              # 30+ 测试文件
-└── pyproject.toml
-```
-
----
-
-## 3. 环境与安装
-
-### 依赖
-
-| 类别 | 依赖项 | 说明 |
-|------|--------|------|
-| **必须** | Python ≥ 3.10, Git | 基础运行环境 |
-| **核心 Python 包** | `openai`, `anthropic`, `requests`, `pyyaml` | `pip install -e .` 自动安装 |
-| **嵌入模型（可选）** | `transformers`, `sentence-transformers`, `torch` | 相似度匹配所需；不安装则无法使用自动目标选择 |
-| **外部工具（可选）** | CodeQL CLI | 启用 CodeQL 查询能力 |
-| **外部工具（可选）** | Claude CLI | SkillModuleAnalyzer 与可利用性检查依赖 |
-| **外部工具（可选）** | Docker | EXPLOITABLE finding 的 PoC 验证 |
-
-### 安装
+### 1. 安装
 
 ```bash
-# 基础安装
+cd /mnt/raid/home/dongtian/vuln/llm-vulvariant
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
 pip install -e .
+```
 
-# 若需要相似度匹配功能
+如果要使用自动目标选择中的 embedding 相似度能力，还需要：
+
+```bash
 pip install transformers sentence-transformers torch
 ```
 
-### 环境变量
+### 2. 预检关键前提
 
-| 变量 | 用途 |
-|------|------|
-| `DEEPSEEK_API_KEY` | Deepseek provider API 密钥 |
-| `NY_API_KEY` | OpenAI provider API 密钥（当前配置） |
-| `LAB_LLM_API_KEY` | `lab` provider API 密钥，对应 `https://hkucvm.dynv6.net/v1` |
+环境、工具链和 Claude 相关要求见：
 
----
+- [docs/runtime-requirements.md](docs/runtime-requirements.md)
+- [docs/getting-started.md](docs/getting-started.md)
 
-## 4. 配置
-
-所有配置文件位于 `config/` 目录。
-
-### 路径配置 — `paths.yaml`
-
-| 字段 | 说明 | 默认 |
-|------|------|------|
-| `project_root` | 项目根目录 | `~/vuln` |
-| `profile_base_path` | 画像存储根目录 | `~/vuln/profiles` |
-| `vuln_data_path` | 漏洞数据文件 | `~/vuln/data/vuln.json` |
-| `repo_base_path` | 仓库源码目录 | `~/vuln/data/repos` |
-| `codeql_db_path` | CodeQL 数据库目录 | `~/vuln/codeql_dbs` |
-| `embedding_model_path` | 嵌入模型目录 | `~/vuln/models` |
-
-画像子目录名通过 CLI 参数 `--software-profile-dirname` / `--vuln-profile-dirname` 指定，拼接到 `profile_base_path` 下。
-
-### LLM 配置 — `llm_config.yaml`
-
-支持的 provider：`deepseek`、`openai`、`lab`。其中 `lab` 默认使用 `https://hkucvm.dynv6.net/v1` 和 `LAB_LLM_API_KEY`。配置包含温度、重试策略、最大 token 数等。
-
-### Scanner 配置 — `scanner_config.yaml`
-
-| 配置项 | 说明 |
-|--------|------|
-| `module_similarity.threshold` | 模块语义 embedding 晋升到 `priority-1` 的阈值，默认 `0.8` |
-| `module_similarity.model_name` | 模块语义 embedding 使用的本地模型目录名 |
-| `module_similarity.device` | 模块语义 embedding 的执行设备，默认 `cpu` |
-
-### 软件画像规则 — `software_profile_rule.yaml`
-
-| 配置项 | 说明 |
-|--------|------|
-| `module_analyzer_config.analyzer_type` | `skill`（使用 Claude Skill）或 `agent` |
-| `module_analyzer_config.validation_mode` | `true` 时直接运行 `scan_repo.py`，固定验证参数，适合复现 |
-| `module_analyzer_config.validation_temperature` | 验证模式下 module analyzer 的温度 |
-| `module_analyzer_config.validation_max_workers` | 验证模式下 module analyzer 的并发 worker 数 |
-| `repo_analyzer_config.languages` | `"auto"` 或语言列表 |
-| `excluded_folders` / `code_extensions` | 文件扫描范围控制 |
-
----
-
-## 5. 输入数据格式
-
-### `vuln.json`
-
-```json
-[
-  {
-    "repo_name": "NeMo",
-    "commit": "a1b2c3d4e5f6...",
-    "cve_id": "CVE-2025-23361",
-    "call_chain": [
-      "nemo/api/server.py#handle_request",
-      "nemo/runtime/loader.py#load_model",
-      "pickle.loads"
-    ],
-    "payload": "..."
-  }
-]
-```
-
-每条必须包含 `repo_name`、`commit`、`call_chain`、`payload`。`cve_id` 可选，缺失时回退到 `vuln-{index}`。
-
-`call_chain` 中带 `#` 的项解析为 `file#function`，不带 `#` 的项视为 sink 标识。
-
----
-
-## 6. 快速开始
-
-### 6.1 端到端最小示例（单条 CVE → 单目标）
-
-以下四条命令串联执行完整流水线：
+### 3. 最小单漏洞流程
 
 ```bash
 # 1) 为源仓库生成软件画像
 software-profile \
   --repo-name NeMo \
   --repo-base-path ~/vuln/data/repos \
-  --target-version a1b2c3d4e5f6 \
-  --profile-base-path ~/vuln/profiles \
-  --software-profile-dirname soft \
+  --target-version <source_commit> \
   --llm-provider deepseek
 
 # 2) 生成漏洞画像
 vuln-profile \
   --vuln-index 0 \
   --vuln-json ~/vuln/data/vuln.json \
-  --profile-base-path ~/vuln/profiles \
-  --software-profile-dirname soft \
-  --vuln-profile-dirname vuln \
   --llm-provider deepseek
 
-# 3) 对指定目标仓库执行 agentic 扫描
+# 3) 扫描一个指定目标仓库
 scanner \
   --vuln-repo NeMo \
   --cve CVE-2025-23361 \
   --target-repo Megatron-LM \
-  --target-commit a845aa7e12b3 \
+  --target-commit <target_commit> \
   --repo-base-path ~/vuln/data/repos \
   --llm-provider deepseek \
   --max-iterations 3 \
-  --output results/scan-results
+  --output ~/vuln/results/scan-results
 
-# 4) 可利用性验证 + 报告
+# 4) 可利用性验证与报告
 python -m cli.exploitability \
-  --scan-results-dir results/scan-results \
-  --soft-profile-dir ~/vuln/profiles/soft \
+  --scan-results-dir ~/vuln/results/scan-results \
   --repo-base-path ~/vuln/data/repos \
   --generate-report \
-  --report-only-exploitable \
-  --submission-output-dir results/exploitability \
-  --submission-prefix exploitable_findings \
-  --run-id demo-001
+  --submission-output-dir ~/vuln/results/exploitability
 ```
 
-上述命令会写出 `results/exploitability/exploitable_findings_demo-001_strict.json`、
-`results/exploitability/exploitable_findings_demo-001_strict.csv`、
-`results/exploitability/exploitable_findings_demo-001_strict_submission_index.json` 和
-`results/exploitability/exploitable_findings_demo-001_strict_exploitable_security_report.md`。
-如果不使用 `--report-only-exploitable`，相同文件名不会带 `_strict` 后缀。
+完整 recipe、批量流程和脚本入口见 [docs/pipeline-recipes.md](docs/pipeline-recipes.md)。
 
-如果你要使用新增的 `lab` provider，只需要把命令里的 `--llm-provider deepseek` 改成 `--llm-provider lab`，并提前导出 `LAB_LLM_API_KEY`。
+## 文档索引
 
-### 6.2 自动目标选择扫描
+- [docs/runtime-requirements.md](docs/runtime-requirements.md): `claude` / `.claude/skills` / `.claude-runtime`、Docker、CodeQL、`jq`、git 工作树、本地 embedding 模型等隐形前提
+- [docs/getting-started.md](docs/getting-started.md): 安装、API Key、自检命令、脚本入口变量
+- [docs/data-and-repositories.md](docs/data-and-repositories.md): `vuln.json`、仓库布局、git 工作树要求、批量准备脚本
+- [docs/pipeline-recipes.md](docs/pipeline-recipes.md): 单次扫描、自动选目标、批量扫描、批量 exploitability、内置脚本
+- [docs/parameter-reference.md](docs/parameter-reference.md): 常用参数分组说明和对应运行前提
 
-不指定目标仓库，让系统通过画像相似度自动选择 Top-K 目标：
+## 目录与输出
 
-```bash
-scanner \
-  --vuln-repo NeMo \
-  --cve CVE-2025-23361 \
-  --top-k 5 \
-  --similarity-threshold 0.70 \
-  --similarity-model-name BAAI--bge-large-en-v1.5 \
-  --similarity-device cpu \
-  --llm-provider deepseek
+默认路径来自 `config/paths.yaml`，常见目录如下：
+
+```text
+~/vuln/
+├── data/
+│   ├── vuln.json
+│   └── repos/
+├── profiles/
+│   ├── soft/
+│   └── vuln/
+├── results/
+├── models/
+└── llm-vulvariant/
 ```
 
-### 6.3 批量扫描流水线
+常见输出物：
 
-对 `vuln.json` 中所有漏洞批量执行扫描：
+- `profiles/soft/<repo>/<commit>/software_profile.json`
+- `profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
+- `results/<scan-dir>/<cve>/<target>-<commit>/agentic_vuln_findings.json`
+- `results/<scan-dir>/<cve>/<target>-<commit>/exploitability.json`
+- `results/<submission-dir>/<prefix>_<run-id>.json`
 
-```bash
-batch-scanner \
-  --vuln-json ~/vuln/data/vuln.json \
-  --source-repos-root ~/vuln/data/repos \
-  --target-repos-root ~/vuln/data/repos \
-  --source-soft-profiles-dir ~/vuln/profiles/soft \
-  --target-soft-profiles-dir ~/vuln/profiles/soft \
-  --vuln-profiles-dir ~/vuln/profiles/vuln \
-  --scan-output-dir results/full-batch-scan \
-  --run-id run-20260326-001 \
-  --similarity-threshold 0.70 \
-  --fallback-top-n 3 \
-  --jobs 4 \
-  --max-iterations-cap 10 \
-  --llm-provider deepseek
-```
+## 内部文档边界
 
-说明：
-- `--max-workers` 是并发线程池总上限；
-- `--run-id` 用于隔离该次 batch run 的 shared public memory；省略时会自动生成；
-- `--scan-workers` 是 `batch_scanner` target scan 并发 worker 数；未设置时默认继承 `--max-workers`；
-- `batch_scanner` 的相似度筛选与 profile 构建仍是串行阶段。
+`llm-vulvariant/docs/` 只放项目使用文档，不再承载 superpower 协作资料。相关内部文档入口在根级 [../docs/superpowers/README.md](../docs/superpowers/README.md)。
 
-然后执行可利用性验证与报告生成：
+## 安全声明
 
-```bash
-python -m cli.exploitability \
-  --scan-results-dir results/full-batch-scan \
-  --soft-profile-dir ~/vuln/profiles/soft \
-  --repo-base-path ~/vuln/data/repos \
-  --jobs 4 \
-  --generate-report \
-  --report-only-exploitable \
-  --submission-output-dir results/full-batch-exploitability \
-  --submission-prefix exploitable_findings \
-  --claude-runtime-root results/claude-runtime \
-  --claude-runtime-mode folder \
-  --run-id run-20260303-001 \
-  --timeout 1800
-```
-
-当 `cli.exploitability` 使用 `--jobs > 1` 时，必须同时使用 `--claude-runtime-mode folder`，否则不同任务会竞争同一个 Claude runtime。
-
-### 6.4 一键全流水线脚本
-
-```bash
-bash scripts/run_nvidia_full_pipeline.sh
-```
-
-该脚本按顺序执行 5 个阶段：验证漏洞画像 → 链接源画像 → 构建目标软件画像 → 批量扫描 → 可利用性验证与报告。可通过环境变量控制主要路径、阈值、LLM provider/model 和 timeout 参数。
-
----
-
-## 7. 核心设计
-
-### 7.1 5 维画像相似度
-
-目标仓库选择基于源仓库与候选仓库画像之间的 5 维相似度：
-
-| 维度 | 说明 |
-|------|------|
-| `description_sim` | 仓库描述的语义相似度（embedding） |
-| `target_application_sim` | 目标应用领域的匹配度 |
-| `target_user_sim` | 目标用户群的匹配度 |
-| `module_jaccard_sim` | 模块名称的 Jaccard 相似度 |
-| `module_dependency_import_sim` | 模块依赖/导入关系的相似度 |
-
-`overall_sim` 为加权平均。批量模式先按 `--similarity-threshold` 筛选；达标数不足时回退到 `--fallback-top-n`。
-
-### 7.2 Agentic 扫描工具集
-
-`AgenticVulnFinder` 通过 LLM 的 tool_choice 能力自主调用以下工具：
-
-| 工具 | 功能 |
-|------|------|
-| `read_file` | 读取目标仓库源代码文件 |
-| `search_keyword` | 关键字检索 |
-| `get_call_paths` | 获取函数调用路径 |
-| `run_codeql_query` | 执行 CodeQL 查询 |
-| `report_finding` | 上报发现的漏洞 |
-
-Agent 特性：
-- `AgenticVulnFinder` 实现上支持最多 300 轮迭代；`scanner` CLI 的默认 `--max-iterations` 是 3，可按需覆盖
-- **Priority-1 提前停止**：当高优先级发现完成时可提前结束（支持 `min` / `max` 策略）
-- **模块优先级排序**：根据漏洞画像自动计算目标模块的扫描优先级
-- **结构化漏洞引导**：扫描 prompt 直接消费 `query_terms`、`dangerous_apis`、`source_indicators`、`sink_indicators`、`variant_hypotheses`、`negative_constraints`、`likely_false_positive_patterns`、`scan_start_points`、`open_questions`、`assumptions`
-- **Shared public memory 聚焦读取引导**：当同一 run 已有共享 observation 时，scanner prompt 会引导 agent 优先使用聚焦 query 调用 `read_shared_public_memory`，证据不足时再扩大搜索范围
-- **可恢复**：`AgentMemoryManager` 跟踪已处理文件/模块，支持断点续扫
-
-### 7.3 可恢复性设计
-
-所有阶段均支持断点恢复，避免在长时间任务中丢失进度：
-
-| 组件 | 恢复机制 |
-|------|----------|
-| 画像生成 | `ProfileStorageManager` 使用 checkpoint 文件，中断后从上次断点继续 |
-| Agentic 扫描 | `AgentMemoryManager` 记录 pending files / processed modules / findings cache |
-| 批量扫描 | `--skip-existing-scans` 仅在已有结果具备完整覆盖率元数据且 fingerprint 匹配时跳过，否则重扫 |
-| 可利用性检查 | `--skip-existing` 仅跳过完整的 `exploitability.json`；不完整或过期输出会自动续做 |
-
-### 7.4 Claude Runtime 布局
-
-`cli.exploitability` 支持三种运行时目录策略，用于控制 Claude Skill 的隔离粒度：
-
-| 模式 | 目录结构 | 适用场景 |
-|------|----------|----------|
-| `shared` | 所有任务共用根目录 | 单次少量任务 |
-| `run` | `<root>/<run-id>/` | 单次批量运行 |
-| `folder` | `<root>/<run-id>/<cve>/<target>/` | 并行批处理（推荐） |
-
-### 7.5 并发与线程模型
-
-当前版本的并发增强主要集中在 3 个层面：批量扫描、可利用性验证、以及所有会临时切换 git commit 的安全协调。
-
-#### 1. `batch-scanner` 的并发能力
-
-`batch-scanner` 通过 `--jobs` 控制并发度，但并发粒度不是“一个漏洞内部的 Agent 回合”，而是“同一个漏洞条目下多个 target 仓库的扫描任务”。
-
-也就是说，以下步骤仍然是串行的：
-- 读取 `vuln.json`
-- 确保 source software profile 存在
-- 确保 vulnerability profile 存在
-- 计算相似度并选出目标仓库
-
-真正并发的是最后一步：
-- 对筛选出来的多个 target 执行 `run_single_target_scan()`
-
-实现特点：
-- 每个 worker 自己创建独立的 LLM client，避免线程之间共享客户端状态
-- 结果收集时保留 target 的原始排序
-- summary 中会记录 `jobs`、每个 target 的 `started_at`、`finished_at`、`duration_seconds`
-
-这部分适合提升“一个漏洞同时扫多个候选仓库”的吞吐量，但**不会并行化单个 target 内部的 Agent 行为**。
-
-#### 2. `cli.exploitability` 的并发能力
-
-`python -m cli.exploitability` 同样通过 `--jobs` 控制并发，但并发粒度是“多个 scan result folder”。
-
-也就是说，以下步骤会并发：
-- `results/<scan-dir>/<cve>/<repo>-<commit12>/` 这些 folder 的 exploitability 检查
-
-实现特点：
-- 每个 worker 自己创建独立的 `SkillExploitabilityChecker`
-- 每个 worker 使用独立的 Claude runtime 目录
-- 聚合 JSON / CSV / submission index / markdown 报告仍然在主线程串行写入，避免并发写同一份提交产物
-
-约束：
-- 当 `--jobs > 1` 时，必须使用 `--claude-runtime-mode folder`
-- `shared` / `run` 只适合串行执行，因为它们会共享 Claude runtime
-
-#### 3. repo 锁：保证并发下的 git checkout 安全
-
-真正决定当前并发能否安全运行的，不是线程池本身，而是 repo 级锁。
-
-以下路径在运行时都可能临时切换仓库 commit：
-- `read_vuln_data()` 抽取 `vuln.json` 对应代码片段
-- software profile 生成
-- vulnerability profile 生成
-- 单目标 `agent_scanner` 扫描
-- 脚本中解析仓库当前 `HEAD` 的逻辑
-
-这些路径现在都会先拿 repo 锁，再执行 `get_git_commit()` / `checkout_commit()` / `restore_git_position()`。
-
-repo 锁的行为：
-- 同一个 repo path 同一时刻只允许一个任务切 commit
-- 不同 repo path 可以并发
-- 锁是阻塞等待，不是冲突即失败
-- 锁文件带 heartbeat，进程异常退出后可以识别并清理 stale lock
-- 日志会打印等待、拿到、释放 repo 锁的状态
-
-这意味着当前系统已经支持“多线程 + 共享工作树”的安全运行，但安全边界是：
-- **同一个 repo 的 commit 切换仍然串行**
-- **同一个 scan 输出目录（同一 `CVE/target`）的 Finder 生命周期与结果写入也会串行**
-- **不同 repo 且不同 scan 输出目录之间可以并发**
-
-#### 4. 哪些地方目前没有并发
-
-下面这些部分当前仍然是串行的，属于有意设计，不是遗漏：
-- 单个 `AgenticVulnFinder` 内部的多轮对话
-- Agent 的 tool call 执行顺序
-- software profile 内部 4 个分析步骤
-- vulnerability profile 内部 Source / Sink / Flow / 描述提取
-- 单个 exploitability folder 内部的逐条 finding 判定
-
-这样做的原因是这几层都直接依赖共享上下文、临时文件或推理状态；先保证可重复性和结果稳定，再在更外层做安全并发。
-
-#### 5. 脚本层怎么用并发
-
-`scripts/run_nvidia_full_pipeline.sh` 已经接入并发参数：
-
-- `SCAN_JOBS`
-  - 传给 `batch-scanner --jobs`
-- `EXPLOITABILITY_JOBS`
-  - 传给 `cli.exploitability --jobs`
-- `EXPLOITABILITY_RUNTIME_MODE`
-  - 默认 `run`
-  - 如果 `EXPLOITABILITY_JOBS > 1`，脚本会自动强制切到 `folder`
-
-推荐：
-- 批量扫描并发时，优先提升 `SCAN_JOBS`
-- exploitability 并发时，必须配合 `folder` runtime
-- 如果多个任务会同时访问同一批 repo，吞吐量最终会受 repo 锁限制，这是当前版本的安全设计
-
----
-
-## 8. 输出产物
-
-### 画像阶段
-
-`profiles/soft/<repo>/<commit>/software_profile.json`
-- `basic_info` 中本轮 prompt contract 重点强调的字段包括 `description`、`target_application`、`target_user`、`capabilities`、`interfaces`、`deployment_style`、`operator_inputs`、`external_surfaces`、`evidence_summary`、`confidence`、`open_questions`
-- `modules[]` 中 scanner-facing contract 重点字段包括 `name`、`category`、`responsibility`、`entry_points`、`files`、`key_functions`、`interfaces`、`depends_on`、`dependencies`、`boundary_rationale`、`evidence_paths`、`confidence`
-
-`profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
-- `source_features`、`flow_features`、`sink_features` 会保留 `status`、`confidence`、`evidence`、`evidence_summary`、`open_questions`、`assumptions`、`negative_constraints`
-- 顶层摘要会直接提供 scanner-ready guidance：`query_terms`、`dangerous_apis`、`source_indicators`、`sink_indicators`、`variant_hypotheses`、`negative_constraints`、`likely_false_positive_patterns`、`scan_start_points`、`confidence`、`evidence`、`evidence_summary`、`open_questions`、`assumptions`、`status`
-
-### 扫描阶段
-
-| 路径 | 说明 |
-|------|------|
-| `<scan-dir>/<cve>/<repo>-<commit12>/agentic_vuln_findings.json` | 扫描原始发现 |
-| `.../conversation_history.json` | Agent 对话历史 |
-| `.../scan_memory.json` | 扫描续跑所需的状态与进度持久化 |
-| `.../conversations/iteration_<n>_output_summary.json` | 每轮对话压缩摘要，单独保存迭代分析补充信息 |
-| `.../target_similarity.json` | 目标选择时的相似度详情，仅在目标由相似度检索/排序选出时生成 |
-| `<scan-dir>/_runs/<run-id>/shared-public-memory/<repo>-<commit12>-<repo-scope-key>/observations/*.json` | 同一 batch run 内共享的公共 observation；repo 目录名会附加 `repo_scope_key` 后缀，scanner prompt 会引导 agent 在合适时优先用聚焦 query 按需读取，不影响私有 `scan_memory.json` |
-| `<scan-dir>/batch-summary-<timestamp>.json` | 批量扫描汇总信息（jobs、target 时序、覆盖率统计等） |
-
-`scan_memory.json`
-- 仅用于持久化续跑所需的 `ScanMemory` 状态，例如文件进度、模块优先级、finding 列表、issues 和摘要
-
-`conversations/iteration_<n>_output_summary.json`
-- 单独保存每轮压缩摘要，可能包含 `shared_memory_hits`、`rejected_hypotheses`、`next_best_queries`、`evidence_gaps`、`files_completed_this_iteration`
-
-### 可利用性验证阶段
-
-| 路径 | 说明 |
-|------|------|
-| `.../exploitability.json` | 每条 finding 的可利用性判定 |
-| `.../evidence/<finding_id>/` | Docker PoC 证据（脚本、构建日志、执行输出） |
-| `.../reports/security_report.md` | 汇总安全研究报告，仅在 `--generate-report` 时生成 |
-| `.../reports/ghsa_*.md` | GHSA 格式漏洞报告，仅在 `--generate-report` 时生成 |
-
-`exploitability.json`
-- 当前稳定的 checker contract 以 richer sections 为主：`verdict`、`confidence`、`verdict_rationale`、`preconditions`、`static_evidence`、`dynamic_plan`、`docker_verification`、`open_questions`
-- 模型若额外提供 `sink_analysis`、`source_analysis`、`attack_scenario`、`remediation` 这些 legacy compatibility sections，结果会继续透传它们，并被报告路径消费
-- `reports/security_report.md` 与 `reports/ghsa_*.md` 会稳定消费 richer sections；若结果里包含 legacy compatibility sections，也会继续使用它们，而不是只保留单行 verdict
-
-### 聚合提交产物
-
-| 路径 | 说明 |
-|------|------|
-| `<submission-output-dir>/<prefix>_<run-id>[_strict].json` | 所有可利用发现的聚合 JSON；仅在设置 `--submission-output-dir` 时生成 |
-| `<submission-output-dir>/<prefix>_<run-id>[_strict].csv` | 聚合 CSV（表格化）；仅在设置 `--submission-output-dir` 时生成 |
-| `<submission-output-dir>/<prefix>_<run-id>[_strict]_submission_index.json` | 按 CVE 分组的提交索引；仅在设置 `--submission-output-dir` 时生成 |
-| `<submission-output-dir>/<prefix>_<run-id>[_strict]_exploitable_security_report.md` | 聚合提交报告；仅在设置 `--submission-output-dir` 时生成 |
-
----
-
-## 9. 辅助脚本
-
-| 脚本 | 功能 |
-|------|------|
-| `scripts/run_nvidia_full_pipeline.sh` | 端到端全流水线（5 阶段） |
-| `scripts/run_all_software_profiles.sh` | 批量生成指定目录下所有仓库的软件画像 |
-| `scripts/run_all_vulnerability_profiles.sh` | 批量生成 `vuln.json` 中所有条目的漏洞画像 |
-| `scripts/run_all_vuln_software_profile.sh` | 为漏洞条目对应的源仓库生成软件画像 |
-| `scripts/update_repos.sh` | 更新仓库到最新版本 |
-| `scripts/checkout_main.sh` | 将仓库切换到主分支 |
-| `scripts/small-scale-exp.sh` | 小规模实验脚本 |
-
----
-
-## 10. 测试
-
-```bash
-# 全量测试
-pytest -q
-
-# CLI 回归测试
-pytest -q tests/test_cli_batch_scanner.py tests/test_cli_exploitability.py tests/test_cli_agent_scanner.py
-
-# 相似度模块
-pytest -q tests/test_similarity_retriever.py tests/test_similarity_embedding.py
-
-# 画像模型
-pytest -q tests/test_profile_models_and_storage.py
-```
-
----
-
-## 11. 常见问题
-
-**Software profile not found**
-- 确认 `profiles/soft/<repo>/<commit>/software_profile.json` 已存在
-- `batch-scanner` 使用 `--source-soft-profiles-dir` 和 `--target-soft-profiles-dir`
-- `scanner` / `cli.exploitability` 使用 `--software-profile-dirname` 或 `--soft-profile-dir`
-
-**Vulnerability profile not found**
-- 先执行 `vuln-profile` 生成
-- 路径应为 `profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
-
-**Claude CLI not found**
-- 安装 Claude CLI 并确保 `claude` 在 `PATH`
-- 确认 `skill_path` 配置下存在 `check-exploitability` 与 `ai-infra-module-modeler`
-
-**CodeQL 不可用**
-- 安装 CodeQL CLI 并确认 `codeql` 命令可执行
-- 检查 `config/codeql_config.yaml`
-
-**Docker PoC 失败**
-- 检查 `evidence/<finding_id>/docker_build.log`
-- 检查 `evidence/<finding_id>/execution_output.txt`
-
----
-
-## 12. 安全声明
-
-本项目用于漏洞研究、变种挖掘与防御修复验证。请仅在授权环境中运行扫描、验证和 PoC 相关流程。
+本项目用于漏洞研究、变种挖掘与防御修复验证。请只在已授权的环境、仓库和数据上运行扫描、验证与 PoC 流程。

@@ -6,6 +6,7 @@ import pytest
 
 from llm.client import (
     BaseLLMClient,
+    DeepSeekClient,
     LLMConfig,
     LLMNoResultError,
     LLMRetryExhaustedError,
