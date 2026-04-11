@@ -1,5 +1,6 @@
 import copy
 import inspect
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set
 import os
@@ -21,6 +22,22 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 # Sentinel that distinguishes "argument omitted" from "argument explicitly set to the default value".
 _UNSET = object()
+_CONTEXT_LIMIT_ERROR_PATTERNS = (
+    "maximum context length",
+    "context length exceeded",
+    "context window exceeded",
+    "prompt is too long",
+    "too many tokens",
+    "input is too long",
+)
+_CONTEXT_LIMIT_REGEX = re.compile(r"maximum context length is\s*(\d+)\s*tokens", re.IGNORECASE)
+_REQUESTED_OUTPUT_REGEX = re.compile(r"requested\s*(\d+)\s*output tokens", re.IGNORECASE)
+_INPUT_TOKENS_REGEX = re.compile(
+    r"prompt contains(?:\s+at least)?\s*(\d+)\s*input tokens",
+    re.IGNORECASE,
+)
+_CONTEXT_RETRY_SAFETY_MARGIN = 2048
+_MIN_CONTEXT_RETRY_MAX_TOKENS = 256
 
 
 def capture_llm_usage_snapshot(llm_client: Any) -> Optional[int]:
@@ -525,6 +542,81 @@ class BaseLLMClient(ABC):
             and self._should_retry(exception)
         )
 
+    @staticmethod
+    def _is_context_limit_error(exception: Exception) -> bool:
+        message = str(exception).lower()
+        return any(pattern in message for pattern in _CONTEXT_LIMIT_ERROR_PATTERNS)
+
+    @staticmethod
+    def _extract_context_limit_retry_details(exception: Exception) -> Dict[str, int]:
+        message = str(exception)
+
+        def _extract(pattern: re.Pattern[str]) -> int:
+            match = pattern.search(message)
+            return to_int(match.group(1)) if match else 0
+
+        return {
+            "context_limit": _extract(_CONTEXT_LIMIT_REGEX),
+            "requested_output_tokens": _extract(_REQUESTED_OUTPUT_REGEX),
+            "input_tokens": _extract(_INPUT_TOKENS_REGEX),
+        }
+
+    def _build_context_limit_retry_kwargs(
+        self,
+        exception: Exception,
+        request_kwargs: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if not self._is_context_limit_error(exception):
+            return None
+
+        details = self._extract_context_limit_retry_details(exception)
+        parsed_context_limit = max(0, to_int(details.get("context_limit")))
+        if parsed_context_limit > 0:
+            self.context_limit = parsed_context_limit
+            self.config.context_limit = parsed_context_limit
+
+        current_requested_max_tokens = max(
+            0,
+            to_int(
+                _first_present(
+                    request_kwargs.get("max_tokens"),
+                    details.get("requested_output_tokens"),
+                    getattr(self.config, "max_tokens", 0),
+                )
+            ),
+        )
+        input_tokens = max(0, to_int(details.get("input_tokens")))
+        effective_context_limit = max(0, to_int(self.context_limit))
+        if current_requested_max_tokens <= 0 or input_tokens <= 0 or effective_context_limit <= 0:
+            return None
+
+        remaining_budget = max(0, effective_context_limit - input_tokens - _CONTEXT_RETRY_SAFETY_MARGIN)
+        safe_max_tokens = min(max(0, current_requested_max_tokens - 1), remaining_budget)
+        if safe_max_tokens < _MIN_CONTEXT_RETRY_MAX_TOKENS or safe_max_tokens >= current_requested_max_tokens:
+            logger.error(
+                "Context-limit retry unavailable: provider=%s context_limit=%s input_tokens=%s "
+                "requested_max_tokens=%s safe_max_tokens=%s",
+                self.config.provider,
+                effective_context_limit,
+                input_tokens,
+                current_requested_max_tokens,
+                safe_max_tokens,
+            )
+            return None
+
+        updated_kwargs = dict(request_kwargs)
+        updated_kwargs["max_tokens"] = safe_max_tokens
+        logger.warning(
+            "Context-limit retry: provider=%s requested_max_tokens=%s -> %s "
+            "(context_limit=%s, input_tokens=%s)",
+            self.config.provider,
+            current_requested_max_tokens,
+            safe_max_tokens,
+            effective_context_limit,
+            input_tokens,
+        )
+        return updated_kwargs
+
     def _extract_chat_message(self, response: Any) -> Any:
         choices = getattr(response, "choices", None)
         if choices is None and isinstance(response, dict):
@@ -681,6 +773,11 @@ class BaseLLMClient(ABC):
                     error_summary = self.get_last_usage_summary()
                     error_summary["is_error"] = True
                 self._set_last_usage_summary(error_summary)
+
+                context_limit_retry_kwargs = self._build_context_limit_retry_kwargs(e, kwargs)
+                if context_limit_retry_kwargs is not None:
+                    kwargs = context_limit_retry_kwargs
+                    continue
 
                 # Decide whether to retry
                 if not self._should_retry(e):

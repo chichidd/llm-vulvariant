@@ -291,6 +291,31 @@ def test_build_messages_surface_shared_public_memory_availability():
     assert "Call `read_shared_public_memory` before repeating broad searches" in intermediate
 
 
+def test_build_intermediate_user_message_compact_omits_large_inventory_lists():
+    scanned_files = [f"file_{index}.py" for index in range(30)]
+    findings = [
+        {"file": f"vuln_{index}.py", "type": "command_injection", "confidence": "high"}
+        for index in range(5)
+    ]
+
+    intermediate = build_intermediate_user_message(
+        scanned_files=scanned_files,
+        findings=findings,
+        progress_info="10/30 files scanned, 5 findings.",
+        shared_observation_count=3,
+        compact=True,
+    )
+
+    assert "10/30 files scanned, 5 findings." in intermediate
+    assert "Shared Public Memory" in intermediate
+    assert "Already Reported Vulnerabilities" not in intermediate
+    assert "Already Scanned Files" not in intermediate
+    assert "5 previously reported vulnerabilities tracked in memory" in intermediate
+    assert "30 previously scanned files tracked in memory" in intermediate
+    assert "vuln_0.py" not in intermediate
+    assert "file_0.py" not in intermediate
+
+
 def test_build_initial_message_guides_shared_memory_first_when_priority_one_empty():
     software_profile = {
         "basic_info": {"name": "demo"},

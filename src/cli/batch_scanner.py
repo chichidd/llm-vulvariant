@@ -86,6 +86,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     )
 
 logger = get_logger(__name__)
+_IMPORTED_CREATE_LLM_CLIENT = create_llm_client
 _IMPORTED_RUN_TARGET_SCAN = _run_target_scan
 
 __all__ = [
@@ -345,6 +346,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--target-scan-timeout",
+        type=int,
+        default=7200,
+        help=(
+            "Maximum seconds to wait for one vulnerability's target scan wave to make "
+            "progress before marking unfinished targets incomplete (default: 7200)"
+        ),
+    )
+    parser.add_argument(
         "--skip-existing-scans",
         action="store_true",
         help=(
@@ -388,6 +398,9 @@ def _validate_args(args: argparse.Namespace) -> bool:
         return False
     if args.max_iterations_cap <= 0:
         logger.error("--max-iterations-cap must be >= 1")
+        return False
+    if getattr(args, "target_scan_timeout", 7200) <= 0:
+        logger.error("--target-scan-timeout must be >= 1")
         return False
     if getattr(args, "jobs", 1) <= 0:
         logger.error("--jobs must be >= 1")
@@ -576,43 +589,22 @@ def _run_target_scan_task(
     target_repos_root: Path,
     repo_lock_manager: RepoPathLockManager,
 ) -> Dict[str, Any]:
-    """Run one scan task in a worker with private llm client and repo lock."""
+    """Run one scan task via the execution module's process-level watchdog."""
+    _ = target_repos_root
+    _ = repo_lock_manager
     target = task["target"]
     task_id = str(task["task_id"])
     cve_id = str(task["cve_id"])
     vulnerability_profile = task["vulnerability_profile"]
-    target_repo_path = target_repos_root / target.profile_ref.repo_name
-    lock = repo_lock_manager.get_lock(target_repo_path)
-    output_base = getattr(batch_args, "scan_output_dir", None)
-    output_dir = None
-    if output_base is not None:
-        output_dir = agent_scanner.resolve_output_dir(
-            cve_id=cve_id,
-            target_repo=target.profile_ref.repo_name,
-            target_commit=target.profile_ref.commit_hash,
-            output_base=str(output_base),
-        )
-
-    scan_client = create_llm_client(
-        LLMConfig(provider=batch_args.llm_provider, model=batch_args.llm_name)
-    )
+    if create_llm_client is not _IMPORTED_CREATE_LLM_CLIENT:
+        batch_scanner_execution_module.create_llm_client = create_llm_client
     if _run_target_scan is not _IMPORTED_RUN_TARGET_SCAN:
         batch_scanner_execution_module._run_target_scan = _run_target_scan
-    started_at = datetime.now()
-    with lock:
-        scan_status = batch_scanner_execution_module._run_target_scan(
-            batch_args=batch_args,
-            cve_id=cve_id,
-            vulnerability_profile=vulnerability_profile,
-            llm_client=scan_client,
-            target=target,
-        )
-    finished_at = datetime.now()
-
-    saved_quality = (
-        _load_saved_scan_quality(output_dir)
-        if output_dir is not None and scan_status in {"ok", "skipped", "incomplete"}
-        else {}
+    task_result = batch_scanner_execution_module._run_target_scan_task(
+        batch_args=batch_args,
+        cve_id=cve_id,
+        vulnerability_profile=vulnerability_profile,
+        target=target,
     )
 
     return {
@@ -621,16 +613,7 @@ def _run_target_scan_task(
         "commit_hash": target.profile_ref.commit_hash,
         "overall_similarity": target.metrics.overall_sim if target.metrics is not None else None,
         "similarity_computed": target.metrics is not None,
-        "status": scan_status,
-        "coverage_status": saved_quality.get("coverage_status", "unknown"),
-        "critical_scope_present": saved_quality.get("critical_scope_present"),
-        "critical_complete": saved_quality.get("critical_complete"),
-        "critical_scope_total_files": saved_quality.get("critical_scope_total_files"),
-        "critical_scope_completed_files": saved_quality.get("critical_scope_completed_files"),
-        "scan_progress": saved_quality.get("scan_progress"),
-        "started_at": started_at.isoformat(),
-        "finished_at": finished_at.isoformat(),
-        "duration_seconds": round((finished_at - started_at).total_seconds(), 6),
+        **task_result,
     }
 
 
@@ -1383,6 +1366,7 @@ def main() -> int:
                     "critical_scope_total_files": payload.get("critical_scope_total_files"),
                     "critical_scope_completed_files": payload.get("critical_scope_completed_files"),
                     "scan_progress": payload.get("scan_progress"),
+                    "failure_reason": payload.get("failure_reason") or scan_result.error_message,
                     "started_at": payload.get("started_at"),
                     "finished_at": payload.get("finished_at"),
                     "duration_seconds": payload.get("duration_seconds"),

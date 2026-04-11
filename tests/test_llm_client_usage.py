@@ -537,8 +537,8 @@ def test_lab_provider_reads_yaml_defaults_and_env(monkeypatch):
                         "base_url": "https://hkucvm.dynv6.net/v1",
                         "model": "DeepSeek-V3.2",
                         "api_key_env": "LAB_LLM_API_KEY",
-                        "max_tokens": 65536,
-                        "context_limit": 65536,
+                        "max_tokens": 8192,
+                        "context_limit": 163840,
                     }
                 },
             }
@@ -551,8 +551,8 @@ def test_lab_provider_reads_yaml_defaults_and_env(monkeypatch):
     assert config.api_key == "lab-env-key"
     assert config.base_url == "https://hkucvm.dynv6.net/v1"
     assert config.model == "DeepSeek-V3.2"
-    assert config.max_tokens == 65536
-    assert config.context_limit == 65536
+    assert config.max_tokens == 8192
+    assert config.context_limit == 163840
     assert config.enable_thinking is True
 
 
@@ -567,8 +567,8 @@ def test_lab_provider_loads_fallback_provider_from_yaml(monkeypatch):
                         "base_url": "https://hkucvm.dynv6.net/v1",
                         "model": "DeepSeek-V3.2",
                         "api_key_env": "LAB_LLM_API_KEY",
-                        "max_tokens": 65536,
-                        "context_limit": 65536,
+                        "max_tokens": 8192,
+                        "context_limit": 163840,
                         "fallback_provider": "deepseek",
                         "fallback_on_retry_exhausted": True,
                     }
@@ -600,8 +600,8 @@ def test_create_llm_client_supports_lab_provider(monkeypatch):
                         "base_url": "https://hkucvm.dynv6.net/v1",
                         "model": "DeepSeek-V3.2",
                         "api_key_env": "LAB_LLM_API_KEY",
-                        "max_tokens": 65536,
-                        "context_limit": 65536,
+                        "max_tokens": 8192,
+                        "context_limit": 163840,
                     }
                 },
             }
@@ -614,6 +614,40 @@ def test_create_llm_client_supports_lab_provider(monkeypatch):
     assert isinstance(client, OpenAIClient)
     assert client.config.provider == "lab"
     assert client.config.model == "DeepSeek-V3.2"
+
+
+def test_lab_context_limit_error_retries_with_reduced_max_tokens(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=_FakeOpenAI))
+    monkeypatch.setattr("llm.client.time.sleep", lambda _: None)
+
+    client = _ScriptedClient(
+        LLMConfig(
+            provider="lab",
+            model="lab-model",
+            max_tokens=65536,
+            context_limit=65536,
+            max_retries=2,
+            initial_delay=0.0,
+            max_delay=0.0,
+        ),
+        chat_script=[
+            RuntimeError(
+                "This model's maximum context length is 163840 tokens. "
+                "However, you requested 65536 output tokens and your prompt contains "
+                "at least 98305 input tokens, for a total of at least 163841 tokens. "
+                "Please reduce the length of the input prompt or the number of requested "
+                "output tokens. (parameter=input_tokens, value=98305)"
+            ),
+            "primary-ok",
+        ],
+    )
+
+    assert client.chat([{"role": "user", "content": "ping"}]) == "primary-ok"
+    assert len(client.chat_calls) == 2
+    assert client.chat_calls[0]["kwargs"] == {}
+    assert client.chat_calls[1]["kwargs"]["max_tokens"] == 63487
+    assert client.context_limit == 163840
+    assert client.config.context_limit == 163840
 
 
 def test_lab_retry_exhaustion_uses_deepseek_fallback(monkeypatch):

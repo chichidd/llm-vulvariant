@@ -17,6 +17,7 @@ from utils.llm_utils import extract_json_from_text
 from scanner.agent.utils import (
     clear_reasoning_content,
     compress_iteration_conversation,
+    estimate_serialized_tokens,
     make_serializable,
 )
 
@@ -39,6 +40,7 @@ _CONTEXT_LIMIT_ERROR_PATTERNS = (
     "too many tokens",
     "input is too long",
 )
+_PREFLIGHT_CONTEXT_THRESHOLD = 0.8
 
 
 class AgenticVulnFinder:
@@ -54,7 +56,7 @@ class AgenticVulnFinder:
         critical_stop_mode: str = "max",
         critical_stop_max_priority: int = 2,
         temperature: Optional[float] = None,
-        max_tokens: int = 65536,
+        max_tokens: Optional[int] = None,
         verbose: bool = True,
         output_dir: Optional[Path] = None,
         languages: Optional[List[str]] = None,
@@ -86,7 +88,8 @@ class AgenticVulnFinder:
         llm_config = getattr(self.llm_client, "config", None)
         default_temperature = getattr(llm_config, "temperature", 0.0) if llm_config is not None else 0.0
         self.temperature = default_temperature if temperature is None else temperature
-        self.max_tokens = max_tokens
+        default_max_tokens = to_int(getattr(llm_config, "max_tokens", 0)) if llm_config is not None else 0
+        self.max_tokens = default_max_tokens if max_tokens is None else max_tokens
         self.verbose = verbose
         self.output_dir = output_dir
         self.scan_languages = list(languages or [])
@@ -265,6 +268,21 @@ class AgenticVulnFinder:
     def _commit_messages(self, messages: List[Dict[str, Any]]) -> None:
         self.conversation_history += messages[len(self.conversation_history):]
 
+    def _mark_current_turn_start(self) -> None:
+        self._current_turn_start_index = len(self.conversation_history)
+
+    def _estimate_request_input_tokens(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        return estimate_serialized_tokens(
+            {
+                "messages": messages,
+                "tools": tools or [],
+            }
+        )
+
     def _get_last_request_input_tokens(self) -> int:
         return max(0, to_int(self.llm_client.get_last_request_input_tokens()))
 
@@ -273,6 +291,129 @@ class AgenticVulnFinder:
 
     def _get_last_request_context_limit(self) -> int:
         return max(0, to_int(self.llm_client.get_last_request_context_limit()))
+
+    def _get_effective_context_limit(self) -> int:
+        context_limit = self._get_last_request_context_limit()
+        if context_limit > 0:
+            return context_limit
+        llm_config = getattr(self.llm_client, "config", None)
+        if llm_config is not None:
+            context_limit = to_int(getattr(llm_config, "context_limit", 0))
+            if context_limit > 0:
+                return context_limit
+        return max(0, to_int(getattr(self.llm_client, "context_limit", 0)))
+
+    def _needs_preflight_compaction(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        planned_output_tokens: int = 0,
+        context_limit: int = 0,
+    ) -> bool:
+        if context_limit <= 0 or planned_output_tokens <= 0:
+            return False
+        estimated_input_tokens = self._estimate_request_input_tokens(messages, tools)
+        return estimated_input_tokens + planned_output_tokens > int(_PREFLIGHT_CONTEXT_THRESHOLD * context_limit)
+
+    def _compact_previous_history_locally(self) -> bool:
+        if len(self.conversation_history) <= 2:
+            return False
+        latest_message = self.conversation_history[-1] if self.conversation_history else None
+        has_current_user = isinstance(latest_message, dict) and latest_message.get("role") == "user"
+        history_end = len(self.conversation_history) - 1 if has_current_user else len(self.conversation_history)
+        prior_messages = self.conversation_history[1:history_end]
+        if not prior_messages:
+            return False
+
+        assistant_summary_count = sum(
+            1
+            for message in prior_messages
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        )
+        compacted_summary = (
+            "Previous scan context was compacted locally before this query. "
+            "Use the current progress snapshot and memory-backed tools as the source of truth."
+        )
+        if assistant_summary_count > 0:
+            compacted_summary += f" Prior assistant summaries compacted: {assistant_summary_count}."
+        else:
+            compacted_summary += f" Prior messages compacted: {len(prior_messages)}."
+
+        new_history = [self.conversation_history[0], {"role": "assistant", "content": compacted_summary}]
+        if has_current_user:
+            new_history.append(latest_message)
+        self.conversation_history = new_history
+        return True
+
+    def _compact_current_user_message(self, iteration: int) -> bool:
+        if not self.conversation_history:
+            return False
+        latest_message = self.conversation_history[-1]
+        if not isinstance(latest_message, dict) or latest_message.get("role") != "user":
+            return False
+        compact_message = self._get_user_message(iteration, compact=True)
+        if compact_message == latest_message.get("content", ""):
+            return False
+        self.conversation_history[-1] = {"role": "user", "content": compact_message}
+        return True
+
+    def _prepare_preflight_messages(
+        self,
+        iteration: int,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        context_limit = self._get_effective_context_limit()
+        planned_output_tokens = max(0, to_int(self.max_tokens))
+        if not self._needs_preflight_compaction(
+            messages,
+            tools,
+            planned_output_tokens=planned_output_tokens,
+            context_limit=context_limit,
+        ):
+            return messages, False
+
+        if self.verbose:
+            logger.info(
+                "Preflight compaction triggered before query: estimated_input_tokens=%s planned_output_tokens=%s context_limit=%s",
+                self._estimate_request_input_tokens(messages, tools),
+                planned_output_tokens,
+                context_limit,
+            )
+
+        original_history_len = len(self.conversation_history)
+        current_turn_additions = messages[original_history_len:]
+
+        compacted_history = self._compact_previous_history_locally()
+        if compacted_history:
+            messages = self._clear_reasoning_content() + current_turn_additions
+            self._mark_current_turn_start()
+
+        if self._needs_preflight_compaction(
+            messages,
+            tools,
+            planned_output_tokens=planned_output_tokens,
+            context_limit=context_limit,
+        ):
+            compacted_user = self._compact_current_user_message(iteration)
+            if compacted_user:
+                messages = self._clear_reasoning_content() + current_turn_additions
+                self._mark_current_turn_start()
+
+        if self._needs_preflight_compaction(
+            messages,
+            tools,
+            planned_output_tokens=planned_output_tokens,
+            context_limit=context_limit,
+        ):
+            logger.warning(
+                "Skipping LLM query because the preflight request budget remains above %.0f%% of the context limit "
+                "after local compaction",
+                _PREFLIGHT_CONTEXT_THRESHOLD * 100,
+            )
+            return messages, True
+
+        return messages, False
 
     def _is_near_context_limit(
         self,
@@ -309,6 +450,7 @@ class AgenticVulnFinder:
     def _run_turn(self, iteration: int) -> int:
         sub_turn = 1
         messages = self._clear_reasoning_content()
+        self._mark_current_turn_start()
         while True:
             tools = self.toolkit.get_available_tools()
             tool_parameter_schemas = {
@@ -317,6 +459,10 @@ class AgenticVulnFinder:
                 if isinstance(tool_definition, dict) and isinstance(tool_definition.get("function"), dict)
             }
             llm_provider = getattr(getattr(self.llm_client, "config", None), "provider", None)
+            messages, skip_query = self._prepare_preflight_messages(iteration, messages, tools)
+            if skip_query:
+                self._commit_messages(messages)
+                return sub_turn
             try:
                 message = self.llm_client.chat(
                     messages,
@@ -589,7 +735,7 @@ class AgenticVulnFinder:
         
         return "\n\n".join(complementary_parts)
 
-    def _get_user_message(self, iteration: int) -> str:
+    def _get_user_message(self, iteration: int, compact: bool = False) -> str:
         shared_observation_count = max(
             0,
             to_int(self.shared_public_memory_scope.get("observation_count", 0)),
@@ -651,8 +797,12 @@ class AgenticVulnFinder:
                     f"{progress_info}"
                 )
             if pending:
-                progress_info += f" Pending: {pending[:50]}"
-                progress_info += "\nUse 'check_file_status' tool to get the status of specific files."
+                if compact:
+                    progress_info += f" Pending: {len(pending)} files remain."
+                    progress_info += "\nUse 'check_file_status' tool to inspect specific files as needed."
+                else:
+                    progress_info += f" Pending: {pending[:50]}"
+                    progress_info += "\nUse 'check_file_status' tool to get the status of specific files."
             # Get already scanned files and findings to avoid duplicates
             scanned_files = self.memory.get_scanned_files()
             findings = self.memory.get_findings_summary()
@@ -670,14 +820,20 @@ class AgenticVulnFinder:
             has_priority_one = any(priority == 1 for priority in self.module_priorities.values())
             has_related = any(priority == 2 for priority in self.module_priorities.values())
         
+        intermediate_kwargs = {
+            "scanned_files": scanned_files,
+            "findings": findings,
+            "progress_info": progress_info,
+            "critical_stop_max_priority": self.critical_stop_max_priority,
+            "shared_observation_count": shared_observation_count,
+            "has_priority_one": has_priority_one,
+            "has_related": has_related,
+        }
+        if compact:
+            intermediate_kwargs["compact"] = True
+
         return guidance_prefix + build_intermediate_user_message(
-            scanned_files=scanned_files,
-            findings=findings,
-            progress_info=progress_info,
-            critical_stop_max_priority=self.critical_stop_max_priority,
-            shared_observation_count=shared_observation_count,
-            has_priority_one=has_priority_one,
-            has_related=has_related,
+            **intermediate_kwargs,
         )
 
     def _finalize_iteration_progress(self, iteration: int) -> None:
@@ -759,9 +915,13 @@ class AgenticVulnFinder:
             prev_conv_length = len(self.conversation_history)
             _ = self._run_turn(iteration)
             self._finalize_iteration_progress(iteration)
+            turn_start_index = min(
+                max(0, to_int(getattr(self, "_current_turn_start_index", prev_conv_length))),
+                len(self.conversation_history),
+            )
             response = ""
             # Only inspect assistant messages produced in the current turn.
-            for message in reversed(self.conversation_history[prev_conv_length:]):
+            for message in reversed(self.conversation_history[turn_start_index:]):
                 role = getattr(message, "role", None)
                 if role is None and isinstance(message, dict):
                     role = message.get("role")
@@ -793,14 +953,14 @@ class AgenticVulnFinder:
                 iteration_file = conversations_dir / f"iteration_{iteration}.json"
                 with open(iteration_file, "w", encoding="utf-8") as handle:
                     json.dump(make_serializable(self.conversation_history), handle, indent=2, ensure_ascii=False)
-                iteration_history = self.conversation_history[prev_conv_length:]
+                iteration_history = self.conversation_history[turn_start_index:]
                 summarized = compress_iteration_conversation(
                     self.llm_client, iteration, iteration_history, verbose=self.verbose
                 )
                 summary_file = conversations_dir / f"iteration_{iteration}_output_summary.json"
                 with open(summary_file, "w", encoding="utf-8") as handle:
                     json.dump(summarized, handle, indent=2, ensure_ascii=False)
-                self.conversation_history = self.conversation_history[:prev_conv_length]
+                self.conversation_history = self.conversation_history[:turn_start_index]
 
                 # Keep history bounded even if compression returns a failure stub.
                 assistant_summary = self._extract_complementary_summary(summarized)

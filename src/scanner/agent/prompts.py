@@ -389,6 +389,7 @@ def build_intermediate_user_message(
     shared_observation_count: int = 0,
     has_priority_one: bool = True,
     has_related: bool = True,
+    compact: bool = False,
 ) -> str:
     """Build intermediate prompt with context about what's already been scanned."""
     normalized_max_priority = 1 if critical_stop_max_priority == 1 else 2
@@ -450,12 +451,27 @@ def build_intermediate_user_message(
             "broad searches for a new module or pattern. Prefer focused query terms derived from the "
             "current vulnerability pattern instead of an empty query unless you need a broad overview."
         )
-    
+
+    if compact:
+        if findings:
+            msg += (
+                "\n\n**Reported Vulnerability Memory**: "
+                f"{len(findings)} previously reported vulnerabilities tracked in memory. "
+                "Do not re-report duplicates; rely on memory summaries and `check_file_status`."
+            )
+        if scanned_files:
+            msg += (
+                "\n\n**Scanned File Memory**: "
+                f"{len(scanned_files)} previously scanned files tracked in memory. "
+                "Use `check_file_status` for specific files instead of replaying the full inventory."
+            )
+        return msg
+
     if findings:
         msg += "\n\n**Already Reported Vulnerabilities** (DO NOT REPORT AGAIN):"
         for f in findings:
             msg += f"\n- {f['file']}: {f['type']} ({f['confidence']})"
-    
+
     if scanned_files:
         # Show a sample of scanned files to save context
         sample = scanned_files[:20]

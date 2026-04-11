@@ -111,6 +111,12 @@ def _make_finder(monkeypatch, tmp_path=None):
     )
 
 
+def test_finder_defaults_max_tokens_from_llm_client(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+
+    assert finder.max_tokens == 128
+
+
 def test_init_memory_tracks_scan_signature(monkeypatch, tmp_path):
     monkeypatch.setattr(finder_module, "AgenticToolkit", DummyToolkit)
     monkeypatch.setattr(finder_module, "AgentMemoryManager", _CaptureScanSignatureMemory)
@@ -651,6 +657,36 @@ class _SequencedLLM:
         return self.context_limit
 
 
+class _RecordingLLM:
+    def __init__(self, response, *, context_limit=4096, max_tokens=256):
+        self._response = response
+        self.context_limit = context_limit
+        self.config = SimpleNamespace(max_tokens=max_tokens)
+        self.chat_calls = []
+
+    def chat(self, messages, tools=None, **kwargs):
+        self.chat_calls.append(
+            {
+                "messages": list(messages),
+                "tools": list(tools) if isinstance(tools, list) else tools,
+                "kwargs": kwargs,
+            }
+        )
+        return self._response
+
+    def get_last_usage_summary(self):
+        return {}
+
+    def get_last_request_input_tokens(self) -> int:
+        return 0
+
+    def get_last_request_output_tokens(self) -> int:
+        return 0
+
+    def get_last_request_context_limit(self) -> int:
+        return self.context_limit
+
+
 def test_run_turn_stops_on_invalid_model_message(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
     bad_llm = _SequencedLLM(
@@ -665,6 +701,134 @@ def test_run_turn_stops_on_invalid_model_message(monkeypatch):
 
     assert result == 1
     assert bad_llm.chat_calls == 1
+
+
+def test_run_turn_compacts_history_and_current_user_before_query(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    llm = _RecordingLLM(
+        SimpleNamespace(content="done", tool_calls=None, reasoning_content=None),
+        context_limit=4096,
+        max_tokens=256,
+    )
+    finder.llm_client = llm
+    finder.max_tokens = 256
+    finder.memory = SimpleNamespace(
+        get_pending_files=lambda max_priority=2: [f"pending_{idx}.py" for idx in range(100)],
+        format_progress_info=lambda: "10/200 files scanned, 1 findings.",
+        get_scanned_files=lambda: [f"scanned_{idx}.py" for idx in range(500)],
+        get_findings_summary=lambda: [
+            {"file": f"finding_{idx}.py", "type": "cmd", "confidence": "high"}
+            for idx in range(20)
+        ],
+    )
+
+    def fake_build_intermediate_user_message(
+        scanned_files,
+        findings,
+        progress_info,
+        critical_stop_max_priority=2,
+        shared_observation_count=0,
+        has_priority_one=True,
+        has_related=True,
+        compact=False,
+    ):
+        _ = (
+            scanned_files,
+            findings,
+            progress_info,
+            critical_stop_max_priority,
+            shared_observation_count,
+            has_priority_one,
+            has_related,
+        )
+        return "COMPACT USER" if compact else "FULL USER"
+
+    monkeypatch.setattr(finder_module, "build_intermediate_user_message", fake_build_intermediate_user_message)
+
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "old user"},
+        {"role": "assistant", "content": "X" * 120_000},
+        {"role": "user", "content": "FULL USER " + ("Y" * 30_000)},
+    ]
+
+    sub_turns = finder._run_turn(iteration=1)
+
+    assert sub_turns == 1
+    assert len(llm.chat_calls) == 1
+    sent_messages = llm.chat_calls[0]["messages"]
+    assert sent_messages[-1]["content"] == "COMPACT USER"
+    assert all(message.get("content") != "X" * 120_000 for message in sent_messages if isinstance(message, dict))
+
+
+def test_run_stops_on_completion_after_preflight_compaction(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    finder.max_tokens = 256
+    finder.llm_client = _SequencedLLM(
+        [
+            SimpleNamespace(role="assistant", content="large intermediate " + ("X" * 120_000), tool_calls=None, reasoning_content=None),
+            SimpleNamespace(role="assistant", content="analysis complete", tool_calls=None, reasoning_content=None),
+        ],
+        context_limit=4096,
+        max_tokens=256,
+    )
+
+    finder.run()
+
+    assert finder.llm_client.chat_calls == 2
+
+
+def test_run_turn_skips_query_when_preflight_budget_still_exceeded_after_compaction(monkeypatch):
+    finder = _make_finder(monkeypatch, tmp_path=None)
+    llm = _RecordingLLM(
+        SimpleNamespace(content="done", tool_calls=None, reasoning_content=None),
+        context_limit=2048,
+        max_tokens=512,
+    )
+    finder.llm_client = llm
+    finder.max_tokens = 512
+    finder.memory = SimpleNamespace(
+        get_pending_files=lambda max_priority=2: [],
+        format_progress_info=lambda: "progress",
+        get_scanned_files=lambda: [],
+        get_findings_summary=lambda: [],
+    )
+
+    def fake_build_intermediate_user_message(
+        scanned_files,
+        findings,
+        progress_info,
+        critical_stop_max_priority=2,
+        shared_observation_count=0,
+        has_priority_one=True,
+        has_related=True,
+        compact=False,
+    ):
+        _ = (
+            scanned_files,
+            findings,
+            progress_info,
+            critical_stop_max_priority,
+            shared_observation_count,
+            has_priority_one,
+            has_related,
+        )
+        if compact:
+            return "Y" * 50_000
+        return "FULL USER"
+
+    monkeypatch.setattr(finder_module, "build_intermediate_user_message", fake_build_intermediate_user_message)
+
+    finder.conversation_history = [
+        {"role": "system", "content": "system"},
+        {"role": "assistant", "content": "X" * 80_000},
+        {"role": "user", "content": "FULL USER " + ("Z" * 50_000)},
+    ]
+
+    sub_turns = finder._run_turn(iteration=1)
+
+    assert sub_turns == 1
+    assert llm.chat_calls == []
 
 
 def _tool_call(name="mock_tool", arguments="{}"):
@@ -858,7 +1022,7 @@ def test_run_turn_uses_api_usage_to_stop_before_next_request(monkeypatch):
 
 def test_run_turn_continues_when_actual_usage_is_well_below_context_limit(monkeypatch):
     finder = _make_finder(monkeypatch, tmp_path=None)
-    finder.max_tokens = 65536
+    finder.max_tokens = 256
     finder.llm_client = _UsageDrivenLLM(
         responses=[
             SimpleNamespace(
@@ -874,7 +1038,7 @@ def test_run_turn_continues_when_actual_usage_is_well_below_context_limit(monkey
         ],
         input_tokens=[128, 192],
         context_limit=65536,
-        max_tokens=65536,
+        max_tokens=256,
     )
     finder.toolkit = _ToolAwareToolkit()
     finder.conversation_history = [

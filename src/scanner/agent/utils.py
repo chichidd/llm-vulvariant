@@ -20,6 +20,8 @@ REQUIRED_COMPRESSION_LIST_FIELDS = (
     "evidence_gaps",
     "files_completed_this_iteration",
 )
+_SERIALIZED_TOKEN_ESTIMATE_DIVISOR = 3
+_SERIALIZED_TOKEN_ESTIMATE_OVERHEAD = 32
 
 
 def _is_compression_payload(payload: Dict[str, Any]) -> bool:
@@ -163,6 +165,21 @@ def make_serializable(obj: Any) -> Any:
         return str(obj)
     except Exception:  # pylint: disable=broad-except
         return f"<non-serializable: {type(obj).__name__}>"
+
+
+def estimate_serialized_tokens(obj: Any) -> int:
+    """Return a conservative token estimate for a request payload.
+
+    The estimate intentionally overstates token usage so the caller can trigger
+    preflight compaction before the provider rejects the request.
+    """
+    serialized = json.dumps(
+        make_serializable(obj),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    byte_length = len(serialized.encode("utf-8"))
+    return max(1, byte_length // _SERIALIZED_TOKEN_ESTIMATE_DIVISOR + _SERIALIZED_TOKEN_ESTIMATE_OVERHEAD)
 
 
 DEFAULT_COMPRESSION_PROMPT = """You are a professional conversation analysis and compression expert. Please analyze and compress the assistant's scan logs from the following vulnerability scanning process, extracting key REASONING information only.

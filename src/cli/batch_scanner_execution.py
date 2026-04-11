@@ -7,8 +7,12 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import json
+import multiprocessing
+import os
 from pathlib import Path
+import queue
 import re
+import signal
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
 from config import _path_config
@@ -287,7 +291,7 @@ def _run_target_scan(
         cve_id=cve_id,
         target_repo=scan_target.repo_name,
         target_commit=scan_target.commit_hash,
-        output_base=str(batch_args.scan_output_dir),
+        output_base=str(getattr(batch_args, "scan_output_dir", "scan-results-batch")),
     )
     findings_path = output_dir / "agentic_vuln_findings.json"
     resolved_target_repos_root = Path(batch_args.target_repos_root).expanduser()
@@ -398,10 +402,43 @@ def _run_target_scan(
     return "failed"
 
 
+_DEFAULT_CREATE_LLM_CLIENT = create_llm_client
 _DEFAULT_RUN_TARGET_SCAN = _run_target_scan
 
 
-def _run_target_scan_task(
+def _build_timed_out_scan_task_result(
+    *,
+    started_at: datetime,
+    batch_args: argparse.Namespace,
+    cve_id: str,
+    target: SimilarProfileCandidate,
+    timeout_seconds: int,
+) -> Dict[str, object]:
+    """Return a structured incomplete result for a target scan timeout."""
+    finished_at = datetime.now()
+    output_dir = agent_scanner.resolve_output_dir(
+        cve_id=cve_id,
+        target_repo=target.profile_ref.repo_name,
+        target_commit=target.profile_ref.commit_hash,
+        output_base=str(getattr(batch_args, "scan_output_dir", "scan-results-batch")),
+    )
+    saved_quality = _load_saved_scan_quality(output_dir)
+    return {
+        "status": "incomplete",
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "duration_seconds": round((finished_at - started_at).total_seconds(), 6),
+        "coverage_status": saved_quality.get("coverage_status", "unknown"),
+        "critical_scope_present": saved_quality.get("critical_scope_present"),
+        "critical_complete": saved_quality.get("critical_complete"),
+        "critical_scope_total_files": saved_quality.get("critical_scope_total_files"),
+        "critical_scope_completed_files": saved_quality.get("critical_scope_completed_files"),
+        "scan_progress": saved_quality.get("scan_progress"),
+        "failure_reason": f"target scan timed out after {timeout_seconds}s",
+    }
+
+
+def _run_target_scan_task_inner(
     *,
     batch_args: argparse.Namespace,
     cve_id: str,
@@ -421,14 +458,14 @@ def _run_target_scan_task(
     """
     started_at = datetime.now()
     status: Literal["ok", "skipped", "incomplete", "failed"] = "failed"
+    failure_reason: Optional[str] = None
     output_dir = agent_scanner.resolve_output_dir(
         cve_id=cve_id,
         target_repo=target.profile_ref.repo_name,
         target_commit=target.profile_ref.commit_hash,
-        output_base=str(batch_args.scan_output_dir),
+        output_base=str(getattr(batch_args, "scan_output_dir", "scan-results-batch")),
     )
     try:
-        llm_client = create_llm_client(LLMConfig(provider=batch_args.llm_provider, model=batch_args.llm_name))
         run_target_scan = _run_target_scan
         try:
             from cli import batch_scanner as batch_scanner_module
@@ -444,6 +481,11 @@ def _run_target_scan_task(
             )
             if candidate_run_target_scan is not _DEFAULT_RUN_TARGET_SCAN:
                 run_target_scan = candidate_run_target_scan
+        llm_client = (
+            create_llm_client(LLMConfig(provider=batch_args.llm_provider, model=batch_args.llm_name))
+            if run_target_scan is _DEFAULT_RUN_TARGET_SCAN or create_llm_client is not _DEFAULT_CREATE_LLM_CLIENT
+            else None
+        )
         status = run_target_scan(
             batch_args=batch_args,
             cve_id=cve_id,
@@ -459,6 +501,7 @@ def _run_target_scan_task(
             exc,
         )
         status = "failed"
+        failure_reason = str(exc)
 
     finished_at = datetime.now()
     saved_quality = (
@@ -477,6 +520,145 @@ def _run_target_scan_task(
         "critical_scope_total_files": saved_quality.get("critical_scope_total_files"),
         "critical_scope_completed_files": saved_quality.get("critical_scope_completed_files"),
         "scan_progress": saved_quality.get("scan_progress"),
+        "failure_reason": failure_reason,
+    }
+
+
+def _target_scan_process_entry(result_queue, kwargs: Dict[str, Any]) -> None:
+    """Run one target scan in a child process so it can be killed on timeout."""
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    try:
+        result_queue.put({"ok": True, "result": _run_target_scan_task_inner(**kwargs)})
+    except BaseException as exc:  # pylint: disable=broad-except
+        result_queue.put(
+            {
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
+        )
+
+
+def _terminate_process_tree(process: multiprocessing.Process) -> None:
+    """Terminate one scan child process group with a kill fallback."""
+    if process.pid is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        if process.is_alive():
+            process.terminate()
+    except OSError:
+        process.terminate()
+    process.join(timeout=10)
+    if process.is_alive():
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            if process.is_alive():
+                process.kill()
+        except OSError:
+            process.kill()
+        process.join(timeout=5)
+
+
+def _run_target_scan_task(
+    *,
+    batch_args: argparse.Namespace,
+    cve_id: str,
+    vulnerability_profile: Any,
+    target: SimilarProfileCandidate,
+) -> Dict[str, object]:
+    """Run one target scan with an optional process-level timeout."""
+    timeout_seconds = int(getattr(batch_args, "target_scan_timeout", 0) or 0)
+    if timeout_seconds <= 0:
+        return _run_target_scan_task_inner(
+            batch_args=batch_args,
+            cve_id=cve_id,
+            vulnerability_profile=vulnerability_profile,
+            target=target,
+        )
+
+    started_at = datetime.now()
+    result_queue = multiprocessing.Queue(maxsize=1)
+    process = multiprocessing.Process(
+        target=_target_scan_process_entry,
+        kwargs={
+            "result_queue": result_queue,
+            "kwargs": {
+                "batch_args": batch_args,
+                "cve_id": cve_id,
+                "vulnerability_profile": vulnerability_profile,
+                "target": target,
+            },
+        },
+    )
+    process.start()
+    process.join(timeout=timeout_seconds)
+    if process.is_alive():
+        logger.error(
+            "Target scan timed out after %ss: %s@%s",
+            timeout_seconds,
+            target.profile_ref.repo_name,
+            target.profile_ref.commit_hash[:12],
+        )
+        _terminate_process_tree(process)
+        return _build_timed_out_scan_task_result(
+            started_at=started_at,
+            batch_args=batch_args,
+            cve_id=cve_id,
+            target=target,
+            timeout_seconds=timeout_seconds,
+        )
+
+    try:
+        payload = result_queue.get_nowait()
+    except queue.Empty:
+        if process.exitcode == 0:
+            error_message = "target scan child exited without returning a result"
+        else:
+            error_message = f"target scan child exited with code {process.exitcode}"
+        logger.error(
+            "%s: %s@%s",
+            error_message,
+            target.profile_ref.repo_name,
+            target.profile_ref.commit_hash[:12],
+        )
+        return {
+            **_build_timed_out_scan_task_result(
+                started_at=started_at,
+                batch_args=batch_args,
+                cve_id=cve_id,
+                target=target,
+                timeout_seconds=timeout_seconds,
+            ),
+            "status": "failed",
+            "failure_reason": error_message,
+        }
+
+    if payload.get("ok"):
+        return payload["result"]
+
+    logger.error(
+        "Target scan child failed for %s@%s: %s: %s",
+        target.profile_ref.repo_name,
+        target.profile_ref.commit_hash[:12],
+        payload.get("error_type", "Error"),
+        payload.get("error_message", ""),
+    )
+    return {
+        **_build_timed_out_scan_task_result(
+            started_at=started_at,
+            batch_args=batch_args,
+            cve_id=cve_id,
+            target=target,
+            timeout_seconds=timeout_seconds,
+        ),
+        "status": "failed",
+        "failure_reason": payload.get("error_message", "target scan child failed"),
     }
 
 
@@ -528,6 +710,7 @@ def _run_selected_target_scans(
             "critical_scope_total_files": task_result.get("critical_scope_total_files"),
             "critical_scope_completed_files": task_result.get("critical_scope_completed_files"),
             "scan_progress": task_result.get("scan_progress"),
+            "failure_reason": task_result.get("failure_reason"),
             "started_at": task_result["started_at"],
             "finished_at": task_result["finished_at"],
             "duration_seconds": task_result["duration_seconds"],

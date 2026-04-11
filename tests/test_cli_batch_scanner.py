@@ -1,4 +1,5 @@
 import json
+import time
 import sys
 import threading
 from argparse import Namespace
@@ -1673,8 +1674,10 @@ def test_run_selected_target_scans_preserves_target_order_with_parallel_workers(
         else:
             assert slow_started.wait(timeout=1.0) is True
             release_slow.set()
+        status = "ok" if target.profile_ref.repo_name == "target-a" else "failed"
         return {
-            "status": "ok" if target.profile_ref.repo_name == "target-a" else "failed",
+            "status": status,
+            "failure_reason": "synthetic failure" if status == "failed" else None,
             "started_at": f"start-{target.profile_ref.repo_name}",
             "finished_at": f"finish-{target.profile_ref.repo_name}",
             "duration_seconds": 0.02,
@@ -1693,6 +1696,7 @@ def test_run_selected_target_scans_preserves_target_order_with_parallel_workers(
     assert [item["status"] for item in results] == ["ok", "failed"]
     assert results[0]["started_at"] == "start-target-a"
     assert results[1]["finished_at"] == "finish-target-b"
+    assert results[1]["failure_reason"] == "synthetic failure"
 
 
 def test_discover_latest_repo_refs_reads_head_under_repo_lock(monkeypatch, tmp_path):
@@ -2511,6 +2515,21 @@ def test_resolve_scan_workers_guarantees_at_least_one():
     assert batch_scanner._resolve_scan_workers(args) == 1
 
 
+def test_validate_args_rejects_nonpositive_target_scan_timeout(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_scanner.py",
+            "--target-scan-timeout",
+            "0",
+        ],
+    )
+    args = batch_scanner.parse_args()
+
+    assert batch_scanner._validate_args(args) is False
+
+
 def test_parse_args_supports_scan_all_profiled_targets(monkeypatch):
     monkeypatch.setattr(
         sys,
@@ -2682,6 +2701,94 @@ def test_run_target_scan_task_includes_saved_coverage_metadata(monkeypatch, tmp_
     assert result["started_at"]
     assert result["finished_at"]
     assert result["duration_seconds"] >= 0.0
+
+
+def test_run_target_scan_task_records_failure_reason(monkeypatch, tmp_path):
+    task = {
+        "task_id": "CVE-2026-0001:target-repo:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cve_id": "CVE-2026-0001",
+        "vulnerability_profile": object(),
+        "target": SimilarProfileCandidate(
+            profile_ref=ProfileRef(
+                repo_name="target-repo",
+                commit_hash="b" * 40,
+                profile=_mk_profile("target"),
+            ),
+            metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+        ),
+    }
+    batch_args = Namespace(
+        llm_provider="deepseek",
+        llm_name=None,
+        scan_output_dir=tmp_path / "scan-out",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+    )
+    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+
+    def failing_scan(**kwargs):
+        _ = kwargs
+        raise RuntimeError("synthetic scan failure")
+
+    monkeypatch.setattr(batch_scanner, "_run_target_scan", failing_scan)
+
+    result = batch_scanner._run_target_scan_task(
+        task=task,
+        batch_args=batch_args,
+        target_repos_root=tmp_path,
+        repo_lock_manager=batch_scanner.RepoPathLockManager(),
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure_reason"] == "synthetic scan failure"
+
+
+def test_run_target_scan_task_times_out_slow_worker(monkeypatch, tmp_path):
+    task = {
+        "task_id": "CVE-2026-0001:target-repo:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "cve_id": "CVE-2026-0001",
+        "vulnerability_profile": object(),
+        "target": SimilarProfileCandidate(
+            profile_ref=ProfileRef(
+                repo_name="target-repo",
+                commit_hash="b" * 40,
+                profile=_mk_profile("target"),
+            ),
+            metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+        ),
+    }
+    batch_args = Namespace(
+        llm_provider="deepseek",
+        llm_name=None,
+        scan_output_dir=tmp_path / "scan-out",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        target_scan_timeout=1,
+    )
+    monkeypatch.setattr(batch_scanner, "create_llm_client", lambda config: object())
+
+    def slow_scan(**kwargs):
+        _ = kwargs
+        time.sleep(20)
+        return "ok"
+
+    monkeypatch.setattr(batch_scanner, "_run_target_scan", slow_scan)
+
+    started_at = time.monotonic()
+    result = batch_scanner._run_target_scan_task(
+        task=task,
+        batch_args=batch_args,
+        target_repos_root=tmp_path,
+        repo_lock_manager=batch_scanner.RepoPathLockManager(),
+    )
+
+    assert time.monotonic() - started_at < 8
+    assert result["status"] == "incomplete"
+    assert "timed out" in result["failure_reason"]
 
 
 def test_main_uses_jobs_when_scan_worker_flags_are_unset(monkeypatch, tmp_path):
