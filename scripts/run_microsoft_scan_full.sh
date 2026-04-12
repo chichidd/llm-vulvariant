@@ -20,6 +20,8 @@ RUNTIME_ROOT="${RUNTIME_ROOT:-$ROOT/results/claude-runtime}"
 EXPLOITABILITY_TIMEOUT="${EXPLOITABILITY_TIMEOUT:-1800}"
 EXPLOITABILITY_JOBS="${EXPLOITABILITY_JOBS:-1}"
 EXPLOITABILITY_RUNTIME_MODE="${EXPLOITABILITY_RUNTIME_MODE:-run}"
+TARGET_SCAN_TIMEOUT="${TARGET_SCAN_TIMEOUT:-7200}"
+ALLOW_PARTIAL_EXPLOITABILITY="${ALLOW_PARTIAL_EXPLOITABILITY:-0}"
 SUBMISSION_PREFIX="${SUBMISSION_PREFIX:-exploitable_findings}"
 LLM_PROVIDER="${LLM_PROVIDER:-lab}"
 LLM_NAME="${LLM_NAME:-}"
@@ -78,6 +80,7 @@ set +e
   --fallback-top-n 1000 \
   --max-workers 8 \
   --scan-workers 8 \
+  --target-scan-timeout "$TARGET_SCAN_TIMEOUT" \
   --max-iterations-cap 10 \
   --llm-provider "$LLM_PROVIDER" \
   --llm-name "$LLM_NAME" \
@@ -89,9 +92,16 @@ set -e
 SCAN_RESULTS_COUNT="$(find "$SCAN_OUTPUT_DIR" -name agentic_vuln_findings.json -type f 2>/dev/null || true)"
 SCAN_RESULTS_COUNT="$(printf '%s\n' "$SCAN_RESULTS_COUNT" | sed '/^$/d' | wc -l | tr -d ' ')"
 echo "[$(date -Iseconds)] batch_scanner exit=$SCAN_EXIT scan_results=$SCAN_RESULTS_COUNT" | tee -a "$STATUS_LOG"
-if (( SCAN_EXIT != 0 )) && (( SCAN_RESULTS_COUNT == 0 )); then
-  echo "[$(date -Iseconds)] No scan outputs were produced; abort before exploitability" | tee -a "$STATUS_LOG"
-  exit "$SCAN_EXIT"
+if (( SCAN_EXIT != 0 )); then
+  if [[ "$ALLOW_PARTIAL_EXPLOITABILITY" != "1" ]]; then
+    echo "[$(date -Iseconds)] batch_scanner failed with exit=$SCAN_EXIT; abort before exploitability" | tee -a "$STATUS_LOG"
+    exit "$SCAN_EXIT"
+  fi
+  if (( SCAN_RESULTS_COUNT == 0 )); then
+    echo "[$(date -Iseconds)] No scan outputs were produced; abort before exploitability" | tee -a "$STATUS_LOG"
+    exit "$SCAN_EXIT"
+  fi
+  echo "[$(date -Iseconds)] Partial exploitability explicitly allowed after scan exit=$SCAN_EXIT" | tee -a "$STATUS_LOG"
 fi
 
 echo "[$(date -Iseconds)] Stage 2/2: run exploitability" | tee -a "$STATUS_LOG"

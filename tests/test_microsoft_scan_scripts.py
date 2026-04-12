@@ -47,6 +47,8 @@ def _write_fake_python(bin_dir: Path, name: str = "python") -> Path:
                 "",
                 "log_path = Path(os.environ['CALLS_LOG'])",
                 "args = sys.argv[1:]",
+                "with log_path.open('a', encoding='utf-8') as handle:",
+                "    handle.write(json.dumps(args) + '\\n')",
                 "if args[:2] == ['-m', 'cli.batch_scanner'] and os.environ.get('FAKE_BATCH_SCANNER_EXIT'):",
                 "    scan_output = Path(args[args.index('--scan-output-dir') + 1])",
                 "    if os.environ.get('FAKE_BATCH_SCANNER_WRITE_PARTIAL') == '1':",
@@ -54,8 +56,6 @@ def _write_fake_python(bin_dir: Path, name: str = "python") -> Path:
                 "        out.mkdir(parents=True, exist_ok=True)",
                 "        (out / 'agentic_vuln_findings.json').write_text('{\"vulnerabilities\": []}', encoding='utf-8')",
                 "    raise SystemExit(int(os.environ['FAKE_BATCH_SCANNER_EXIT']))",
-                "with log_path.open('a', encoding='utf-8') as handle:",
-                "    handle.write(json.dumps(args) + '\\n')",
             ]
         )
         + "\n",
@@ -161,6 +161,8 @@ def test_run_microsoft_scan_full_executes_scan_and_exploitability(tmp_path: Path
     assert batch_call[batch_call.index("--max-workers") + 1] == "8"
     assert "--scan-workers" in batch_call
     assert batch_call[batch_call.index("--scan-workers") + 1] == "8"
+    assert "--target-scan-timeout" in batch_call
+    assert batch_call[batch_call.index("--target-scan-timeout") + 1] == "7200"
 
     assert "--scan-results-dir" in exploitability_call
     assert exploitability_call[exploitability_call.index("--scan-results-dir") + 1] == str(
@@ -291,7 +293,7 @@ def test_run_microsoft_scan_full_default_run_id_is_unique_when_run_tag_unset(tmp
     assert first_run_id != second_run_id
 
 
-def test_run_microsoft_scan_full_returns_scan_exit_when_partial_outputs_exist(tmp_path: Path) -> None:
+def test_run_microsoft_scan_full_aborts_on_scan_failure_even_with_partial_outputs(tmp_path: Path) -> None:
     bash_path = _require_script_runtime()
     pipeline_root = _prepare_pipeline_root(tmp_path)
     bin_dir = tmp_path / "bin"
@@ -318,4 +320,38 @@ def test_run_microsoft_scan_full_returns_scan_exit_when_partial_outputs_exist(tm
 
     assert result.returncode == 7
     calls = _load_logged_calls(calls_log)
+    assert any(call[:2] == ["-m", "cli.batch_scanner"] for call in calls)
+    assert not any(call[:2] == ["-m", "cli.exploitability"] for call in calls)
+    assert "abort before exploitability" in result.stdout
+
+
+def test_run_microsoft_scan_full_allows_partial_exploitability_when_explicitly_enabled(tmp_path: Path) -> None:
+    bash_path = _require_script_runtime()
+    pipeline_root = _prepare_pipeline_root(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls_log = tmp_path / "calls.log"
+    fake_python = _write_fake_python(bin_dir)
+
+    env = os.environ.copy()
+    env["CALLS_LOG"] = str(calls_log)
+    env["ROOT"] = str(pipeline_root)
+    env["RUN_TAG"] = "20260408-030000"
+    env["PYTHON_BIN"] = _fake_python_bin(fake_python)
+    env["FAKE_BATCH_SCANNER_EXIT"] = "7"
+    env["FAKE_BATCH_SCANNER_WRITE_PARTIAL"] = "1"
+    env["ALLOW_PARTIAL_EXPLOITABILITY"] = "1"
+
+    result = subprocess.run(
+        [bash_path, str(FULL_SCRIPT)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 7
+    calls = _load_logged_calls(calls_log)
     assert any(call[:2] == ["-m", "cli.exploitability"] for call in calls)
+    assert "Partial exploitability explicitly allowed" in result.stdout
