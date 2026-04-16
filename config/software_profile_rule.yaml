@@ -214,9 +214,11 @@ module_analyzer_config:
 
   # 验证模式会绕开 Claude CLI，直接执行 scan_repo.py，并固定低温/低并发参数。
   # 适合做结果复现、profile 对比和评测；日常 profiling 保持 false。
-  validation_mode: false
+  validation_mode: true
   validation_temperature: 0.0
   validation_max_workers: 1
+  validation_timeout_seconds: 3600
+  skill_claude_timeout_seconds: 900
   
   # 是否跳过空文件夹
   skip_empty_folders: true

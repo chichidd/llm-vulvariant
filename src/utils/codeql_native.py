@@ -102,6 +102,7 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         'threads': 0,
         'memory': 0,
         'timeout': 600,
+        'cpp_build_mode': 'auto',
     }
 
     if config_path.exists():
@@ -121,6 +122,7 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         config['threads'] = codeql_cli.get('threads', 0)
         config['memory'] = codeql_cli.get('memory', 0)
         config['timeout'] = codeql_cli.get('timeout', 600)
+        config['cpp_build_mode'] = codeql_cli.get('cpp_build_mode', 'auto')
 
     logger.debug(f"Loaded CodeQL config: queries_path={config.get('queries_path')}, database_dir={config.get('database_dir')}")
 
@@ -401,6 +403,17 @@ class CodeQLAnalyzer:
                 if not overwrite and self._is_complete_database(db_path):
                     return True, db_path
                 shutil.rmtree(db_path, ignore_errors=True)
+
+            if normalized_lang == "cpp" and str(self.config.get("cpp_build_mode", "")).lower() == "none":
+                logger.info(
+                    "Configured C/C++ CodeQL build mode is none; using --build-mode=none for %s.",
+                    source_path,
+                )
+                buildless_success, buildless_stdout, buildless_stderr = _create_db(["--build-mode=none"])
+                if buildless_success:
+                    return True, db_path
+                buildless_error = self._format_codeql_error(buildless_stdout, buildless_stderr)
+                return False, f"Failed to create database with --build-mode=none: {buildless_error}"
 
             if normalized_lang == "cpp":
                 has_build_system = self._has_cpp_build_system(source_path)

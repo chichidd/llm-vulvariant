@@ -41,6 +41,7 @@ class SkillModuleAnalyzer:
         validation_mode: bool = False,
         validation_temperature: float = 0.0,
         validation_max_workers: int = 1,
+        validation_timeout: int = 3600,
     ):
         self.llm_client = llm_client
         self.excluded_folders = excluded_folders or []
@@ -49,6 +50,8 @@ class SkillModuleAnalyzer:
         self.validation_mode = bool(validation_mode)
         self.validation_temperature = float(validation_temperature)
         self.validation_max_workers = max(1, int(validation_max_workers))
+        self.validation_timeout = max(1, int(validation_timeout))
+        self.claude_timeout = int(getattr(llm_client, "module_analyzer_claude_timeout", 900) or 900)
 
         self.skill_root = self._resolve_skill_root()
         self.taxonomy = self._load_taxonomy()
@@ -279,6 +282,7 @@ class SkillModuleAnalyzer:
             capture_output=True,
             text=True,
             cwd=str(_path_config["repo_root"]),
+            timeout=self.validation_timeout,
         )
         finished_at = datetime.now(UTC).isoformat()
 
@@ -357,6 +361,7 @@ class SkillModuleAnalyzer:
             prompt=prompt,
             cwd=str(_path_config['repo_root']),
             record_path=record_path,
+            timeout=self.claude_timeout,
             preferred_model_hint=DEFAULT_SELECTED_MODEL_HINT,
             allow_plain_text_fallback=True,
         )

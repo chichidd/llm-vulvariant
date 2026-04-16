@@ -519,6 +519,11 @@ class SoftwareProfiler:
         
         if analyzer_type == 'skill':
             logger.info("Using skill-based module analyzer (AI infra taxonomy)")
+            setattr(
+                self.llm_client,
+                "module_analyzer_claude_timeout",
+                int(self.module_analyzer_config.get("skill_claude_timeout_seconds", 900) or 900),
+            )
             self.module_analyzer = SkillModuleAnalyzer(
                 llm_client=self.llm_client,
                 excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,
@@ -527,6 +532,7 @@ class SoftwareProfiler:
                 validation_mode=self.module_analyzer_config.get('validation_mode', False),
                 validation_temperature=self.module_analyzer_config.get('validation_temperature', 0.0),
                 validation_max_workers=self.module_analyzer_config.get('validation_max_workers', 1),
+                validation_timeout=self.module_analyzer_config.get('validation_timeout_seconds', 3600),
             )
         else:  # 'agent' or default
             logger.info("Using agent-based module analyzer")

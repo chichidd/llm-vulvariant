@@ -21,3 +21,6 @@ codeql_cli:
   
   # 查询超时时间（秒）
   timeout: 1800
+  # For full-batch profiling, avoid repository autobuilds that can run Docker/make indefinitely.
+  # Use CodeQL buildless extraction for C/C++ databases.
+  cpp_build_mode: none
