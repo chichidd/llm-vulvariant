@@ -331,6 +331,14 @@ def parse_args() -> argparse.Namespace:
         help="Regenerate software/vulnerability profiles even when cached profile files exist",
     )
     parser.add_argument(
+        "--reuse-existing-profiles-without-validation",
+        action="store_true",
+        help=(
+            "Reuse persisted software/vulnerability profiles without fingerprint validation "
+            "or regeneration. Intended for scan-only continuation runs."
+        ),
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=1,
@@ -569,6 +577,11 @@ def _build_batch_summary(args: argparse.Namespace, paths: BatchScanPaths) -> Dic
         "critical_stop_mode": args.critical_stop_mode,
         "critical_stop_max_priority": getattr(args, "critical_stop_max_priority", 2),
         "force_regenerate_profiles": args.force_regenerate_profiles,
+        "reuse_existing_profiles_without_validation": getattr(
+            args,
+            "reuse_existing_profiles_without_validation",
+            False,
+        ),
         "skip_existing_scans": args.skip_existing_scans,
         "jobs": getattr(args, "jobs", 1),
         "llm_provider": args.llm_provider,
@@ -694,6 +707,7 @@ def _ensure_software_profile(
     repo_profiles_dir: Path,
     llm_client,
     force_regenerate: bool,
+    reuse_existing_profiles_without_validation: bool,
     cache: Dict[Tuple[str, str], object],
     regenerated_keys: Set[Tuple[str, str]],
 ) -> Optional[object]:
@@ -704,6 +718,22 @@ def _ensure_software_profile(
         return cache[key]
     if force_regenerate:
         cache.pop(key, None)
+
+    if not force_regenerate and reuse_existing_profiles_without_validation:
+        cached_profile = load_software_profile(
+            repo_name,
+            commit_hash,
+            base_dir=repo_profiles_dir,
+        )
+        if cached_profile:
+            cache[key] = cached_profile
+            return cached_profile
+        logger.error(
+            "Existing software profile required but not found: %s@%s",
+            repo_name,
+            commit_hash[:12],
+        )
+        return None
 
     repo_path = repos_root / repo_name
     if not repo_path.exists():
@@ -776,6 +806,7 @@ def _ensure_vulnerability_profile(
     vuln_profiles_dir: Path,
     llm_client,
     force_regenerate: bool,
+    reuse_existing_profiles_without_validation: bool,
     software_cache: Dict[Tuple[str, str], object],
     regenerated_software_keys: Set[Tuple[str, str]],
     cache: Dict[Tuple[str, str], object],
@@ -806,9 +837,13 @@ def _ensure_vulnerability_profile(
             repo_profiles_dir=repo_profiles_dir,
             llm_client=llm_client,
             force_regenerate=force_regenerate,
+            reuse_existing_profiles_without_validation=reuse_existing_profiles_without_validation,
             cache=software_cache,
             regenerated_keys=regenerated_software_keys,
         )
+        if reuse_existing_profiles_without_validation and cached_profile and source_profile:
+            cache[key] = cached_profile
+            return cached_profile
         if (
             cached_profile
             and source_profile
@@ -835,11 +870,15 @@ def _ensure_vulnerability_profile(
         repo_profiles_dir=repo_profiles_dir,
         llm_client=llm_client,
         force_regenerate=force_regenerate,
+        reuse_existing_profiles_without_validation=reuse_existing_profiles_without_validation,
         cache=software_cache,
         regenerated_keys=regenerated_software_keys,
     )
     if not source_profile:
         return None
+    if reuse_existing_profiles_without_validation and cached_profile:
+        cache[key] = cached_profile
+        return cached_profile
     source_repo_dirty = False
     with hold_repo_lock(repo_path, purpose=f"vulnerability_profile_cache_probe:{cve_id}"):
         source_repo_dirty = has_uncommitted_changes(str(repo_path))
@@ -927,6 +966,7 @@ def _discover_latest_repo_refs(
             repo_profiles_dir=repo_profiles_dir,
             llm_client=llm_client,
             force_regenerate=force_regenerate_profiles,
+            reuse_existing_profiles_without_validation=False,
             cache=software_cache,
             regenerated_keys=regenerated_software_keys,
         )
@@ -1172,6 +1212,11 @@ def main() -> int:
             repo_profiles_dir=paths.source_repo_profiles_dir,
             llm_client=profile_llm,
             force_regenerate=args.force_regenerate_profiles,
+            reuse_existing_profiles_without_validation=getattr(
+                args,
+                "reuse_existing_profiles_without_validation",
+                False,
+            ),
             cache=caches.source_software_cache,
             regenerated_keys=caches.regenerated_source_software_keys,
         )
@@ -1185,6 +1230,11 @@ def main() -> int:
             vuln_profiles_dir=paths.vuln_profiles_dir,
             llm_client=profile_llm,
             force_regenerate=args.force_regenerate_profiles,
+            reuse_existing_profiles_without_validation=getattr(
+                args,
+                "reuse_existing_profiles_without_validation",
+                False,
+            ),
             software_cache=caches.source_software_cache,
             regenerated_software_keys=caches.regenerated_source_software_keys,
             cache=caches.vulnerability_cache,
