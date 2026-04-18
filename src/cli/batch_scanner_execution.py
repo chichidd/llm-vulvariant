@@ -303,6 +303,12 @@ def _run_target_scan(
         and not getattr(batch_args, "force_regenerate_profiles", False)
         and findings_path.exists()
     ):
+        if getattr(batch_args, "skip_any_existing_scan_result", False):
+            logger.info(
+                "[Skip] Existing scan result present; skipping without fingerprint validation: %s",
+                findings_path,
+            )
+            return "skipped"
         saved_quality = _load_saved_scan_quality(output_dir)
         coverage_status = str(saved_quality.get("coverage_status", "unknown"))
         saved_fingerprint_hash = str(saved_quality.get("scan_fingerprint_hash", "")).strip()

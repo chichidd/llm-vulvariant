@@ -67,6 +67,23 @@ def test_parse_args_accepts_explicit_source_and_target_flags(monkeypatch):
     assert args.target_soft_profiles_dir == "soft-target"
 
 
+def test_parse_args_accepts_skip_any_existing_scan_result(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch-scanner",
+            "--skip-existing-scans",
+            "--skip-any-existing-scan-result",
+        ],
+    )
+
+    args = batch_scanner.parse_args()
+
+    assert args.skip_existing_scans is True
+    assert args.skip_any_existing_scan_result is True
+
+
 def test_parse_args_defaults_critical_stop_mode_to_max(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["batch-scanner"])
 
@@ -246,6 +263,39 @@ def test_select_similar_targets_fallback_top_n_when_all_below_threshold(monkeypa
     ranked = batch_scanner._rank_similar_candidates(
         source_ref=source,
         candidate_refs=[cand_b, cand_c, cand_a],
+        text_retriever=None,
+    )
+    selected, fallback_used = batch_scanner._select_similar_targets(
+        ranked_candidates=ranked,
+        similarity_threshold=0.7,
+        max_targets=None,
+        fallback_top_n=2,
+    )
+
+    assert fallback_used is True
+    assert [item.profile_ref.repo_name for item in selected] == ["repo-a", "repo-b"]
+
+
+def test_select_similar_targets_supplements_sparse_threshold_hits(monkeypatch):
+    source = ProfileRef("src", "a" * 40, _mk_profile("src"))
+    cand_a = ProfileRef("repo-a", "b" * 40, _mk_profile("a"))
+    cand_b = ProfileRef("repo-b", "c" * 40, _mk_profile("b"))
+    cand_c = ProfileRef("repo-c", "d" * 40, _mk_profile("c"))
+
+    score_map = {
+        "a": ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+        "b": ProfileSimilarityMetrics(0.6, 0.6, 0.6, 0.6, 0.6, 0.6),
+        "c": ProfileSimilarityMetrics(0.5, 0.5, 0.5, 0.5, 0.5, 0.5),
+    }
+
+    def fake_compute(source_profile, target_profile, text_retriever=None, weights=None):
+        return score_map[target_profile.name]
+
+    monkeypatch.setattr(batch_scanner, "compute_profile_similarity", fake_compute)
+
+    ranked = batch_scanner._rank_similar_candidates(
+        source_ref=source,
+        candidate_refs=[cand_c, cand_b, cand_a],
         text_retriever=None,
     )
     selected, fallback_used = batch_scanner._select_similar_targets(
@@ -571,6 +621,52 @@ def test_run_target_scan_reports_skipped_for_existing_findings(monkeypatch, tmp_
     output_dir.mkdir(parents=True)
     (output_dir / "agentic_vuln_findings.json").write_text(
         json.dumps({"coverage_status": "complete", "scan_fingerprint": {"hash": "expected"}}),
+        encoding="utf-8",
+    )
+
+    status = batch_scanner._run_target_scan(
+        batch_args=batch_args,
+        cve_id="CVE-2026-0001",
+        vulnerability_profile=object(),
+        llm_client=object(),
+        target=target,
+    )
+
+    assert status == "skipped"
+
+
+def test_run_target_scan_skips_any_existing_result_without_validation(monkeypatch, tmp_path):
+    def fake_run_single_target_scan(**kwargs):
+        raise AssertionError("existing result should have been skipped")
+
+    monkeypatch.setattr(batch_scanner.agent_scanner, "run_single_target_scan", fake_run_single_target_scan)
+    monkeypatch.setattr(
+        batch_scanner_execution,
+        "_build_expected_scan_fingerprint_for_skip",
+        lambda **_kwargs: pytest.fail("skip-any mode should not validate fingerprints"),
+    )
+
+    batch_args = Namespace(
+        scan_output_dir=tmp_path / "scan-out",
+        target_repos_root=tmp_path / "repos",
+        max_iterations_cap=3,
+        disable_critical_stop=False,
+        critical_stop_mode="min",
+        verbose=False,
+        skip_existing_scans=True,
+        skip_any_existing_scan_result=True,
+        force_regenerate_profiles=False,
+        profile_base_path=str(tmp_path / "profiles"),
+        target_soft_profiles_dir="soft-nvidia",
+    )
+    target = SimilarProfileCandidate(
+        profile_ref=ProfileRef("target-repo", "a" * 40, _mk_profile("target-repo")),
+        metrics=ProfileSimilarityMetrics(0.8, 0.8, 0.8, 0.8, 0.8, 0.8),
+    )
+    output_dir = tmp_path / "scan-out" / "CVE-2026-0001" / "target-repo-aaaaaaaaaaaa"
+    output_dir.mkdir(parents=True)
+    (output_dir / "agentic_vuln_findings.json").write_text(
+        json.dumps({"coverage_status": "partial"}),
         encoding="utf-8",
     )
 
@@ -1627,6 +1723,7 @@ def test_build_batch_summary_records_run_selection_knobs(tmp_path):
         critical_stop_mode="min",
         force_regenerate_profiles=True,
         skip_existing_scans=False,
+        skip_any_existing_scan_result=True,
         jobs=4,
         llm_provider="deepseek",
         llm_name="deepseek-chat",
@@ -1648,6 +1745,7 @@ def test_build_batch_summary_records_run_selection_knobs(tmp_path):
     assert summary["include_same_repo"] is True
     assert summary["limit"] == 5
     assert summary["force_regenerate_profiles"] is True
+    assert summary["skip_any_existing_scan_result"] is True
     assert summary["jobs"] == 4
     assert summary["llm_name"] == "deepseek-chat"
 
@@ -1819,6 +1917,7 @@ def test_main_uses_separate_source_and_target_roots_and_profile_dirs(monkeypatch
         repo_profiles_dir,
         llm_client,
         force_regenerate,
+        reuse_existing_profiles_without_validation,
         cache,
         regenerated_keys,
     ):
@@ -1837,6 +1936,7 @@ def test_main_uses_separate_source_and_target_roots_and_profile_dirs(monkeypatch
         vuln_profiles_dir,
         llm_client,
         force_regenerate,
+        reuse_existing_profiles_without_validation,
         software_cache,
         regenerated_software_keys,
         cache,
@@ -2336,6 +2436,7 @@ def test_main_reuses_target_profile_state_for_source_when_paths_match(monkeypatc
         repo_profiles_dir,
         llm_client,
         force_regenerate,
+        reuse_existing_profiles_without_validation,
         cache,
         regenerated_keys,
     ):

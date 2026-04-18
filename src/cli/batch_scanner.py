@@ -371,6 +371,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--skip-any-existing-scan-result",
+        action="store_true",
+        help=(
+            "When --skip-existing-scans is set, skip any target folder that already "
+            "has agentic_vuln_findings.json, without validating fingerprint or coverage."
+        ),
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=1,
@@ -583,6 +591,7 @@ def _build_batch_summary(args: argparse.Namespace, paths: BatchScanPaths) -> Dic
             False,
         ),
         "skip_existing_scans": args.skip_existing_scans,
+        "skip_any_existing_scan_result": getattr(args, "skip_any_existing_scan_result", False),
         "jobs": getattr(args, "jobs", 1),
         "llm_provider": args.llm_provider,
         "llm_name": args.llm_name,
@@ -707,9 +716,9 @@ def _ensure_software_profile(
     repo_profiles_dir: Path,
     llm_client,
     force_regenerate: bool,
-    reuse_existing_profiles_without_validation: bool,
     cache: Dict[Tuple[str, str], object],
     regenerated_keys: Set[Tuple[str, str]],
+    reuse_existing_profiles_without_validation: bool = False,
 ) -> Optional[object]:
     key = (repo_name, commit_hash)
     if force_regenerate and key in regenerated_keys and key in cache:
@@ -806,12 +815,12 @@ def _ensure_vulnerability_profile(
     vuln_profiles_dir: Path,
     llm_client,
     force_regenerate: bool,
-    reuse_existing_profiles_without_validation: bool,
     software_cache: Dict[Tuple[str, str], object],
     regenerated_software_keys: Set[Tuple[str, str]],
     cache: Dict[Tuple[str, str], object],
     verbose: bool,
     vuln_json_path: Optional[str] = None,
+    reuse_existing_profiles_without_validation: bool = False,
 ) -> Optional[object]:
     key = (repo_name, cve_id)
     if key in cache and not force_regenerate:
@@ -1106,12 +1115,29 @@ def _select_similar_targets(
         for candidate in ranked_candidates
         if candidate.metrics.overall_sim >= similarity_threshold
     ]
+    hard_limit = max_targets if max_targets is not None else len(ranked_candidates)
+    minimum_target_count = min(fallback_top_n, hard_limit)
     if passed:
         if max_targets is not None:
             passed = passed[:max_targets]
-        return passed, False
+        if len(passed) >= minimum_target_count:
+            return passed, False
+        selected_task_ids = {_build_scan_task_id("_", candidate) for candidate in passed}
+        supplemented = list(passed)
+        for candidate in ranked_candidates:
+            task_id = _build_scan_task_id("_", candidate)
+            if task_id in selected_task_ids:
+                continue
+            supplemented.append(candidate)
+            selected_task_ids.add(task_id)
+            if len(supplemented) >= minimum_target_count:
+                break
+        if max_targets is not None:
+            supplemented = supplemented[:max_targets]
+        return supplemented, len(supplemented) > len(passed)
 
-    fallback = list(ranked_candidates[:fallback_top_n])
+    fallback_limit = minimum_target_count if minimum_target_count > 0 else fallback_top_n
+    fallback = list(ranked_candidates[:fallback_limit])
     if max_targets is not None:
         fallback = fallback[:max_targets]
     return fallback, bool(fallback)
@@ -1155,6 +1181,15 @@ def main() -> int:
 
     if scan_all_profiled_targets:
         logger.info("Loading persisted software profiles for all target repositories...")
+        latest_repo_refs = _discover_existing_profiled_repo_refs(
+            repos_root=paths.target_repos_root,
+            repo_profiles_dir=paths.target_repo_profiles_dir,
+        )
+        logger.info("Target repositories with persisted profiles: %s", len(latest_repo_refs))
+    elif getattr(args, "reuse_existing_profiles_without_validation", False):
+        logger.info(
+            "Loading persisted software profiles for target similarity ranking without regeneration..."
+        )
         latest_repo_refs = _discover_existing_profiled_repo_refs(
             repos_root=paths.target_repos_root,
             repo_profiles_dir=paths.target_repo_profiles_dir,
@@ -1308,23 +1343,34 @@ def main() -> int:
                     f"users={metrics.target_user_sim:.4f}, module={metrics.module_jaccard_sim:.4f}, "
                     f"dep/import={metrics.module_dependency_import_sim:.4f})"
                 )
+            passed_threshold_count = sum(
+                1
+                for candidate in ranked_candidates
+                if candidate.metrics.overall_sim >= args.similarity_threshold
+            )
             similar_targets, fallback_used = _select_similar_targets(
                 ranked_candidates=ranked_candidates,
                 similarity_threshold=args.similarity_threshold,
                 max_targets=args.max_targets,
                 fallback_top_n=args.fallback_top_n,
             )
-            selection_mode = "fallback_top_n" if fallback_used else "threshold"
+            selection_mode = "threshold_plus_fallback" if fallback_used else "threshold"
 
             logger.info(
                 f"[Vuln {vuln_index}] Selected {len(similar_targets)} targets "
                 f"(threshold={args.similarity_threshold:.3f})"
             )
             if fallback_used:
-                logger.warning(
-                    f"[Vuln {vuln_index}] No target reached threshold {args.similarity_threshold:.3f}; "
-                    f"fallback to top-{args.fallback_top_n}"
-                )
+                if passed_threshold_count == 0:
+                    logger.warning(
+                        f"[Vuln {vuln_index}] No target reached threshold {args.similarity_threshold:.3f}; "
+                        f"fallback to top-{args.fallback_top_n}"
+                    )
+                else:
+                    logger.warning(
+                        f"[Vuln {vuln_index}] Only {passed_threshold_count} targets reached threshold "
+                        f"{args.similarity_threshold:.3f}; supplemented to at least top-{args.fallback_top_n}"
+                    )
             for i, candidate in enumerate(similar_targets, 1):
                 logger.info(
                     f"  {i}. {candidate.profile_ref.label} overall={candidate.metrics.overall_sim:.4f} "
