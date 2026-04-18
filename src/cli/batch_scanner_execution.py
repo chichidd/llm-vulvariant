@@ -294,88 +294,89 @@ def _run_target_scan(
         output_base=str(getattr(batch_args, "scan_output_dir", "scan-results-batch")),
     )
     findings_path = output_dir / "agentic_vuln_findings.json"
+    scan_memory_path = output_dir / "scan_memory.json"
     resolved_target_repos_root = Path(batch_args.target_repos_root).expanduser()
     if not resolved_target_repos_root.is_absolute():
         resolved_target_repos_root = _path_config["repo_root"] / resolved_target_repos_root
     target_repo_path = resolved_target_repos_root / scan_target.repo_name
-    if (
-        batch_args.skip_existing_scans
-        and not getattr(batch_args, "force_regenerate_profiles", False)
-        and findings_path.exists()
-    ):
-        if getattr(batch_args, "skip_any_existing_scan_result", False):
+    if batch_args.skip_existing_scans and not getattr(batch_args, "force_regenerate_profiles", False):
+        if getattr(batch_args, "skip_any_existing_scan_result", False) and (
+            findings_path.exists() or scan_memory_path.exists()
+        ):
+            existing_path = findings_path if findings_path.exists() else scan_memory_path
             logger.info(
                 "[Skip] Existing scan result present; skipping without fingerprint validation: %s",
-                findings_path,
+                existing_path,
             )
             return "skipped"
-        saved_quality = _load_saved_scan_quality(output_dir)
-        coverage_status = str(saved_quality.get("coverage_status", "unknown"))
-        saved_fingerprint_hash = str(saved_quality.get("scan_fingerprint_hash", "")).strip()
-        expected_scan_fingerprint = _build_expected_scan_fingerprint_for_skip(
-            batch_args=batch_args,
-            cve_id=cve_id,
-            vulnerability_profile=vulnerability_profile,
-            llm_client=llm_client,
-            target=target,
-            scan_target=scan_target,
-            target_repo_path=target_repo_path,
-        )
-        fingerprint_validation_mode = "live"
-        if not isinstance(expected_scan_fingerprint, dict) and not target_repo_path.is_dir():
-            expected_scan_fingerprint = _build_profile_based_scan_fingerprint_for_skip(
+        if findings_path.exists():
+            saved_quality = _load_saved_scan_quality(output_dir)
+            coverage_status = str(saved_quality.get("coverage_status", "unknown"))
+            saved_fingerprint_hash = str(saved_quality.get("scan_fingerprint_hash", "")).strip()
+            expected_scan_fingerprint = _build_expected_scan_fingerprint_for_skip(
                 batch_args=batch_args,
                 cve_id=cve_id,
                 vulnerability_profile=vulnerability_profile,
                 llm_client=llm_client,
                 target=target,
                 scan_target=scan_target,
+                target_repo_path=target_repo_path,
             )
-            fingerprint_validation_mode = "profile"
-        elif not isinstance(expected_scan_fingerprint, dict):
-            logger.warning(
-                "[Skip->Rescan] Live target fingerprint validation failed for existing checkout: %s",
-                target_repo_path,
-            )
-        expected_fingerprint_hash = (
-            str(expected_scan_fingerprint.get("hash", "")).strip()
-            if isinstance(expected_scan_fingerprint, dict)
-            else ""
-        )
-        if coverage_status != "complete":
-            logger.warning(
-                "[Skip->Rescan] Existing scan result lacks complete coverage metadata: %s (%s)",
-                findings_path,
-                coverage_status,
-            )
-        elif isinstance(expected_scan_fingerprint, dict) and expected_fingerprint_hash:
-            if saved_fingerprint_hash and saved_fingerprint_hash == expected_fingerprint_hash:
-                logger.info(
-                    "[Skip] Existing scan result (%s fingerprint validation): %s",
-                    fingerprint_validation_mode,
-                    findings_path,
+            fingerprint_validation_mode = "live"
+            if not isinstance(expected_scan_fingerprint, dict) and not target_repo_path.is_dir():
+                expected_scan_fingerprint = _build_profile_based_scan_fingerprint_for_skip(
+                    batch_args=batch_args,
+                    cve_id=cve_id,
+                    vulnerability_profile=vulnerability_profile,
+                    llm_client=llm_client,
+                    target=target,
+                    scan_target=scan_target,
                 )
-                return "skipped"
-            if not saved_fingerprint_hash:
+                fingerprint_validation_mode = "profile"
+            elif not isinstance(expected_scan_fingerprint, dict):
                 logger.warning(
-                    "[Skip->Rescan] Existing scan fingerprint is missing: %s",
-                    findings_path,
+                    "[Skip->Rescan] Live target fingerprint validation failed for existing checkout: %s",
+                    target_repo_path,
                 )
+            expected_fingerprint_hash = (
+                str(expected_scan_fingerprint.get("hash", "")).strip()
+                if isinstance(expected_scan_fingerprint, dict)
+                else ""
+            )
+            if coverage_status != "complete":
+                logger.warning(
+                    "[Skip->Rescan] Existing scan result lacks complete coverage metadata: %s (%s)",
+                    findings_path,
+                    coverage_status,
+                )
+            elif isinstance(expected_scan_fingerprint, dict) and expected_fingerprint_hash:
+                if saved_fingerprint_hash and saved_fingerprint_hash == expected_fingerprint_hash:
+                    logger.info(
+                        "[Skip] Existing scan result (%s fingerprint validation): %s",
+                        fingerprint_validation_mode,
+                        findings_path,
+                    )
+                    return "skipped"
+                if not saved_fingerprint_hash:
+                    logger.warning(
+                        "[Skip->Rescan] Existing scan fingerprint is missing: %s",
+                        findings_path,
+                    )
+                else:
+                    logger.warning(
+                        "[Skip->Rescan] Existing scan fingerprint mismatch (%s validation): %s "
+                        "(saved=%s expected=%s)",
+                        fingerprint_validation_mode,
+                        findings_path,
+                        saved_fingerprint_hash,
+                        expected_fingerprint_hash,
+                    )
             else:
                 logger.warning(
-                    "[Skip->Rescan] Existing scan fingerprint mismatch (%s validation): %s "
-                    "(saved=%s expected=%s)",
-                    fingerprint_validation_mode,
+                    "[Skip->Rescan] Existing scan fingerprint validation unavailable or missing: %s (saved=%s)",
                     findings_path,
-                    saved_fingerprint_hash,
-                    expected_fingerprint_hash,
+                    saved_fingerprint_hash or "missing",
                 )
-        else:
-            logger.warning(
-                "[Skip->Rescan] Existing scan fingerprint validation unavailable or missing: %s (saved=%s)",
-                findings_path,
-                saved_fingerprint_hash or "missing",
-            )
 
     pre_run_signature = _scan_output_signature(output_dir)
     scan_succeeded = agent_scanner.run_single_target_scan(

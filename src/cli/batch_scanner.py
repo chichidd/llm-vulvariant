@@ -375,7 +375,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "When --skip-existing-scans is set, skip any target folder that already "
-            "has agentic_vuln_findings.json, without validating fingerprint or coverage."
+            "has agentic_vuln_findings.json or scan_memory.json, without validating "
+            "fingerprint or coverage."
         ),
     )
     parser.add_argument(
