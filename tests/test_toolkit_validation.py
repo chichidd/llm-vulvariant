@@ -54,11 +54,32 @@ def test_execute_tool_rejects_report_vulnerability_invalid_confidence(tmp_path, 
             "evidence": "source_code",
             "similarity_to_known": "matches example",
             "confidence": "critical",
+            "attack_scenario": "attacker controls a product input that reaches the sink",
         },
     )
 
     assert result.success is False
     assert "expected one of" in result.error
+
+
+def test_execute_tool_rejects_report_vulnerability_without_attack_scenario(tmp_path, monkeypatch):
+    toolkit = _make_toolkit(tmp_path, monkeypatch)
+
+    result = toolkit.execute_tool(
+        "report_vulnerability",
+        {
+            "file_path": "app.py",
+            "vulnerability_type": "command_injection",
+            "description": "possible sink",
+            "evidence": "source_code",
+            "similarity_to_known": "matches example",
+            "confidence": "high",
+        },
+    )
+
+    assert result.success is False
+    assert "attack_scenario" in result.error
+    assert "required" in result.error
 
 
 def test_execute_tool_rejects_check_file_status_empty_list(tmp_path, monkeypatch):

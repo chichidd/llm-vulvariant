@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 from profiler.software.models import ModuleInfo
@@ -230,6 +231,34 @@ def test_build_system_prompt_includes_summary_level_contract_fields():
     assert '"evidence_samples": [' in prompt
     assert '"evidence_count": 1' in prompt
     assert '"uncertainty": "low"' in prompt
+
+
+def test_build_system_prompt_requires_report_evidence_gate():
+    prompt = build_system_prompt(
+        {
+            "cve_id": "CVE-2026-0001",
+            "sink_features": {"type": "unsafe_deserialization"},
+            "vuln_description": "desc",
+            "vuln_cause": "cause",
+            "payload": "payload",
+            "source_features": {},
+            "flow_features": {},
+            "exploit_scenarios": [],
+            "exploit_conditions": [],
+        },
+        _DummyToolkit(),
+    )
+
+    assert re.search(r"\brq\d+\b", prompt, flags=re.IGNORECASE) is None
+    assert "Before calling report_vulnerability" in prompt
+    assert "security claim verification contract" in prompt
+    assert "attacker-controlled source" in prompt
+    assert "trust boundary" in prompt
+    assert "sink semantics" in prompt
+    assert "protection analysis" in prompt
+    assert "security impact" in prompt
+    assert "counterevidence" in prompt
+    assert "mark_file_completed with the rejection reason" in prompt
 
 
 def test_build_initial_and_intermediate_messages_reinforce_completion_tracking():

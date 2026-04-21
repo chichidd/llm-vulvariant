@@ -300,13 +300,10 @@ def _run_target_scan(
         resolved_target_repos_root = _path_config["repo_root"] / resolved_target_repos_root
     target_repo_path = resolved_target_repos_root / scan_target.repo_name
     if batch_args.skip_existing_scans and not getattr(batch_args, "force_regenerate_profiles", False):
-        if getattr(batch_args, "skip_any_existing_scan_result", False) and (
-            findings_path.exists() or scan_memory_path.exists()
-        ):
-            existing_path = findings_path if findings_path.exists() else scan_memory_path
+        if getattr(batch_args, "skip_any_existing_scan_result", False) and findings_path.exists():
             logger.info(
                 "[Skip] Existing scan result present; skipping without fingerprint validation: %s",
-                existing_path,
+                findings_path,
             )
             return "skipped"
         if findings_path.exists():

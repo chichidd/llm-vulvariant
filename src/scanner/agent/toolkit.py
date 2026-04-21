@@ -351,7 +351,14 @@ class AgenticToolkit(
                                 "enum": ["high", "medium", "low"],
                                 "description": "Confidence: high / medium / low",
                             },
-                            "attack_scenario": {"type": "string", "description": "Attack scenario / exploit narrative.", "minLength": 1},
+                            "attack_scenario": {
+                                "type": "string",
+                                "description": (
+                                    "Evidence-backed exploit narrative naming the attacker-controlled source, "
+                                    "trust boundary, sink, missing/bypassed protection, and impact."
+                                ),
+                                "minLength": 1,
+                            },
                         },
                         "required": [
                             "file_path",
@@ -360,6 +367,7 @@ class AgenticToolkit(
                             "evidence",
                             "similarity_to_known",
                             "confidence",
+                            "attack_scenario",
                         ],
                     },
                 },

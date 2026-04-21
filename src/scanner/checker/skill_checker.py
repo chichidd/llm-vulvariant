@@ -685,16 +685,27 @@ class SkillExploitabilityChecker:
         """Build Claude prompt for single vulnerability analysis."""
         # Build concise vulnerability summary
         file_path = str(vuln.get('file_path', 'unknown') or 'unknown')
+        function_name = str(vuln.get('function_name', '') or '').strip()
+        line_number = str(vuln.get('line_number', '') or '').strip()
         vuln_type = str(vuln.get('vulnerability_type', 'unknown') or 'unknown')
-        evidence = str(vuln.get('evidence') or '')[:400]
-        description = str(vuln.get('description') or '')[:200]
+        evidence = str(vuln.get('evidence') or '')
+        description = str(vuln.get('description') or '')
+        similarity_to_known = str(vuln.get('similarity_to_known') or '')
+        attack_scenario = str(vuln.get('attack_scenario') or '')
         
         lines = [
             f"Quick vulnerability check using {self.skill_name} skill:",
             f"File: {file_path}",
+            f"Function: {function_name}" if function_name else "Function: ",
+            f"Line: {line_number}" if line_number else "Line: ",
             f"Type: {vuln_type}",
             f"Evidence: {evidence}",
             f"Description: {description}",
+            f"Similarity to known: {similarity_to_known}",
+            f"Attack scenario: {attack_scenario}",
+            "",
+            "Full finding JSON:",
+            json.dumps(vuln, indent=2, ensure_ascii=False, sort_keys=True),
             "",
             f"Repository: {repo_path.resolve()}",
             "", 
@@ -707,6 +718,13 @@ class SkillExploitabilityChecker:
             "Never invent sink/source details or verdicts not supported by code evidence.",
             "Do not emit prose; return one single JSON object only.",
             "Do not add explanatory text outside the JSON object.",
+            "",
+            "Use this security claim verification contract:",
+            "- State the vulnerability claim, attacker-controlled source, trust boundary, sink semantics, protection analysis, security impact, and counterevidence.",
+            "- Derive source control, boundary crossing, and false-positive considerations from the repository evidence and finding context, not from a fixed checklist.",
+            "- Docker PoC success is supporting evidence only; it cannot replace source reachability, sink alignment, and an unintended security impact.",
+            "- If any required part is unknown or contradicted by counterevidence, choose a conservative verdict and list the gap explicitly.",
+            "",
             '{"verdict":"EXPLOITABLE|CONDITIONALLY_EXPLOITABLE|LIBRARY_RISK|NOT_EXPLOITABLE",',
             '"confidence":"high|medium|low",',
             '"verdict_rationale":"...",',

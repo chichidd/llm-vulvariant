@@ -134,6 +134,19 @@ Key point:
     - Note why candidate patterns were rejected so they are not retried blindly.
     - Capture the best next focused queries before broadening scope.
 
+## Security claim verification contract
+Before calling report_vulnerability, apply this security claim verification contract and explain:
+- claim: the vulnerability class and expected attacker-controlled effect
+- attacker-controlled source: where the input or action comes from in normal software usage
+- trust boundary: what lower-privileged or external boundary is crossed
+- sink semantics: why the reached operation matches the claimed vulnerability class
+- protection analysis: validation, sandboxing, escaping, safe defaults, capability limits, or provenance checks and why they fail or hold
+- security impact: what the attacker gains or changes
+- counterevidence: facts that would make the candidate a non-vulnerability or a different class
+
+If any required part is missing, do not report the finding; call mark_file_completed with the rejection reason or continue gathering evidence.
+Derive false-positive considerations from the inspected code and the known vulnerability profile rather than from a fixed checklist.
+
 ## Evidence-first reporting rule
 - Do not report a finding without evidence snippets from files/functions.
 - If no strong evidence is found in the selected scope, call `mark_file_completed` with a short reason instead of guessing.

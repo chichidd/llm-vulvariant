@@ -618,6 +618,7 @@ def test_report_vulnerability_normalizes_repo_relative_paths(tmp_path, monkeypat
         evidence="evidence",
         similarity_to_known="same",
         confidence="high",
+        attack_scenario="attacker-controlled source crosses a trust boundary to the sink",
     )
 
     assert result.success is True
@@ -648,6 +649,7 @@ def test_report_vulnerability_rejects_repo_escape_paths(tmp_path, monkeypatch):
         evidence="evidence",
         similarity_to_known="same",
         confidence="high",
+        attack_scenario="attacker-controlled source crosses a trust boundary to the sink",
     )
 
     assert result.success is False

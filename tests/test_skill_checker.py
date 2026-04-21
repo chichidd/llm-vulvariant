@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from scanner.checker.threat_model_guardrails import (
@@ -306,6 +307,41 @@ def test_build_prompt_requests_structured_evidence_contract(tmp_path):
     assert '"open_questions":["..."]' in prompt
     assert "Ground every claim in the provided repository evidence." in prompt
     assert "If evidence is missing, say so explicitly in the relevant field." in prompt
+
+
+def test_build_prompt_includes_full_finding_context_and_general_verification_contract(tmp_path):
+    checker = _checker()
+    evidence = "dangerous evidence " + ("A" * 450) + " evidence-tail"
+    description = "unsafe description " + ("B" * 250) + " description-tail"
+
+    prompt = checker._build_prompt(
+        vuln={
+            "file_path": "src/app.py",
+            "function_name": "run",
+            "line_number": 42,
+            "vulnerability_type": "unsafe_deserialization",
+            "evidence": evidence,
+            "description": description,
+            "similarity_to_known": "same source-to-sink pattern as the reference",
+            "attack_scenario": "attacker publishes a malicious shared checkpoint",
+        },
+        repo_path=tmp_path,
+    )
+
+    assert "Function: run" in prompt
+    assert "Line: 42" in prompt
+    assert "evidence-tail" in prompt
+    assert "description-tail" in prompt
+    assert "Similarity to known: same source-to-sink pattern as the reference" in prompt
+    assert "Attack scenario: attacker publishes a malicious shared checkpoint" in prompt
+    assert re.search(r"\brq\d+\b", prompt, flags=re.IGNORECASE) is None
+    assert "security claim verification contract" in prompt
+    assert "attacker-controlled source" in prompt
+    assert "trust boundary" in prompt
+    assert "sink semantics" in prompt
+    assert "protection analysis" in prompt
+    assert "security impact" in prompt
+    assert "counterevidence" in prompt
 
 
 def test_build_prompt_handles_missing_evidence_and_description(tmp_path):

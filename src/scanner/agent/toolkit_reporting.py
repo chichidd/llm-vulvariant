@@ -26,6 +26,7 @@ class ToolkitReportingMixin:
             "evidence",
             "similarity_to_known",
             "confidence",
+            "attack_scenario",
         )
 
         normalized_file_path, error = self._resolve_repo_relative_path(
@@ -45,10 +46,6 @@ class ToolkitReportingMixin:
             if not field_value:
                 return None, f"{field_name} is required"
             normalized[field_name] = field_value
-
-        attack_scenario = str(finding.get("attack_scenario", "") or "").strip()
-        if attack_scenario:
-            normalized["attack_scenario"] = attack_scenario
 
         raw_line_number = finding.get("line_number")
         if raw_line_number is not None:
