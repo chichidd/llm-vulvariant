@@ -24,7 +24,7 @@
 
 - `claude` 可执行文件在 `PATH`。
 - 已完成登录，且 `claude -p` 能在仓库根目录非交互运行。
-- `exploitability` 路径优先使用 `claude -p --output-format json`；如果当前 Claude CLI 不支持该参数，代码会回退到纯文本模式，并继续尝试从结构化输出文件恢复结果。
+- `exploitability` 路径优先使用 `claude -p` 的 JSON 输出；如果当前 Claude CLI 不支持 `--output-format json`，代码会回退到纯文本模式，并继续尝试从结构化输出文件恢复结果。
 - 本仓库内置的 `.claude/skills/ai-infra-module-modeler` 仍用于默认模块分析路径。
 - Claude runtime 目录必须可写。默认是仓库根目录下的 `.claude-runtime/`，也可以显式传 `--claude-runtime-root`。
 - 并发跑 `python -m cli.exploitability --jobs > 1` 时，必须使用 `--claude-runtime-mode folder`。
