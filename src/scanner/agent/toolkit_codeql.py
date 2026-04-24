@@ -517,8 +517,9 @@ dependencies:
         if not self._memory_manager:
             return
 
+        finding_records = []
         for finding in findings:
-            finding_record = {
+            finding_records.append({
                 "source": "codeql",
                 "query_name": query_name,
                 "file_path": finding.get("file", ""),
@@ -528,11 +529,22 @@ dependencies:
                 "line_number": finding.get("start_line", 0),
                 "confidence": "codeql-generated",
                 "similarity_to_known": f"Detected by CodeQL query: {query_name}",
-            }
-            self._memory_manager.add_finding(finding_record)
+            })
+
+        add_findings = getattr(self._memory_manager, "add_findings", None)
+        if callable(add_findings):
+            added_count = int(add_findings(finding_records))
+        else:
+            added_count = 0
+            for finding_record in finding_records:
+                if self._memory_manager.add_finding(finding_record):
+                    added_count += 1
 
         if findings:
-            summary = f"CodeQL query '{query_name}' found {len(findings)} potential issues"
+            summary = (
+                f"CodeQL query '{query_name}' found {len(findings)} potential issues "
+                f"({added_count} new)"
+            )
             self._memory_manager.add_issue(summary)
 
     def _format_codeql_summary(self, query_name: str, findings: List[Dict[str, Any]]) -> str:

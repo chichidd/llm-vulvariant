@@ -41,9 +41,15 @@ class FakeMemoryManager:
         )
         self._findings = []
         self._issues = []
+        self._add_findings_calls = []
 
     def add_finding(self, finding):
         self._findings.append(finding)
+
+    def add_findings(self, findings):
+        self._add_findings_calls.append(len(findings))
+        self._findings.extend(findings)
+        return len(findings)
 
     def add_issue(self, issue):
         self._issues.append(issue)
@@ -244,6 +250,34 @@ class TestEnsureQueryPack:
 
 class TestRunCodeqlQuery:
     """_run_codeql_query should write .ql files under the output query dir."""
+
+    def test_record_codeql_findings_uses_batch_memory_api_when_available(self, tmp_path):
+        tk, _, _, _ = _make_toolkit(tmp_path)
+        tk._record_codeql_findings_in_memory(
+            "xml_parsing_functions",
+            [
+                {
+                    "file": "a.py",
+                    "rule_id": "py/xml-parsing",
+                    "message": "XML parsing function: parse",
+                    "snippet": "",
+                    "start_line": 12,
+                },
+                {
+                    "file": "b.py",
+                    "rule_id": "py/xml-parsing",
+                    "message": "XML parsing function: parse",
+                    "snippet": "",
+                    "start_line": 21,
+                },
+            ],
+        )
+
+        assert tk._memory_manager._add_findings_calls == [2]
+        assert len(tk._memory_manager._findings) == 2
+        assert tk._memory_manager._issues == [
+            "CodeQL query 'xml_parsing_functions' found 2 potential issues (2 new)"
+        ]
 
     def test_ql_file_saved_to_output_dir(self, tmp_path):
         tk, _, output_dir, _ = _make_toolkit(tmp_path)

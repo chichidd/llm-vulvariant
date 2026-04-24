@@ -287,13 +287,12 @@ class AgentMemoryManager:
         if reason:
             self.memory.file_completion_reasons[file_path] = reason
         self.save()
-    
-    def add_finding(self, finding: Dict[str, Any]) -> bool:
-        """Record a vulnerability finding.
-        
-        Returns:
-            True if finding was added, False if it was a duplicate.
-        """
+
+    @staticmethod
+    def _normalize_finding(
+        finding: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], tuple[str, str, str, Optional[int]]]:
+        """Normalize one finding payload and return its stable dedupe key."""
         file_path = str(finding.get("file_path", "") or "").strip()
         function_name = str(finding.get("function_name", "") or "").strip()
         vulnerability_type = str(finding.get("vulnerability_type", "") or "").strip()
@@ -312,19 +311,54 @@ class AgentMemoryManager:
         else:
             normalized_finding["line_number"] = line_number
 
-        # Check for duplicate (same file + same vulnerability type)
+        finding_key = (
+            file_path,
+            function_name,
+            vulnerability_type,
+            line_number,
+        )
+        return normalized_finding, finding_key
+
+    def _build_existing_finding_keys(self) -> set[tuple[str, str, str, Optional[int]]]:
+        """Build the current dedupe index for all findings already in memory."""
+        dedupe_keys: set[tuple[str, str, str, Optional[int]]] = set()
         for existing in self.memory.findings:
-            if (
-                str(existing.get("file_path", "") or "").strip() == file_path
-                and str(existing.get("function_name", "") or "").strip() == function_name
-                and str(existing.get("vulnerability_type", "") or "").strip() == vulnerability_type
-                and existing.get("line_number") == line_number
-            ):
-                return False  # Duplicate
+            _, finding_key = self._normalize_finding(existing)
+            dedupe_keys.add(finding_key)
+        return dedupe_keys
+
+    def add_finding(self, finding: Dict[str, Any]) -> bool:
+        """Record a vulnerability finding.
+
+        Returns:
+            True if finding was added, False if it was a duplicate.
+        """
+        normalized_finding, finding_key = self._normalize_finding(finding)
+        if finding_key in self._build_existing_finding_keys():
+            return False
         
         self.memory.findings.append(normalized_finding)
         self.save()
         return True
+
+    def add_findings(self, findings: List[Dict[str, Any]]) -> int:
+        """Record multiple findings with one dedupe pass and one save."""
+        if not findings:
+            return 0
+
+        dedupe_keys = self._build_existing_finding_keys()
+        added = 0
+        for finding in findings:
+            normalized_finding, finding_key = self._normalize_finding(finding)
+            if finding_key in dedupe_keys:
+                continue
+            self.memory.findings.append(normalized_finding)
+            dedupe_keys.add(finding_key)
+            added += 1
+
+        if added:
+            self.save()
+        return added
     
     def get_scanned_files(self) -> List[str]:
         """Get list of files that have been scanned (completed status)."""

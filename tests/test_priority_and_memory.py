@@ -201,6 +201,57 @@ def test_agent_memory_manager_keeps_file_pending_after_first_finding(tmp_path):
     assert mgr.is_critical_complete(max_priority=1) is False
 
 
+def test_agent_memory_manager_add_findings_batches_and_deduplicates(tmp_path):
+    mgr = AgentMemoryManager(output_dir=tmp_path)
+    mgr.initialize(
+        target_repo="repo",
+        target_commit="abcdef1234567890",
+        cve_id="CVE-2025-0001",
+        module_priorities={"api": 1},
+        file_to_module={"a.py": "api"},
+    )
+
+    save_calls = []
+    original_save = mgr.save
+
+    def counted_save():
+        save_calls.append("save")
+        return original_save()
+
+    mgr.save = counted_save
+
+    added = mgr.add_findings(
+        [
+            {
+                "file_path": "a.py",
+                "function_name": "f",
+                "vulnerability_type": "command_injection",
+                "line_number": 12,
+                "confidence": "high",
+            },
+            {
+                "file_path": "a.py",
+                "function_name": "f",
+                "vulnerability_type": "command_injection",
+                "line_number": 12,
+                "confidence": "high",
+            },
+            {
+                "file_path": "a.py",
+                "function_name": "g",
+                "vulnerability_type": "command_injection",
+                "line_number": 15,
+                "confidence": "medium",
+            },
+        ]
+    )
+
+    assert added == 2
+    assert len(save_calls) == 1
+    assert len(mgr.memory.findings) == 2
+    assert [finding["function_name"] for finding in mgr.memory.findings] == ["f", "g"]
+
+
 def test_agent_memory_manager_reload_existing_state(tmp_path):
     mgr = AgentMemoryManager(output_dir=tmp_path)
     mgr.initialize(
