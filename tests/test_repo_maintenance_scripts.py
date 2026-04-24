@@ -93,7 +93,7 @@ def _write_fake_conda(bin_dir: Path) -> None:
                 "import sys",
                 "",
                 "args = sys.argv[1:]",
-                "if len(args) < 4 or args[:3] != ['run', '-n', 'dsocr'] or args[3] != 'python':",
+                "if len(args) < 4 or args[:3] != ['run', '-n', 'custom-env'] or args[3] != 'python':",
                 "    raise SystemExit(f'unexpected conda invocation: {args}')",
                 "os.execv(sys.executable, [sys.executable, *args[4:]])",
             ]
@@ -230,7 +230,7 @@ def test_update_repos_script_supports_multiword_python_bin(tmp_path: Path) -> No
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["CALLS_LOG"] = str(calls_log)
     env["ROOT"] = str(repo_root)
-    env["PYTHON_BIN"] = "conda run -n dsocr python"
+    env["PYTHON_BIN"] = "conda run -n custom-env python"
 
     result = subprocess.run(
         ["bash", str(UPDATE_SCRIPT)],
@@ -294,7 +294,7 @@ def test_checkout_main_script_supports_multiword_python_bin(tmp_path: Path) -> N
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     env["CALLS_LOG"] = str(calls_log)
     env["ROOT"] = str(repo_root)
-    env["PYTHON_BIN"] = "conda run -n dsocr python"
+    env["PYTHON_BIN"] = "conda run -n custom-env python"
 
     result = subprocess.run(
         ["bash", str(CHECKOUT_SCRIPT)],

@@ -33,19 +33,7 @@ STATUS_LOG="${STATUS_LOG:-$ROOT/output-microsoft-status-$RUN_ID.log}"
 cd "$APP_DIR"
 
 if [[ -z "$PYTHON_BIN" ]]; then
-  if [[ -f /home/dongtian/miniconda3/etc/profile.d/conda.sh ]]; then
-    source /home/dongtian/miniconda3/etc/profile.d/conda.sh
-    if conda activate dsocr >/dev/null 2>&1; then
-      PYTHON_BIN="python"
-    elif command -v python >/dev/null 2>&1; then
-      PYTHON_BIN="$(command -v python)"
-    elif command -v python3 >/dev/null 2>&1; then
-      PYTHON_BIN="$(command -v python3)"
-    else
-      echo "ERROR: neither python nor python3 is available in PATH" >&2
-      exit 1
-    fi
-  elif command -v python >/dev/null 2>&1; then
+  if command -v python >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python)"
   elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python3)"

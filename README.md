@@ -17,7 +17,8 @@ LLM 驱动的漏洞变种发现与可利用性验证框架。
 
 先读 [docs/runtime-requirements.md](docs/runtime-requirements.md)。当前版本有几条容易漏掉的前提：
 
-- 默认 `software-profile` 模块分析和 `python -m cli.exploitability` 都依赖本仓库自带的 `.claude/skills/*`，以及可非交互运行的 `claude -p`。
+- 默认 `software-profile` 模块分析依赖本仓库自带的 `.claude/skills/ai-infra-module-modeler`，并要求 `claude -p` 可非交互运行。
+- `python -m cli.exploitability` 依赖可非交互运行的 `claude -p` 和可写 `.claude-runtime`。
 - `python -m cli.exploitability` 会为 `EXPLOITABLE` finding 自动执行 Docker PoC；并发时 `--jobs > 1` 必须配 `--claude-runtime-mode folder`。
 - 自动目标选择不只需要 `transformers` / `sentence-transformers` / `torch`，还需要 `paths.embedding_model_path/<model_name>` 的本地模型目录真实存在。
 - `scanner`、`batch-scanner`、`exploitability` 都可能临时切换仓库 commit；目标仓库应保持为可 checkout 的 git 工作树，`exploitability` 明确要求 clean worktree。

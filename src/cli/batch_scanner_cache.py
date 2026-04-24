@@ -32,6 +32,21 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 logger = get_logger(__name__)
 
 
+def _is_git_worktree_root(path: Path) -> bool:
+    """Return whether ``path`` is the top-level directory of a git worktree."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+    return Path(result.stdout.strip()).resolve() == path.resolve()
+
+
 def _normalize_cve_id(entry: Dict[str, object], index: int) -> str:
     """Normalize one vulnerability identifier for cache validation."""
     return normalize_cve_id(entry.get("cve_id"), index)
@@ -343,9 +358,12 @@ def _load_cached_software_profile_if_compatible(
         output_dir=str(repo_profiles_dir),
     )
     profiler._current_fingerprint_repo_path = repo_path  # pylint: disable=protected-access
-    profiler._current_fingerprint_repo_version = (
-        (get_git_commit(str(repo_path)) or commit_hash) if repo_path is not None else commit_hash
-    )  # pylint: disable=protected-access
+    if repo_path is not None and _is_git_worktree_root(repo_path):
+        profiler._current_fingerprint_repo_version = (
+            get_git_commit(str(repo_path)) or commit_hash
+        )  # pylint: disable=protected-access
+    else:
+        profiler._current_fingerprint_repo_version = commit_hash  # pylint: disable=protected-access
     expected_fingerprint = profiler._build_profile_fingerprint()  # pylint: disable=protected-access
     fingerprint_field = "hash" if repo_path is not None else "inputs_hash"
     if profile_fingerprint_field_matches(

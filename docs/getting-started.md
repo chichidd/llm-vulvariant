@@ -22,7 +22,7 @@
 | 功能 | 额外要求 |
 |------|----------|
 | 默认 `software-profile` 模块分析 | `claude` CLI、repo-local `.claude/skills/ai-infra-module-modeler` |
-| `python -m cli.exploitability` | `claude` CLI、repo-local `check-exploitability`、可写 `.claude-runtime` |
+| `python -m cli.exploitability` | `claude` CLI、可写 `.claude-runtime` |
 | 自动目标选择 | `transformers` / `sentence-transformers` / `torch` + 本地 embedding 模型目录 |
 | CodeQL 查询 | `codeql` CLI + 可用 database / query pack |
 | Docker PoC | Docker。对 `EXPLOITABLE` finding，这一步会被 exploitability 自动触发 |
@@ -83,13 +83,12 @@ command -v claude
 command -v docker
 command -v codeql
 command -v jq
-claude -p --output-format json '{"ok":true}'
+claude -p '{"ok":true}'
 ```
 
 ### repo-local skills 与模型目录预检
 
 ```bash
-test -d .claude/skills/check-exploitability
 test -d .claude/skills/ai-infra-module-modeler
 ls ~/vuln/models/<model-name>
 ```
@@ -105,7 +104,7 @@ ls ~/vuln/models/<model-name>
 隐藏情况：
 
 - `run_all_vulnerability_profiles.sh` 当前内部直接执行 `python -` 解析 `vuln.json`，因此如果系统没有 `python` 这个名字，脚本本身仍会失败。
-- `run_microsoft_scan_full.sh` 会优先尝试 `conda activate dsocr`；这是脚本特定行为，不是所有 CLI 的通用前提。
+- `run_microsoft_scan_full.sh` 不会自动激活特定 Conda 环境；如果默认 `python` / `python3` 不合适，请显式设置 `PYTHON_BIN`。
 - 默认 `software-profile` 走的是 skill analyzer；如果你改了 `config/software_profile_rule.yaml` 的 `analyzer_type` 或 `validation_mode`，Claude 相关要求会变化。
 
 ## 6. 推荐阅读顺序
@@ -130,7 +129,7 @@ ls ~/vuln/models/<model-name>
 
 ### `Skill not found`
 
-- 确认 `.claude/skills/check-exploitability` 和 `.claude/skills/ai-infra-module-modeler` 仍在仓库内
+- 默认模块分析仍依赖 `.claude/skills/ai-infra-module-modeler`
 - 确认 `config/paths.yaml` 的 `project_root` / `repo_root` 没指到别处
 
 ### `Embedding model path not found`

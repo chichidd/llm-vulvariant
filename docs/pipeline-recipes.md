@@ -17,7 +17,7 @@
 额外前提：
 
 - 默认 `software-profile` 模块分析依赖 `claude` + `.claude/skills/ai-infra-module-modeler`
-- `python -m cli.exploitability` 依赖 `claude` JSON 输出、repo-local `check-exploitability`、可写 `.claude-runtime`
+- `python -m cli.exploitability` 依赖 `claude` CLI、可写 `.claude-runtime`
 - 如果某条 finding 被判定为 `EXPLOITABLE`，exploitability 会自动进入 Docker PoC
 - target repo 应该是 clean git worktree
 
@@ -164,8 +164,7 @@ batch-scanner \
 
 额外前提：
 
-- `claude -p --output-format json` 可用
-- `.claude/skills/check-exploitability` 保持在仓库内
+- `claude -p` 可非交互运行；如果当前 CLI 不支持 `--output-format json`，代码会尝试纯文本回退
 - `.claude-runtime` 或 `--claude-runtime-root` 可写
 - `--jobs > 1` 时使用 `--claude-runtime-mode folder`
 - target repo 是 clean git worktree
@@ -243,6 +242,6 @@ bash scripts/run_nvidia_full_pipeline.sh
 
 ## 其他内置脚本注意事项
 
-- `scripts/run_microsoft_scan_full.sh` 会优先尝试 `conda activate dsocr`，默认 `LLM_PROVIDER=lab`
+- `scripts/run_microsoft_scan_full.sh` 使用 `PYTHON_BIN` 或回退到 `python` / `python3`，默认 `LLM_PROVIDER=lab`
 - `scripts/run_all_vuln_software_profile.sh` 需要 `jq`
 - `scripts/run_all_vulnerability_profiles.sh` 需要 `vuln-profile` 在 `PATH`，并且当前脚本内部直接用 `python -`

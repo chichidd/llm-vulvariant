@@ -18,14 +18,14 @@
 以下两条路径都依赖 Claude：
 
 - `software-profile` 的默认模块分析路径。当前 `config/software_profile_rule.yaml` 默认 `module_analyzer_config.analyzer_type: skill`，会调用 repo-local `ai-infra-module-modeler`。
-- `python -m cli.exploitability`。它会调用 repo-local `check-exploitability`，并在 `EXPLOITABLE` finding 上自动进入 Docker PoC 验证。
+- `python -m cli.exploitability`。它会调用 Claude CLI，并在 `EXPLOITABLE` finding 上自动进入 Docker PoC 验证。
 
 你需要满足这些条件：
 
 - `claude` 可执行文件在 `PATH`。
 - 已完成登录，且 `claude -p` 能在仓库根目录非交互运行。
-- `exploitability` 路径要求 `claude -p --output-format json` 可用；module analyzer 对旧版 CLI 可以回退纯文本模式，但 exploitability 不应依赖这个回退。
-- 本仓库内置的 `.claude/skills/check-exploitability` 和 `.claude/skills/ai-infra-module-modeler` 必须保留。
+- `exploitability` 路径优先使用 `claude -p --output-format json`；如果当前 Claude CLI 不支持该参数，代码会回退到纯文本模式，并继续尝试从结构化输出文件恢复结果。
+- 本仓库内置的 `.claude/skills/ai-infra-module-modeler` 仍用于默认模块分析路径。
 - Claude runtime 目录必须可写。默认是仓库根目录下的 `.claude-runtime/`，也可以显式传 `--claude-runtime-root`。
 - 并发跑 `python -m cli.exploitability --jobs > 1` 时，必须使用 `--claude-runtime-mode folder`。
 
@@ -39,13 +39,12 @@
 
 当前仓库内置 skills：
 
-- `.claude/skills/check-exploitability`
 - `.claude/skills/ai-infra-module-modeler`
 
 隐藏约束：
 
-- `ai-infra-module-modeler` 的手工 skill 文档建议使用 `conda` 环境 `dsocr`。核心 CLI 不会自动为你创建这个环境。
-- `run_microsoft_scan_full.sh` 如果检测到 `conda` 和 `dsocr`，会优先 `conda activate dsocr`；否则再回退到 `python` / `python3`。
+- `ai-infra-module-modeler` 的手工 skill 文档可能提到某些本地环境示例，但核心 CLI 不会自动为你创建或激活环境。
+- `run_microsoft_scan_full.sh` 不会自动激活特定 Conda 环境；它使用 `PYTHON_BIN`，否则回退到 `python` / `python3`。
 
 ## 4. 自动目标选择的完整前提
 
@@ -74,10 +73,7 @@
 
 ## 6. Docker 与 exploitability 的真实要求
 
-`python -m cli.exploitability` 不是“只有你显式做 PoC 时才需要 Docker”。当前实现里：
-
-- `check-exploitability` skill 对 `EXPLOITABLE` finding 会自动执行 Phase 5 Docker PoC。
-- 因此一旦进入这一分支，Docker 就从“可选工具”升级成“运行时依赖”。
+`python -m cli.exploitability` 不是“只有你显式做 PoC 时才需要 Docker”。当前实现里，只要某条 finding 被判成 `EXPLOITABLE`，后续流程就会自动进入 Phase 5 Docker PoC，因此 Docker 会从“可选工具”升级成“运行时依赖”。
 
 同时还要满足：
 
@@ -131,7 +127,7 @@
 
 ### `scripts/run_microsoft_scan_full.sh`
 
-- 优先尝试 `conda activate dsocr`
+- 使用 `PYTHON_BIN` 指向你已经配置好的 Python 命令，或确保 `python` / `python3` 可用
 - 找不到时再回退到 `python` / `python3`
 - 默认走 `LLM_PROVIDER=lab`
 
@@ -155,13 +151,12 @@ command -v claude
 command -v docker
 command -v codeql
 command -v jq
-claude -p --output-format json '{"ok":true}'
+claude -p '{"ok":true}'
 ```
 
 ### repo-local skills 与本地模型检查
 
 ```bash
-test -d .claude/skills/check-exploitability
 test -d .claude/skills/ai-infra-module-modeler
 ls .claude/skills
 ls ~/vuln/models/<model-name>
@@ -173,7 +168,7 @@ ls ~/vuln/models/<model-name>
 |------|----------|
 | `claude: command not found` | Claude CLI 未安装或不在 `PATH` |
 | `Skill not found` | `.claude/skills/*` 被移动、删掉，或 `project_root` / `repo_root` 配置错了 |
-| `Expected JSON object from Claude CLI` | 当前 Claude CLI 不支持 `--output-format json`；exploitability 会受影响 |
+| `Expected JSON object from Claude CLI` | 当前 Claude CLI 可能不支持 `--output-format json`；代码会尝试纯文本回退，但升级 Claude CLI 仍然是更稳妥的方案 |
 | `Embedding model path not found` | 本地模型目录不存在，只有 Python 包没有模型文件 |
 | `command not found: jq` | 跑了 `run_all_vuln_software_profile.sh` 但系统没装 `jq` |
 | `Repository has local changes` | 目标 repo 脏工作树，无法安全 checkout / 验证 |

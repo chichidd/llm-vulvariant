@@ -99,7 +99,7 @@ def _write_fake_conda(bin_dir: Path) -> None:
                 "from pathlib import Path",
                 "",
                 "args = sys.argv[1:]",
-                "if len(args) < 4 or args[:3] != ['run', '-n', 'dsocr'] or args[3] != 'python':",
+                "if len(args) < 4 or args[:3] != ['run', '-n', 'custom-env'] or args[3] != 'python':",
                 "    raise SystemExit(f'unexpected conda invocation: {args}')",
                 "python_args = args[4:]",
                 "if len(python_args) >= 4 and python_args[0] == '-' and python_args[1] == 'resolve_locked_head_commit':",
@@ -331,7 +331,7 @@ def test_run_all_software_profiles_supports_multiword_python_bin(tmp_path: Path)
     env["CALLS_LOG"] = str(calls_log)
     env["_PROFILE_PATHS_REPO_ROOT"] = str(repo_root)
     env["FAKE_GIT_HEAD"] = FAKE_GIT_HEAD
-    env["PYTHON_BIN"] = "conda run -n dsocr python"
+    env["PYTHON_BIN"] = "conda run -n custom-env python"
 
     result = subprocess.run(
         [

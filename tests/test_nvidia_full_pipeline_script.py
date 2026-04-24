@@ -67,7 +67,7 @@ def _write_fake_conda(bin_dir: Path) -> None:
                 "from pathlib import Path",
                 "",
                 "args = sys.argv[1:]",
-                "if len(args) < 4 or args[:3] != ['run', '-n', 'dsocr'] or args[3] != 'python':",
+                "if len(args) < 4 or args[:3] != ['run', '-n', 'custom-env'] or args[3] != 'python':",
                 "    raise SystemExit(f'unexpected conda invocation: {args}')",
                 "python_args = args[4:]",
                 "log_path = Path(os.environ['CALLS_LOG'])",
@@ -289,7 +289,7 @@ def test_run_nvidia_full_pipeline_supports_multiword_python_bin(tmp_path: Path) 
     env["EXPLOITABILITY_JOBS"] = "1"
     env["EXPLOITABILITY_RUNTIME_MODE"] = "folder"
     env["LLM_PROVIDER"] = "deepseek"
-    env["PYTHON_BIN"] = "conda run -n dsocr python"
+    env["PYTHON_BIN"] = "conda run -n custom-env python"
 
     result = subprocess.run(
         ["bash", str(SCRIPT)],

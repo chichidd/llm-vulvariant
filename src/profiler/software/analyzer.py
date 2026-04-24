@@ -519,11 +519,12 @@ class SoftwareProfiler:
         
         if analyzer_type == 'skill':
             logger.info("Using skill-based module analyzer (AI infra taxonomy)")
-            setattr(
-                self.llm_client,
-                "module_analyzer_claude_timeout",
-                int(self.module_analyzer_config.get("skill_claude_timeout_seconds", 900) or 900),
-            )
+            if self.llm_client is not None and hasattr(self.llm_client, "__dict__"):
+                setattr(
+                    self.llm_client,
+                    "module_analyzer_claude_timeout",
+                    int(self.module_analyzer_config.get("skill_claude_timeout_seconds", 900) or 900),
+                )
             self.module_analyzer = SkillModuleAnalyzer(
                 llm_client=self.llm_client,
                 excluded_folders=self.module_analyzer_config.get('excluded_folders') or None,

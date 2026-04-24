@@ -1,7 +1,8 @@
-"""Skill-based exploitability checker using Claude Code.
+"""Claude-backed exploitability checker.
 
-This module uses the .claude/skills/check-exploitability skill to verify
-whether detected vulnerabilities are actually exploitable.
+This module drives Claude CLI to verify whether detected vulnerabilities are
+actually exploitable. Repo-local skill guidance may exist, but the checker does
+not require Claude to invoke a separate skill tool in order to persist results.
 
 Key design:
 - Process each vulnerability individually for better reliability
@@ -189,7 +190,7 @@ def get_exploitability_output_state_for_findings(
 
 
 class SkillExploitabilityChecker:
-    """Check vulnerability exploitability using Claude Code skill."""
+    """Check vulnerability exploitability using Claude CLI."""
 
     def __init__(self, timeout: int = 600, claude_config_dir: str | Path | None = None):
         """Initialize the checker.
@@ -205,9 +206,6 @@ class SkillExploitabilityChecker:
         )
         self._active_claude_config_dir = self._default_claude_config_dir
         self._ensure_claude_runtime_dir(self._default_claude_config_dir)
-        
-        if not self._skill_exists():
-            logger.warning(f"Skill '{self.skill_name}' not found at {self._get_skill_path()}")
 
     @staticmethod
     def _ensure_claude_runtime_dir(runtime_dir: Path) -> None:
@@ -448,10 +446,6 @@ class SkillExploitabilityChecker:
         if not findings_path.exists():
             logger.error(f"Findings file not found: {findings_path}")
             return self._error_result(f"Findings file not found: {findings_path}")
-
-        if not self._skill_exists():
-            logger.error(f"Skill not found: {self._get_skill_path()}")
-            return self._error_result("Skill not found")
 
         # Load vulnerabilities
         try:
@@ -694,7 +688,7 @@ class SkillExploitabilityChecker:
         attack_scenario = str(vuln.get('attack_scenario') or '')
         
         lines = [
-            f"Quick vulnerability check using {self.skill_name} skill:",
+            "Quick vulnerability check:",
             f"File: {file_path}",
             f"Function: {function_name}" if function_name else "Function: ",
             f"Line: {line_number}" if line_number else "Line: ",
@@ -708,7 +702,17 @@ class SkillExploitabilityChecker:
             json.dumps(vuln, indent=2, ensure_ascii=False, sort_keys=True),
             "",
             f"Repository: {repo_path.resolve()}",
-            "", 
+            "",
+            "Work in the narrowest evidence scope that can prove or disprove exploitability.",
+            "Do not invoke additional brainstorming, planning, or skill-selection workflows.",
+            "Prefer the shortest direct source-to-sink path exposed by this repository before exploring broader internals.",
+            f"Start from the reported finding path first: {file_path}",
+            "Then inspect the closest direct entrypoint that can supply attacker-controlled input to that code path.",
+            "Only inspect broader framework, graph, scheduler, or executor internals if that shorter path is insufficient.",
+            "Do not inspect unrelated blocks or broad subsystems unless they are strictly required to prove the source-to-sink path.",
+            "As soon as you have enough evidence for a conservative verdict, return the final JSON immediately.",
+            "Keep the read set tight and produce the first concrete result quickly.",
+            "",
             "Verify the code path exists and return strictly ONE JSON object on stdout.",
             "Do not emit markdown, code fences, or prose.",
             "If any required evidence is missing, use the most conservative verdict ",
@@ -761,7 +765,7 @@ class SkillExploitabilityChecker:
             "Only treat Docker verification as VERIFIED_EXPLOITABLE when the PoC reaches the original repository",
             "entrypoint and real sink for this finding.",
             "If Docker verification needs provider credentials, forward the host environment into the container with",
-            "`docker run -e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY ...` so Docker copies the current values.",
+            "`docker run -e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY -e LAB_LLM_API_KEY ...` so Docker copies the current values.",
             "Do not leave `<API_KEY>` placeholders in the command.",
             "Do not print or copy secret values into stdout, files, or the final JSON.",
             "",
@@ -849,6 +853,7 @@ class SkillExploitabilityChecker:
                 extra_args=["--dangerously-skip-permissions"],
                 record_path=record_path,
                 preferred_model_hint=DEFAULT_SELECTED_MODEL_HINT,
+                allow_plain_text_fallback=True,
             )
             llm_usage = apply_claude_cli_usage_counters(response.usage_summary, response)
             
@@ -891,6 +896,10 @@ class SkillExploitabilityChecker:
         
         We need to extract the JSON from the result text.
         """
+        normalized_direct_payload = self._normalize_analysis_contract(claude_output)
+        if normalized_direct_payload and self._is_analysis_payload(normalized_direct_payload):
+            return normalized_direct_payload
+
         if not claude_output.get("result"):
             logger.warning("No result in Claude output")
             return None

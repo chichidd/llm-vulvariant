@@ -116,6 +116,30 @@ def test_parse_claude_result_accepts_output_schema_prefixed_final_json():
     assert parsed["confidence"] == "high"
 
 
+def test_parse_claude_result_accepts_direct_json_payload_object():
+    checker = _checker()
+    output = {
+        "verdict": "CONDITIONALLY_EXPLOITABLE",
+        "confidence": "medium",
+        "verdict_rationale": "direct payload",
+        "preconditions": [],
+        "static_evidence": [],
+        "dynamic_plan": [],
+        "docker_verification": {"verification_verdict": "NOT_VERIFIED"},
+        "open_questions": [],
+        "sink_analysis": {"confirmed": True, "sink_type": "cmd", "protection_status": "none"},
+        "source_analysis": {"sources_found": [], "attack_path": []},
+        "attack_scenario": {"description": "direct", "steps": [], "impact": "unknown"},
+        "remediation": {"recommendation": "fix"},
+    }
+
+    parsed = checker._parse_claude_result(output)
+
+    assert parsed is not None
+    assert parsed["verdict"] == "CONDITIONALLY_EXPLOITABLE"
+    assert parsed["confidence"] == "medium"
+
+
 def test_parse_claude_result_normalizes_separator_variants_in_json_payload():
     checker = _checker()
 
@@ -280,7 +304,7 @@ def test_build_prompt_uses_ny_api_key_when_openai_proxy_env_is_set(monkeypatch, 
     )
 
     assert "NY_API_KEY" in prompt
-    assert "-e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY" in prompt
+    assert "-e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY -e LAB_LLM_API_KEY" in prompt
     assert 'DEEPSEEK_API_KEY="<API_KEY>"' not in prompt
     assert 'OPENAI_API_KEY="<API_KEY>"' not in prompt
     assert "ny-proxy-key" not in prompt
@@ -496,6 +520,22 @@ def test_build_prompt_includes_verification_guardrails(tmp_path):
     assert "Treat trusted-local-only config/example/test inputs conservatively" in prompt
 
 
+def test_build_prompt_narrows_exploitability_scope_to_direct_path(tmp_path):
+    checker = _checker()
+
+    prompt = checker._build_prompt(
+        vuln={"file_path": "pkg/block.py", "vulnerability_type": "template_injection", "evidence": "line", "description": "desc"},
+        repo_path=tmp_path,
+    )
+
+    assert "Work in the narrowest evidence scope that can prove or disprove exploitability." in prompt
+    assert "Prefer the shortest direct source-to-sink path exposed by this repository before exploring broader internals." in prompt
+    assert "Start from the reported finding path first: pkg/block.py" in prompt
+    assert "Then inspect the closest direct entrypoint that can supply attacker-controlled input to that code path." in prompt
+    assert "Do not inspect unrelated blocks or broad subsystems" in prompt
+    assert "As soon as you have enough evidence for a conservative verdict, return the final JSON immediately." in prompt
+
+
 def test_analyze_single_vuln_falls_back_to_output_file(monkeypatch, tmp_path):
     checker = _checker()
     evidence_dir = tmp_path / "evidence"
@@ -674,7 +714,7 @@ def test_run_claude_prefers_observed_model_usage_over_hint(monkeypatch, tmp_path
     assert llm_usage["calls_total"] == 1
 
 
-def test_run_claude_json_output_flag_error_counts_zero_llm_calls(monkeypatch, tmp_path):
+def test_run_claude_json_output_flag_error_retries_in_plain_text_mode(monkeypatch, tmp_path):
     checker = _checker()
     commands = []
 
@@ -703,8 +743,10 @@ def test_run_claude_json_output_flag_error_counts_zero_llm_calls(monkeypatch, tm
 
     assert success is False
     assert payload is None
-    assert len(commands) == 1
-    assert llm_usage["calls_total"] == 1
+    assert len(commands) == 2
+    assert "--output-format" in commands[0]
+    assert "--output-format" not in commands[1]
+    assert llm_usage["calls_total"] == 2
 
 
 def test_run_claude_preserves_zero_calls_for_pre_spawn_failure(monkeypatch, tmp_path):

@@ -59,6 +59,7 @@ try:
     from cli.batch_scanner_cache import (
         _cached_vulnerability_profile_matches_current_inputs,
         _cached_vulnerability_profile_matches_missing_repo_inputs,
+        _is_git_worktree_root,
         _load_cached_software_profile_if_compatible,
         _load_vuln_entries,
     )
@@ -74,6 +75,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from batch_scanner_cache import (
         _cached_vulnerability_profile_matches_current_inputs,
         _cached_vulnerability_profile_matches_missing_repo_inputs,
+        _is_git_worktree_root,
         _load_cached_software_profile_if_compatible,
         _load_vuln_entries,
     )
@@ -763,7 +765,7 @@ def _ensure_software_profile(
         logger.error(f"Repository not found for software profile generation: {repo_path}")
         return None
 
-    if not force_regenerate and has_uncommitted_changes(str(repo_path)):
+    if not force_regenerate and _is_git_worktree_root(repo_path) and has_uncommitted_changes(str(repo_path)):
         # Dirty worktrees cannot go through the profiler's clean-worktree guard,
         # but batch resume should still reuse only a fingerprint-compatible
         # persisted profile. When the dirty checkout is already on the target
@@ -891,7 +893,7 @@ def _ensure_vulnerability_profile(
         return cached_profile
     source_repo_dirty = False
     with hold_repo_lock(repo_path, purpose=f"vulnerability_profile_cache_probe:{cve_id}"):
-        source_repo_dirty = has_uncommitted_changes(str(repo_path))
+        source_repo_dirty = _is_git_worktree_root(repo_path) and has_uncommitted_changes(str(repo_path))
         if source_repo_dirty and cached_profile:
             if _cached_vulnerability_profile_matches_current_inputs(
                 cached_profile=cached_profile,

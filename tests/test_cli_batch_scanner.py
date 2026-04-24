@@ -556,6 +556,7 @@ def test_ensure_software_profile_dirty_repo_uses_fingerprint_validated_cache(mon
         return cached_profile
 
     monkeypatch.setattr(batch_scanner, "has_uncommitted_changes", lambda _path: True)
+    monkeypatch.setattr(batch_scanner, "_is_git_worktree_root", lambda _path: True)
     monkeypatch.setattr(
         batch_scanner,
         "_load_cached_software_profile_if_compatible",

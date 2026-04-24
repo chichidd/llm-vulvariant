@@ -396,6 +396,7 @@ def test_loads_cached_vulnerability_profile_from_disk_when_repo_is_dirty(monkeyp
     )
 
     monkeypatch.setattr("cli.batch_scanner.has_uncommitted_changes", lambda repo_path: True)
+    monkeypatch.setattr("cli.batch_scanner._is_git_worktree_root", lambda repo_path: True)
     monkeypatch.setattr(
         "cli.batch_scanner._ensure_software_profile",
         lambda **kwargs: {"metadata": {"profile_fingerprint": {"hash": "source"}}},
@@ -465,6 +466,7 @@ def test_loads_cached_software_profile_from_disk_when_repo_is_dirty(monkeypatch,
 
     monkeypatch.setattr("cli.batch_scanner.has_uncommitted_changes", lambda repo_path: True)
     monkeypatch.setattr("cli.batch_scanner.get_git_commit", lambda repo_path: commit_hash)
+    monkeypatch.setattr("cli.batch_scanner._is_git_worktree_root", lambda repo_path: True)
     monkeypatch.setattr(
         "cli.batch_scanner.run_software_profile_generation",
         lambda **kwargs: pytest.fail("dirty resume should not regenerate software profiles"),
@@ -521,6 +523,7 @@ def test_dirty_repo_cached_software_profile_returns_none_when_repo_state_changes
 
     monkeypatch.setattr("cli.batch_scanner.has_uncommitted_changes", lambda repo_path: True)
     monkeypatch.setattr("cli.batch_scanner.get_git_commit", lambda repo_path: commit_hash)
+    monkeypatch.setattr("cli.batch_scanner._is_git_worktree_root", lambda repo_path: True)
     monkeypatch.setattr(
         "cli.batch_scanner.run_software_profile_generation",
         lambda **kwargs: pytest.fail("dirty stale cache should not regenerate software profiles"),
@@ -570,6 +573,7 @@ def test_loads_cached_software_profile_from_disk_when_dirty_repo_is_off_target(m
 
     monkeypatch.setattr("cli.batch_scanner.has_uncommitted_changes", lambda repo_path: True)
     monkeypatch.setattr("cli.batch_scanner.get_git_commit", lambda repo_path: "other-branch-head")
+    monkeypatch.setattr("cli.batch_scanner._is_git_worktree_root", lambda repo_path: True)
     monkeypatch.setattr(
         "cli.batch_scanner.run_software_profile_generation",
         lambda **kwargs: pytest.fail("dirty off-target resume should not regenerate software profiles"),
@@ -619,6 +623,7 @@ def test_dirty_repo_cached_vulnerability_profile_returns_none_when_revalidation_
     )
 
     monkeypatch.setattr("cli.batch_scanner.has_uncommitted_changes", lambda repo_path: True)
+    monkeypatch.setattr("cli.batch_scanner._is_git_worktree_root", lambda repo_path: True)
     monkeypatch.setattr(
         "cli.batch_scanner._ensure_software_profile",
         lambda **kwargs: {"metadata": {"profile_fingerprint": {"hash": "source"}}},

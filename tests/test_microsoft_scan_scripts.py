@@ -113,6 +113,12 @@ def test_run_microsoft_scan_full_has_valid_bash_syntax() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_run_microsoft_scan_full_does_not_reference_named_conda_env() -> None:
+    content = FULL_SCRIPT.read_text(encoding="utf-8")
+
+    assert "conda activate" not in content
+
+
 def test_run_microsoft_scan_full_executes_scan_and_exploitability(tmp_path: Path) -> None:
     bash_path = _require_script_runtime()
     pipeline_root = _prepare_pipeline_root(tmp_path)
@@ -355,3 +361,47 @@ def test_run_microsoft_scan_full_allows_partial_exploitability_when_explicitly_e
     calls = _load_logged_calls(calls_log)
     assert any(call[:2] == ["-m", "cli.exploitability"] for call in calls)
     assert "Partial exploitability explicitly allowed" in result.stdout
+
+
+def test_run_microsoft_scan_full_does_not_auto_activate_named_conda_env(tmp_path: Path) -> None:
+    bash_path = _require_script_runtime()
+    pipeline_root = _prepare_pipeline_root(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls_log = tmp_path / "calls.log"
+    fake_python = _write_fake_python(bin_dir)
+
+    fake_conda = bin_dir / "conda"
+    fake_conda.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "echo 'conda should not be invoked' >&2",
+                "exit 99",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fake_conda.chmod(fake_conda.stat().st_mode | stat.S_IEXEC)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["CALLS_LOG"] = str(calls_log)
+    env["ROOT"] = str(pipeline_root)
+    env["RUN_TAG"] = "20260408-040000"
+    env.pop("PYTHON_BIN", None)
+
+    result = subprocess.run(
+        [bash_path, str(FULL_SCRIPT)],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "conda should not be invoked" not in result.stderr
+    calls = _load_logged_calls(calls_log)
+    assert any(call[:2] == ["-m", "cli.batch_scanner"] for call in calls)

@@ -41,10 +41,10 @@
 | `vuln-profile` | 主要依赖所选 LLM provider；批量脚本版还依赖 `vuln-profile` 命令在 `PATH` |
 | `scanner` | target repo 需要是可 checkout 的 git working tree；自动目标选择还依赖本地 embedding 模型目录 |
 | `batch-scanner` | source/target repo 需要是 git working tree；`--skip-existing-scans` 最好配 clean tree |
-| `python -m cli.exploitability` | 依赖 `claude` JSON 输出、repo-local `check-exploitability`、可写 `.claude-runtime`、clean target repo；`EXPLOITABLE` finding 会自动触发 Docker PoC |
+| `python -m cli.exploitability` | 依赖 `claude` CLI、可写 `.claude-runtime`、clean target repo；`EXPLOITABLE` finding 会自动触发 Docker PoC |
 | `run_all_vuln_software_profile.sh` | 依赖 `jq`、`software-profile`、`python` / `python3` 或 `PYTHON_BIN` |
 | `run_all_vulnerability_profiles.sh` | 依赖 `vuln-profile` 或 `VULN_PROFILE_CMD`，并且当前脚本内部直接调用 `python -` |
-| `run_microsoft_scan_full.sh` | 优先尝试 `conda activate dsocr`，默认 `LLM_PROVIDER=lab` |
+| `run_microsoft_scan_full.sh` | 使用 `PYTHON_BIN` 或回退到 `python` / `python3`，默认 `LLM_PROVIDER=lab` |
 
 更完整的说明见 [runtime-requirements.md](runtime-requirements.md)。
 
@@ -279,8 +279,7 @@
 
 补充前提：
 
-- 需要 `claude -p --output-format json` 可用
-- 需要 repo-local `check-exploitability` skill
+- 需要 `claude -p` 可非交互运行；如果当前 CLI 不支持 `--output-format json`，代码会尝试纯文本回退
 - 需要可写 `.claude-runtime` 或 `--claude-runtime-root`
 - target repo 需要 clean worktree
 - `EXPLOITABLE` finding 会自动触发 Docker PoC
