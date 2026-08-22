@@ -6,8 +6,14 @@ from types import SimpleNamespace
 
 
 def _load_scan_repo_module():
-    script_path = Path(
-        "/mnt/raid/home/dongtian/vuln/llm-vulvariant/.claude/skills/ai-infra-module-modeler/scripts/scan_repo.py"
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = (
+        repo_root
+        / ".claude"
+        / "skills"
+        / "ai-infra-module-modeler"
+        / "scripts"
+        / "scan_repo.py"
     )
     script_dir = script_path.parent
     if str(script_dir) not in sys.path:

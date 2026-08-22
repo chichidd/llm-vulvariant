@@ -83,7 +83,7 @@ Options:
 
 Examples:
   $0
-  $0 --profile-base-path ~/vuln/profiles --soft-profile-dirname soft
+  $0 --profile-base-path ../profiles --soft-profile-dirname soft
   $0 --output-dir /tmp/soft-profiles --llm-provider deepseek
   $0 --force-regenerate
 EOF

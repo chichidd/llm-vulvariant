@@ -23,10 +23,10 @@ read -r -a PYTHON_CMD <<<"$PYTHON_BIN"
 
 # Examples:
 #   ./scripts/run_all_software_profiles.sh
-#   ./scripts/run_all_software_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir ~/vuln/profiles/soft --verbose
+#   ./scripts/run_all_software_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir ../profiles/soft --verbose
 #   ./scripts/run_all_software_profiles.sh --force-regenerate
 #   ./scripts/run_all_software_profiles.sh -- --verbose
-#.  under llm-vulvariant: ./scripts/run_all_software_profiles.sh --llm-provider deepseek --output-dir ~/vuln/profiles/soft
+#.  under llm-vulvariant: ./scripts/run_all_software_profiles.sh --llm-provider deepseek --output-dir ../profiles/soft
 # Notes:
 # - Repo name A is the folder name under data/repos (first level only).
 # - Extra args must be supported by the current software-profile CLI.
@@ -126,7 +126,7 @@ Env overrides:
 
 Examples:
   $0
-  $0 --llm-provider openai --llm-name gpt-4.1 --output-dir ~/vuln/profiles/soft --verbose
+  $0 --llm-provider openai --llm-name gpt-4.1 --output-dir ../profiles/soft --verbose
   $0 --force-regenerate
   $0 -- --verbose
 EOF

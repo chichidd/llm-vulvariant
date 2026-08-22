@@ -20,6 +20,11 @@ from .toolkit_fs import ToolResult
 
 logger = get_logger(__name__)
 
+LOW_SIGNAL_CODEQL_RULE_IDS_FOR_MEMORY = frozenset({
+    "py/xml-parsing",
+    "python/xml-parsing",
+})
+
 
 class ToolkitCodeQLMixin:
     """CodeQL query workspace, database, and result helpers."""
@@ -517,13 +522,18 @@ dependencies:
         if not self._memory_manager:
             return
 
+        filtered_count = 0
         finding_records = []
         for finding in findings:
+            rule_id = str(finding.get("rule_id", "unknown") or "unknown").strip()
+            if rule_id in LOW_SIGNAL_CODEQL_RULE_IDS_FOR_MEMORY:
+                filtered_count += 1
+                continue
             finding_records.append({
                 "source": "codeql",
                 "query_name": query_name,
                 "file_path": finding.get("file", ""),
-                "vulnerability_type": finding.get("rule_id", "unknown"),
+                "vulnerability_type": rule_id,
                 "description": finding.get("message", ""),
                 "evidence": finding.get("snippet", ""),
                 "line_number": finding.get("start_line", 0),
@@ -531,8 +541,9 @@ dependencies:
                 "similarity_to_known": f"Detected by CodeQL query: {query_name}",
             })
 
+        eligible_count = len(finding_records)
         add_findings = getattr(self._memory_manager, "add_findings", None)
-        if callable(add_findings):
+        if callable(add_findings) and finding_records:
             added_count = int(add_findings(finding_records))
         else:
             added_count = 0
@@ -543,7 +554,7 @@ dependencies:
         if findings:
             summary = (
                 f"CodeQL query '{query_name}' found {len(findings)} potential issues "
-                f"({added_count} new)"
+                f"({filtered_count} filtered, {eligible_count} eligible, {added_count} new)"
             )
             self._memory_manager.add_issue(summary)
 

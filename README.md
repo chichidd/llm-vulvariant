@@ -28,7 +28,7 @@ LLM 驱动的漏洞变种发现与可利用性验证框架。
 ### 1. 安装
 
 ```bash
-cd /mnt/raid/home/dongtian/vuln/llm-vulvariant
+cd /path/to/workspace/llm-vulvariant
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -54,14 +54,14 @@ pip install transformers sentence-transformers torch
 # 1) 为源仓库生成软件画像
 software-profile \
   --repo-name NeMo \
-  --repo-base-path ~/vuln/data/repos \
+  --repo-base-path ../data/repos \
   --target-version <source_commit> \
   --llm-provider deepseek
 
 # 2) 生成漏洞画像
 vuln-profile \
   --vuln-index 0 \
-  --vuln-json ~/vuln/data/vuln.json \
+  --vuln-json ../data/vuln.json \
   --llm-provider deepseek
 
 # 3) 扫描一个指定目标仓库
@@ -70,17 +70,17 @@ scanner \
   --cve CVE-2025-23361 \
   --target-repo Megatron-LM \
   --target-commit <target_commit> \
-  --repo-base-path ~/vuln/data/repos \
+  --repo-base-path ../data/repos \
   --llm-provider deepseek \
   --max-iterations 3 \
-  --output ~/vuln/results/scan-results
+  --output ../results/scan-results
 
 # 4) 可利用性验证与报告
 python -m cli.exploitability \
-  --scan-results-dir ~/vuln/results/scan-results \
-  --repo-base-path ~/vuln/data/repos \
+  --scan-results-dir ../results/scan-results \
+  --repo-base-path ../data/repos \
   --generate-report \
-  --submission-output-dir ~/vuln/results/exploitability
+  --submission-output-dir ../results/exploitability
 ```
 
 完整 recipe、批量流程和脚本入口见 [docs/pipeline-recipes.md](docs/pipeline-recipes.md)。
@@ -98,7 +98,7 @@ python -m cli.exploitability \
 默认路径来自 `config/paths.yaml`，常见目录如下：
 
 ```text
-~/vuln/
+../
 ├── data/
 │   ├── vuln.json
 │   └── repos/

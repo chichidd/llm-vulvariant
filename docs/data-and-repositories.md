@@ -9,10 +9,10 @@
 
 ## 1. 默认目录布局
 
-默认路径来自 `config/paths.yaml`。按当前配置，项目默认假设你在 `~/vuln` 下组织数据：
+默认路径来自 `config/paths.yaml`。按当前配置，项目默认假设你在 `..` 下组织数据：
 
 ```text
-~/vuln/
+../
 ├── data/
 │   ├── vuln.json
 │   └── repos/
@@ -89,7 +89,7 @@ source repo 必须能够按 `repo_name` 找到：
 例如 `repo_name=NeMo` 时，默认路径是：
 
 ```text
-~/vuln/data/repos/NeMo
+../data/repos/NeMo
 ```
 
 ### target repo
@@ -161,7 +161,7 @@ results/
 示例：
 
 ```bash
-ROOT=~/vuln/data/repos-nvidia bash scripts/update_repos.sh
+ROOT=../data/repos-nvidia bash scripts/update_repos.sh
 ```
 
 ### `scripts/run_all_vuln_software_profile.sh`
@@ -178,9 +178,9 @@ ROOT=~/vuln/data/repos-nvidia bash scripts/update_repos.sh
 
 ```bash
 bash scripts/run_all_vuln_software_profile.sh \
-  --vuln-json ~/vuln/data/vuln.json \
-  --repo-base-path ~/vuln/data/repos \
-  --profile-base-path ~/vuln/profiles \
+  --vuln-json ../data/vuln.json \
+  --repo-base-path ../data/repos \
+  --profile-base-path ../profiles \
   --soft-profile-dirname soft \
   --llm-provider deepseek
 ```
@@ -198,8 +198,8 @@ bash scripts/run_all_vuln_software_profile.sh \
 
 ```bash
 bash scripts/run_all_vulnerability_profiles.sh \
-  --vuln-json ~/vuln/data/vuln.json \
-  --profile-base-path ~/vuln/profiles \
+  --vuln-json ../data/vuln.json \
+  --profile-base-path ../profiles \
   --soft-profile-dirname soft \
   --vuln-profile-dirname vuln \
   --llm-provider deepseek
@@ -219,8 +219,8 @@ bash scripts/run_all_vulnerability_profiles.sh \
 
 ```bash
 bash scripts/run_all_software_profiles.sh \
-  --root ~/vuln/data/repos-nvidia \
-  --output-dir ~/vuln/profiles/soft-nvidia \
+  --root ../data/repos-nvidia \
+  --output-dir ../profiles/soft-nvidia \
   --llm-provider deepseek
 ```
 

@@ -26,9 +26,9 @@
 ```bash
 software-profile \
   --repo-name NeMo \
-  --repo-base-path ~/vuln/data/repos \
+  --repo-base-path ../data/repos \
   --target-version <source_commit> \
-  --profile-base-path ~/vuln/profiles \
+  --profile-base-path ../profiles \
   --software-profile-dirname soft \
   --llm-provider deepseek
 ```
@@ -38,11 +38,11 @@ software-profile \
 ```bash
 vuln-profile \
   --vuln-index 0 \
-  --vuln-json ~/vuln/data/vuln.json \
-  --profile-base-path ~/vuln/profiles \
+  --vuln-json ../data/vuln.json \
+  --profile-base-path ../profiles \
   --software-profile-dirname soft \
   --vuln-profile-dirname vuln \
-  --repo-base-path ~/vuln/data/repos \
+  --repo-base-path ../data/repos \
   --llm-provider deepseek
 ```
 
@@ -54,25 +54,25 @@ scanner \
   --cve CVE-2025-23361 \
   --target-repo Megatron-LM \
   --target-commit <target_commit> \
-  --repo-base-path ~/vuln/data/repos \
-  --profile-base-path ~/vuln/profiles \
+  --repo-base-path ../data/repos \
+  --profile-base-path ../profiles \
   --software-profile-dirname soft \
   --vuln-profile-dirname vuln \
   --llm-provider deepseek \
   --max-iterations 3 \
-  --output ~/vuln/results/scan-results
+  --output ../results/scan-results
 ```
 
 ### Step 4. 做 exploitability 检查与报告
 
 ```bash
 python -m cli.exploitability \
-  --scan-results-dir ~/vuln/results/scan-results \
-  --profile-base-path ~/vuln/profiles \
+  --scan-results-dir ../results/scan-results \
+  --profile-base-path ../profiles \
   --software-profile-dirname soft \
-  --repo-base-path ~/vuln/data/repos \
+  --repo-base-path ../data/repos \
   --generate-report \
-  --submission-output-dir ~/vuln/results/exploitability \
+  --submission-output-dir ../results/exploitability \
   --submission-prefix exploitable_findings \
   --run-id demo-001
 ```
@@ -104,12 +104,12 @@ scanner \
   --similarity-threshold 0.70 \
   --similarity-model-name jinaai--jina-code-embeddings-1.5b \
   --similarity-device cpu \
-  --profile-base-path ~/vuln/profiles \
+  --profile-base-path ../profiles \
   --software-profile-dirname soft-nvidia \
   --vuln-profile-dirname vuln \
-  --repo-base-path ~/vuln/data/repos-nvidia \
+  --repo-base-path ../data/repos-nvidia \
   --llm-provider deepseek \
-  --output ~/vuln/results/scan-results
+  --output ../results/scan-results
 ```
 
 常用调节项：
@@ -131,13 +131,13 @@ scanner \
 
 ```bash
 batch-scanner \
-  --vuln-json ~/vuln/data/vuln.json \
-  --source-repos-root ~/vuln/data/repos \
-  --target-repos-root ~/vuln/data/repos-nvidia \
-  --source-soft-profiles-dir ~/vuln/profiles/soft \
-  --target-soft-profiles-dir ~/vuln/profiles/soft-nvidia \
-  --vuln-profiles-dir ~/vuln/profiles/vuln \
-  --scan-output-dir ~/vuln/results/nvidia-batch-scan \
+  --vuln-json ../data/vuln.json \
+  --source-repos-root ../data/repos \
+  --target-repos-root ../data/repos-nvidia \
+  --source-soft-profiles-dir ../profiles/soft \
+  --target-soft-profiles-dir ../profiles/soft-nvidia \
+  --vuln-profiles-dir ../profiles/vuln \
+  --scan-output-dir ../results/nvidia-batch-scan \
   --run-id run-20260408-001 \
   --similarity-threshold 0.70 \
   --fallback-top-n 3 \
@@ -172,15 +172,15 @@ batch-scanner \
 
 ```bash
 python -m cli.exploitability \
-  --scan-results-dir ~/vuln/results/nvidia-batch-scan \
-  --soft-profile-dir ~/vuln/profiles/soft-nvidia \
-  --repo-base-path ~/vuln/data/repos-nvidia \
+  --scan-results-dir ../results/nvidia-batch-scan \
+  --soft-profile-dir ../profiles/soft-nvidia \
+  --repo-base-path ../data/repos-nvidia \
   --jobs 4 \
   --generate-report \
   --report-only-exploitable \
-  --submission-output-dir ~/vuln/results/nvidia-batch-exploitability \
+  --submission-output-dir ../results/nvidia-batch-exploitability \
   --submission-prefix exploitable_findings \
-  --claude-runtime-root ~/vuln/results/claude-runtime \
+  --claude-runtime-root ../results/claude-runtime \
   --claude-runtime-mode folder \
   --run-id run-20260408-001
 ```

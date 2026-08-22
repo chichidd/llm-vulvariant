@@ -9,6 +9,7 @@ Verifies that:
 - _run_codeql_query writes the .ql file under output_dir/codeql-queries/<lang>/.
 """
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -251,7 +252,7 @@ class TestEnsureQueryPack:
 class TestRunCodeqlQuery:
     """_run_codeql_query should write .ql files under the output query dir."""
 
-    def test_record_codeql_findings_uses_batch_memory_api_when_available(self, tmp_path):
+    def test_record_codeql_findings_filters_low_signal_xml_parsing_from_memory(self, tmp_path):
         tk, _, _, _ = _make_toolkit(tmp_path)
         tk._record_codeql_findings_in_memory(
             "xml_parsing_functions",
@@ -265,18 +266,94 @@ class TestRunCodeqlQuery:
                 },
                 {
                     "file": "b.py",
-                    "rule_id": "py/xml-parsing",
-                    "message": "XML parsing function: parse",
+                    "rule_id": "python/xml-parsing",
+                    "message": "XML parsing call: parse",
                     "snippet": "",
                     "start_line": 21,
+                },
+                {
+                    "file": "c.py",
+                    "rule_id": "xxe",
+                    "message": "Potential XXE in XML parser",
+                    "snippet": "",
+                    "start_line": 33,
+                },
+                {
+                    "file": "d.py",
+                    "rule_id": "python/xxe-xml-parsing",
+                    "message": "Potential XXE vulnerability: XML parsing call",
+                    "snippet": "",
+                    "start_line": 44,
                 },
             ],
         )
 
         assert tk._memory_manager._add_findings_calls == [2]
-        assert len(tk._memory_manager._findings) == 2
+        assert [
+            finding["vulnerability_type"]
+            for finding in tk._memory_manager._findings
+        ] == ["xxe", "python/xxe-xml-parsing"]
         assert tk._memory_manager._issues == [
-            "CodeQL query 'xml_parsing_functions' found 2 potential issues (2 new)"
+            "CodeQL query 'xml_parsing_functions' found 4 potential issues (2 filtered, 2 eligible, 2 new)"
+        ]
+
+    def test_run_codeql_query_preserves_raw_results_when_memory_filters(self, tmp_path):
+        tk, _, output_dir, _ = _make_toolkit(tmp_path)
+        db_name = "test-db-python"
+        tk._codeql_database_names = {"python": db_name}
+        db_dir = tk._codeql_db_base_path / db_name
+        db_dir.mkdir(parents=True)
+        tk._codeql_analyzer.run_query = MagicMock(
+            return_value=(
+                True,
+                {
+                    "runs": [
+                        {
+                            "results": [
+                                {
+                                    "ruleId": "py/xml-parsing",
+                                    "message": {"text": "XML parsing function: parse"},
+                                    "locations": [
+                                        {
+                                            "physicalLocation": {
+                                                "artifactLocation": {"uri": "a.py"},
+                                                "region": {"startLine": 12},
+                                            }
+                                        }
+                                    ],
+                                },
+                                {
+                                    "ruleId": "xxe",
+                                    "message": {"text": "Potential XXE in XML parser"},
+                                    "locations": [
+                                        {
+                                            "physicalLocation": {
+                                                "artifactLocation": {"uri": "b.py"},
+                                                "region": {"startLine": 24},
+                                            }
+                                        }
+                                    ],
+                                },
+                            ]
+                        }
+                    ]
+                },
+            )
+        )
+
+        result = tk._run_codeql_query(query="import python\nselect 1", query_name="mixed_query")
+
+        assert result.success is True
+        assert [
+            finding["vulnerability_type"]
+            for finding in tk._memory_manager._findings
+        ] == ["xxe"]
+        findings_file = output_dir / "codeql-results" / "mixed_query_findings.json"
+        saved = json.loads(findings_file.read_text())
+        assert saved["total_findings"] == 2
+        assert [finding["rule_id"] for finding in saved["findings"]] == [
+            "py/xml-parsing",
+            "xxe",
         ]
 
     def test_ql_file_saved_to_output_dir(self, tmp_path):

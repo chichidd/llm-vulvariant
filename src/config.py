@@ -11,6 +11,8 @@ import yaml
 DEFAULT_SOFTWARE_PROFILE_DIRNAME = "soft"
 DEFAULT_VULN_PROFILE_DIRNAME = "vuln"
 DEFAULT_SCANNER_EMBEDDING_MODEL_NAME = "jinaai--jina-code-embeddings-1.5b"
+_CONFIG_REPO_ROOT = Path(__file__).resolve().parent.parent
+_CONFIG_PROJECT_ROOT = _CONFIG_REPO_ROOT.parent
 logger = logging.getLogger(__name__)
 
 
@@ -85,16 +87,27 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
             return path
         return (base_dir / path).expanduser()
 
+    using_default_config = config_path is None
     try:
-        if config_path is None:
-            config_path = Path(__file__).parent.parent / "config" / "paths.yaml"
+        if using_default_config:
+            config_path = _CONFIG_REPO_ROOT / "config" / "paths.yaml"
+        else:
+            config_path = Path(config_path).expanduser()
 
         if config_path.exists():
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             paths = config.get("paths", {})
-            config_dir = config_path.parent
-            project_root = _expand_path(paths.get("project_root"), "~/vuln", base_dir=config_dir)
-            repo_root = project_root / "llm-vulvariant"
+            config_dir = config_path.resolve(strict=False).parent
+            project_root = _expand_path(
+                paths.get("project_root"),
+                _CONFIG_PROJECT_ROOT,
+                base_dir=config_dir,
+            ).resolve(strict=False)
+            repo_root = (
+                _CONFIG_REPO_ROOT
+                if using_default_config
+                else project_root / "llm-vulvariant"
+            )
             profile_base_path = _expand_path(
                 paths.get("profile_base_path"),
                 project_root / "profiles",
@@ -107,27 +120,27 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
                 "profile_base_path": profile_base_path,
                 "data_base_path": _expand_path(
                     paths.get("data_base_path"),
-                    "~/vuln/data",
+                    project_root / "data",
                     base_dir=project_root,
                 ),
                 "vuln_data_path": _expand_path(
                     paths.get("vuln_data_path"),
-                    "~/vuln/data/vuln.json",
+                    project_root / "data" / "vuln.json",
                     base_dir=project_root,
                 ),
                 "repo_base_path": _expand_path(
                     paths.get("repo_base_path"),
-                    "~/vuln/data/repos",
+                    project_root / "data" / "repos",
                     base_dir=project_root,
                 ),
                 "codeql_db_path": _expand_path(
                     paths.get("codeql_db_path"),
-                    "~/vuln/codeql_dbs",
+                    project_root / "codeql_dbs",
                     base_dir=project_root,
                 ),
                 "embedding_model_path": _expand_path(
                     paths.get("embedding_model_path"),
-                    "~/vuln/models",
+                    project_root / "models",
                     base_dir=project_root,
                 ),
             }
@@ -136,10 +149,10 @@ def load_paths_config(config_path: Optional[Path] = None) -> Dict[str, Path]:
 
         logging.debug(f"Failed to load paths config: {e}")
 
-    # Fall back to the repository's conventional ``~/vuln`` layout so CLI tools
-    # remain usable even when the YAML file is missing or invalid.
-    project_root = Path.home() / "vuln"
-    repo_root = project_root / "llm-vulvariant"
+    # Keep the archived checkout relocatable even when the YAML file is missing
+    # or invalid: its parent directory is the workspace root.
+    project_root = _CONFIG_PROJECT_ROOT
+    repo_root = _CONFIG_REPO_ROOT
     return {
         "project_root": project_root,
         "repo_root": repo_root,

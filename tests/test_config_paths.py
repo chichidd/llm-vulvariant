@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import config as config_module
 
 
@@ -39,3 +41,18 @@ def test_resolve_profile_base_path_anchors_relative_override_to_repo_root(monkey
     monkeypatch.setitem(config_module._path_config, "repo_root", repo_root)
 
     assert config_module.resolve_profile_base_path("profiles") == repo_root / "profiles"
+
+
+def test_default_paths_follow_checkout_location():
+    loaded = config_module.load_paths_config()
+    repo_root = Path(config_module.__file__).resolve().parents[1]
+    project_root = repo_root.parent
+
+    assert loaded["project_root"] == project_root
+    assert loaded["repo_root"] == repo_root
+    assert loaded["profile_base_path"] == project_root / "profiles"
+    assert loaded["data_base_path"] == project_root / "data"
+    assert loaded["vuln_data_path"] == project_root / "data" / "vuln.json"
+    assert loaded["repo_base_path"] == project_root / "data" / "repos"
+    assert loaded["codeql_db_path"] == project_root / "codeql_dbs"
+    assert loaded["embedding_model_path"] == project_root / "models"

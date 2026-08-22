@@ -159,7 +159,7 @@ claude -p '{"ok":true}'
 ```bash
 test -d .claude/skills/ai-infra-module-modeler
 ls .claude/skills
-ls ~/vuln/models/<model-name>
+ls ../models/<model-name>
 ```
 
 ## 10. 常见报错与定位方向

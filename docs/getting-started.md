@@ -31,7 +31,7 @@
 ## 2. 安装仓库
 
 ```bash
-cd /mnt/raid/home/dongtian/vuln/llm-vulvariant
+cd /path/to/workspace/llm-vulvariant
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -90,7 +90,7 @@ claude -p '{"ok":true}'
 
 ```bash
 test -d .claude/skills/ai-infra-module-modeler
-ls ~/vuln/models/<model-name>
+ls ../models/<model-name>
 ```
 
 ## 5. 脚本入口变量与特殊情况
