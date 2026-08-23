@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,6 +33,33 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 logger = get_logger(__name__)
 
 
+def _reject_duplicate_json_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """构造 JSON 对象，并拒绝重复键。"""
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    """拒绝 JSON 标准未定义的非有限数。"""
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _validate_finite_json_numbers(value: Any) -> None:
+    """递归拒绝指数溢出产生的非有限浮点数。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    if isinstance(value, list):
+        for item in value:
+            _validate_finite_json_numbers(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            _validate_finite_json_numbers(item)
+
+
 def _is_git_worktree_root(path: Path) -> bool:
     """Return whether ``path`` is the top-level directory of a git worktree."""
     try:
@@ -53,9 +81,22 @@ def _normalize_cve_id(entry: Dict[str, object], index: int) -> str:
 
 
 def _load_vuln_entries(vuln_json: Path, limit: Optional[int] = None) -> List[Tuple[int, Dict[str, object]]]:
-    """Load indexed vulnerability entries from ``vuln.json``."""
-    raw_entries = json.loads(vuln_json.read_text(encoding="utf-8"))
-    indexed = list(enumerate(raw_entries))
+    """加载带索引的漏洞输入，并拒绝非对象条目。"""
+    raw_entries = json.loads(
+        vuln_json.read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=_reject_nonfinite_json_constant,
+    )
+    _validate_finite_json_numbers(raw_entries)
+    if not isinstance(raw_entries, list):
+        raise ValueError("vuln.json root must be a list")
+    indexed = []
+    for index, entry in enumerate(raw_entries):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"vuln.json entry {index} must be an object"
+            )
+        indexed.append((index, entry))
     if limit is not None:
         indexed = indexed[:limit]
     return indexed

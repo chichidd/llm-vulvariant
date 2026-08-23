@@ -25,8 +25,19 @@ def create_profile_llm_client(llm_provider: str, llm_name: Optional[str]) -> Any
     Returns:
         Initialized LLM client.
     """
-    llm_config = LLMConfig(provider=llm_provider, model=llm_name)
-    llm_config.enable_thinking = True
+    if llm_provider == "lab" and llm_name == "GLM-5.2":
+        llm_config = LLMConfig(
+            provider=llm_provider,
+            model=llm_name,
+            enable_thinking=True,
+            enforce_exact_decoding=True,
+            max_retries=3,
+            fallback_on_retry_exhausted=False,
+            fallback_provider=None,
+        )
+    else:
+        llm_config = LLMConfig(provider=llm_provider, model=llm_name)
+        llm_config.enable_thinking = True
     return create_llm_client(llm_config)
 
 

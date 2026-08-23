@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import json
 import os
 import threading
@@ -16,8 +18,12 @@ def test_acquire_repo_lock_blocks_until_previous_owner_releases(monkeypatch, tmp
     repo_dir = tmp_path / "repos" / "demo-repo"
     repo_dir.mkdir(parents=True)
     monkeypatch.setitem(repo_lock._path_config, "repo_root", repo_root)
+    monkeypatch.setitem(repo_lock._path_config, "results_base_path", tmp_path / "results")
+    expected_lock_root = tmp_path / "results" / "runtime" / "locks" / "repos"
 
     first_lock = repo_lock.acquire_repo_lock(repo_dir, purpose="first")
+    assert Path(first_lock["lock_path"]).parent == expected_lock_root
+    assert (repo_root / ".runtime-locks").exists() is False
     acquired_event = threading.Event()
     release_event = threading.Event()
     worker_started = threading.Event()
@@ -52,6 +58,7 @@ def test_release_lock_does_not_remove_foreign_owner(monkeypatch, tmp_path):
     repo_dir = tmp_path / "repos" / "demo-repo"
     repo_dir.mkdir(parents=True)
     monkeypatch.setitem(repo_lock._path_config, "repo_root", repo_root)
+    monkeypatch.setitem(repo_lock._path_config, "results_base_path", tmp_path / "results")
 
     lock_info = repo_lock.acquire_repo_lock(repo_dir, purpose="owner")
     lock_path = repo_lock.resolve_repo_lock_path(repo_dir)
@@ -74,6 +81,7 @@ def test_acquire_repo_lock_removes_stale_lock(monkeypatch, tmp_path):
     repo_dir = tmp_path / "repos" / "demo-repo"
     repo_dir.mkdir(parents=True)
     monkeypatch.setitem(repo_lock._path_config, "repo_root", repo_root)
+    monkeypatch.setitem(repo_lock._path_config, "results_base_path", tmp_path / "results")
 
     lock_path = repo_lock.resolve_repo_lock_path(repo_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +112,7 @@ def test_acquire_repo_lock_does_not_delete_republished_lock_during_stale_cleanup
     repo_dir = tmp_path / "repos" / "demo-repo"
     repo_dir.mkdir(parents=True)
     monkeypatch.setitem(repo_lock._path_config, "repo_root", repo_root)
+    monkeypatch.setitem(repo_lock._path_config, "results_base_path", tmp_path / "results")
 
     lock_path = repo_lock.resolve_repo_lock_path(repo_dir)
     _write_lock_file(
@@ -156,6 +165,7 @@ def test_acquire_lock_does_not_remove_replaced_stale_lock(monkeypatch, tmp_path)
     repo_dir = tmp_path / "repos" / "demo-repo"
     repo_dir.mkdir(parents=True)
     monkeypatch.setitem(repo_lock._path_config, "repo_root", repo_root)
+    monkeypatch.setitem(repo_lock._path_config, "results_base_path", tmp_path / "results")
 
     lock_path = repo_lock.resolve_repo_lock_path(repo_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +224,7 @@ def test_acquire_lock_reports_busy_when_holder_is_unverifiable(monkeypatch, tmp_
     repo_dir = tmp_path / "repos" / "demo-repo"
     repo_dir.mkdir(parents=True)
     monkeypatch.setitem(repo_lock._path_config, "repo_root", repo_root)
+    monkeypatch.setitem(repo_lock._path_config, "results_base_path", tmp_path / "results")
 
     lock_path = repo_lock.resolve_repo_lock_path(repo_dir)
     _write_lock_file(

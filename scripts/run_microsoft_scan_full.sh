@@ -3,12 +3,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="${ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
+REVISION_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+ROOT="${ROOT:-$REVISION_ROOT}"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
-PROFILES_ROOT="${PROFILES_ROOT:-$ROOT/profiles}"
-VULN_JSON="${VULN_JSON:-$ROOT/data/vuln.json}"
-SOURCE_REPOS_ROOT="${SOURCE_REPOS_ROOT:-$ROOT/data/repos}"
-TARGET_REPOS_ROOT="${TARGET_REPOS_ROOT:-$ROOT/data/repos-microsoft}"
+export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+PROFILES_ROOT="${PROFILES_ROOT:-$ROOT/evidence/profiles}"
+VULN_JSON="${VULN_JSON:-$ROOT/benchmark/input/vuln.json}"
+SOURCE_REPOS_ROOT="${SOURCE_REPOS_ROOT:-$ROOT/repos/general}"
+TARGET_REPOS_ROOT="${TARGET_REPOS_ROOT:-$ROOT/repos/microsoft}"
 SOURCE_SOFT_PROFILES_DIR="${SOURCE_SOFT_PROFILES_DIR:-$PROFILES_ROOT/soft}"
 TARGET_SOFT_PROFILES_DIR="${TARGET_SOFT_PROFILES_DIR:-$PROFILES_ROOT/soft-microsoft}"
 VULN_PROFILES_DIR="${VULN_PROFILES_DIR:-$PROFILES_ROOT/vuln}"
@@ -21,14 +23,17 @@ EXPLOITABILITY_TIMEOUT="${EXPLOITABILITY_TIMEOUT:-1800}"
 EXPLOITABILITY_JOBS="${EXPLOITABILITY_JOBS:-1}"
 EXPLOITABILITY_RUNTIME_MODE="${EXPLOITABILITY_RUNTIME_MODE:-run}"
 TARGET_SCAN_TIMEOUT="${TARGET_SCAN_TIMEOUT:-7200}"
-ALLOW_PARTIAL_EXPLOITABILITY="${ALLOW_PARTIAL_EXPLOITABILITY:-0}"
 SUBMISSION_PREFIX="${SUBMISSION_PREFIX:-exploitable_findings}"
-LLM_PROVIDER="${LLM_PROVIDER:-lab}"
-LLM_NAME="${LLM_NAME:-}"
+LLM_PROVIDER="lab"
+LLM_NAME="GLM-5.2"
+LAB_LLM_API_BASE="https://llm.shtech.org/v1"
+LAB_LLM_MODEL="GLM-5.2"
+export LAB_LLM_API_BASE LAB_LLM_MODEL
 PYTHON_BIN="${PYTHON_BIN:-}"
-SCAN_LOG="${SCAN_LOG:-$ROOT/output-microsoft-scan-$RUN_ID.log}"
-EXP_LOG="${EXP_LOG:-$ROOT/output-microsoft-exploitability-$RUN_ID.log}"
-STATUS_LOG="${STATUS_LOG:-$ROOT/output-microsoft-status-$RUN_ID.log}"
+LOG_DIR="$ROOT/results/logs"
+SCAN_LOG="${SCAN_LOG:-$LOG_DIR/output-microsoft-scan-$RUN_ID.log}"
+EXP_LOG="${EXP_LOG:-$LOG_DIR/output-microsoft-exploitability-$RUN_ID.log}"
+STATUS_LOG="${STATUS_LOG:-$LOG_DIR/output-microsoft-status-$RUN_ID.log}"
 
 cd "$APP_DIR"
 
@@ -42,14 +47,53 @@ if [[ -z "$PYTHON_BIN" ]]; then
     exit 1
   fi
 fi
-
 read -r -a PYTHON_CMD <<<"$PYTHON_BIN"
 
-mkdir -p "$SCAN_OUTPUT_DIR" "$EXP_OUTPUT_DIR" "$RUNTIME_ROOT"
+mkdir -p "$SCAN_OUTPUT_DIR" "$EXP_OUTPUT_DIR" "$RUNTIME_ROOT" "$LOG_DIR"
+
 
 if (( EXPLOITABILITY_JOBS > 1 )) && [[ "$EXPLOITABILITY_RUNTIME_MODE" != "folder" ]]; then
   EXPLOITABILITY_RUNTIME_MODE="folder"
 fi
+
+echo "[$(date -Iseconds)] Preflight: verify every target repository has an exact HEAD profile" | tee -a "$STATUS_LOG"
+"${PYTHON_CMD[@]}" - "$TARGET_REPOS_ROOT" "$TARGET_SOFT_PROFILES_DIR" <<'PY' | tee -a "$STATUS_LOG"
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+repos_root = Path(sys.argv[1])
+profiles_root = Path(sys.argv[2])
+target_repos = sorted(
+    path
+    for path in repos_root.iterdir()
+    if path.is_dir() and (path / ".git").exists()
+)
+if not target_repos:
+    raise SystemExit(f"No target git repositories found under {repos_root}")
+
+missing = []
+for repo_path in target_repos:
+    commit = subprocess.run(
+        ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SystemExit(f"Invalid HEAD commit for {repo_path}")
+    profile = profiles_root / repo_path.name / commit / "software_profile.json"
+    if not profile.is_file():
+        missing.append((repo_path.name, commit, profile))
+
+print(f"target_repositories={len(target_repos)}")
+print(f"missing_target_profiles={len(missing)}")
+for repo_name, commit, profile in missing:
+    print(f"  missing {repo_name}@{commit} -> {profile}")
+if missing:
+    raise SystemExit(1)
+PY
 
 echo "[$(date -Iseconds)] RUN_ID=$RUN_ID" | tee -a "$STATUS_LOG"
 echo "[$(date -Iseconds)] Stage 1/2: run batch scanner" | tee -a "$STATUS_LOG"
@@ -63,6 +107,7 @@ set +e
   --target-soft-profiles-dir "$TARGET_SOFT_PROFILES_DIR" \
   --vuln-profiles-dir "$VULN_PROFILES_DIR" \
   --scan-output-dir "$SCAN_OUTPUT_DIR" \
+  --run-id "$RUN_ID" \
   --scan-all-profiled-targets \
   --similarity-threshold 0 \
   --fallback-top-n 1000 \
@@ -77,24 +122,27 @@ set +e
 SCAN_EXIT=$?
 set -e
 
-SCAN_RESULTS_COUNT="$(find "$SCAN_OUTPUT_DIR" -name agentic_vuln_findings.json -type f 2>/dev/null || true)"
-SCAN_RESULTS_COUNT="$(printf '%s\n' "$SCAN_RESULTS_COUNT" | sed '/^$/d' | wc -l | tr -d ' ')"
-echo "[$(date -Iseconds)] batch_scanner exit=$SCAN_EXIT scan_results=$SCAN_RESULTS_COUNT" | tee -a "$STATUS_LOG"
+echo "[$(date -Iseconds)] batch_scanner exit=$SCAN_EXIT" | tee -a "$STATUS_LOG"
 if (( SCAN_EXIT != 0 )); then
-  if [[ "$ALLOW_PARTIAL_EXPLOITABILITY" != "1" ]]; then
-    echo "[$(date -Iseconds)] batch_scanner failed with exit=$SCAN_EXIT; abort before exploitability" | tee -a "$STATUS_LOG"
-    exit "$SCAN_EXIT"
-  fi
-  if (( SCAN_RESULTS_COUNT == 0 )); then
-    echo "[$(date -Iseconds)] No scan outputs were produced; abort before exploitability" | tee -a "$STATUS_LOG"
-    exit "$SCAN_EXIT"
-  fi
-  echo "[$(date -Iseconds)] Partial exploitability explicitly allowed after scan exit=$SCAN_EXIT" | tee -a "$STATUS_LOG"
+  echo "[$(date -Iseconds)] batch_scanner failed with exit=$SCAN_EXIT; abort before exploitability" | tee -a "$STATUS_LOG"
+  exit "$SCAN_EXIT"
 fi
+
+mapfile -t SCAN_COMMIT_MANIFESTS < <(
+  find "$SCAN_OUTPUT_DIR" -maxdepth 1 -type f -name 'scan-output-commit-bindings-*.json' -print
+)
+if (( ${#SCAN_COMMIT_MANIFESTS[@]} != 1 )); then
+  echo "[$(date -Iseconds)] Expected exactly one scanner terminal binding manifest, found ${#SCAN_COMMIT_MANIFESTS[@]}" | tee -a "$STATUS_LOG"
+  exit 1
+fi
+SCAN_COMMIT_MANIFEST="${SCAN_COMMIT_MANIFESTS[0]}"
+read -r SCAN_COMMIT_MANIFEST_SHA256 _ < <(sha256sum "$SCAN_COMMIT_MANIFEST")
 
 echo "[$(date -Iseconds)] Stage 2/2: run exploitability" | tee -a "$STATUS_LOG"
 "${PYTHON_CMD[@]}" -m cli.exploitability \
   --scan-results-dir "$SCAN_OUTPUT_DIR" \
+  --scan-output-commit-manifest "$SCAN_COMMIT_MANIFEST" \
+  --scan-output-commit-manifest-sha256 "$SCAN_COMMIT_MANIFEST_SHA256" \
   --soft-profile-dir "$TARGET_SOFT_PROFILES_DIR" \
   --repo-base-path "$TARGET_REPOS_ROOT" \
   --generate-report \
@@ -107,8 +155,4 @@ echo "[$(date -Iseconds)] Stage 2/2: run exploitability" | tee -a "$STATUS_LOG"
   --jobs "$EXPLOITABILITY_JOBS" \
   --timeout "$EXPLOITABILITY_TIMEOUT" \
   >> "$EXP_LOG" 2>&1
-if (( SCAN_EXIT != 0 )); then
-  echo "[$(date -Iseconds)] Exploitability completed, but batch_scanner previously failed with exit=$SCAN_EXIT" | tee -a "$STATUS_LOG"
-  exit "$SCAN_EXIT"
-fi
 echo "[$(date -Iseconds)] Pipeline completed" | tee -a "$STATUS_LOG"

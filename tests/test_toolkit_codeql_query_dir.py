@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from profiler.fingerprint import stable_data_hash
+from scanner.agent.memory import AgentMemoryManager
 
 # ---------------------------------------------------------------------------
 # Helpers / Fakes
@@ -43,6 +44,8 @@ class FakeMemoryManager:
         self._findings = []
         self._issues = []
         self._add_findings_calls = []
+        self._atomic_calls = []
+        self._first_touches = []
 
     def add_finding(self, finding):
         self._findings.append(finding)
@@ -50,6 +53,15 @@ class FakeMemoryManager:
     def add_findings(self, findings):
         self._add_findings_calls.append(len(findings))
         self._findings.extend(findings)
+        return len(findings)
+
+    def add_findings_with_first_touches(self, findings, file_paths):
+        self._add_findings_calls.append(len(findings))
+        self._atomic_calls.append((list(findings), list(file_paths)))
+        self._findings.extend(findings)
+        for file_path in file_paths:
+            if file_path not in self._first_touches:
+                self._first_touches.append(file_path)
         return len(findings)
 
     def add_issue(self, issue):
@@ -289,6 +301,7 @@ class TestRunCodeqlQuery:
         )
 
         assert tk._memory_manager._add_findings_calls == [2]
+        assert tk._memory_manager._first_touches == ["a.py", "b.py", "c.py", "d.py"]
         assert [
             finding["vulnerability_type"]
             for finding in tk._memory_manager._findings
@@ -348,7 +361,9 @@ class TestRunCodeqlQuery:
             finding["vulnerability_type"]
             for finding in tk._memory_manager._findings
         ] == ["xxe"]
-        findings_file = output_dir / "codeql-results" / "mixed_query_findings.json"
+        assert tk._memory_manager._first_touches == ["a.py", "b.py"]
+        stem = tk._codeql_artifact_stem("mixed_query")
+        findings_file = output_dir / "codeql-results" / f"{stem}_findings.json"
         saved = json.loads(findings_file.read_text())
         assert saved["total_findings"] == 2
         assert [finding["rule_id"] for finding in saved["findings"]] == [
@@ -370,7 +385,8 @@ class TestRunCodeqlQuery:
 
         assert result.success is True
         # Verify .ql file was written under output's codeql-queries dir
-        ql_file = output_dir / "codeql-queries" / "python" / "test_query.ql"
+        stem = tk._codeql_artifact_stem("test_query")
+        ql_file = output_dir / "codeql-queries" / "python" / f"{stem}.ql"
         assert ql_file.exists()
         assert ql_file.read_text() == query_code
 
@@ -384,8 +400,9 @@ class TestRunCodeqlQuery:
             query="select 1", query_name="my query/special chars!"
         )
         assert result.success is True
-        # Special chars should be replaced with _
-        ql_file = output_dir / "codeql-queries" / "python" / "my_query_special_chars_.ql"
+        stem = tk._codeql_artifact_stem("my query/special chars!")
+        assert stem.startswith("my_query_special_chars-")
+        ql_file = output_dir / "codeql-queries" / "python" / f"{stem}.ql"
         assert ql_file.exists()
 
     def test_fails_without_database(self, tmp_path):
@@ -428,7 +445,8 @@ class TestRunCodeqlQuery:
 
         assert result.success is True
         assert captured["database_path"].endswith(actual_db_name)
-        assert (output_dir / "codeql-queries" / "python" / "fallback_query.ql").exists()
+        stem = tk._codeql_artifact_stem("fallback_query")
+        assert (output_dir / "codeql-queries" / "python" / f"{stem}.ql").exists()
 
     def test_run_codeql_query_finds_relocated_profile_generated_database(self, tmp_path):
         tk, repo_path, output_dir, _ = _make_toolkit(tmp_path)
@@ -460,7 +478,8 @@ class TestRunCodeqlQuery:
 
         assert result.success is True
         assert captured["database_path"].endswith(actual_db_name)
-        assert (output_dir / "codeql-queries" / "python" / "relocated_query.ql").exists()
+        stem = tk._codeql_artifact_stem("relocated_query")
+        assert (output_dir / "codeql-queries" / "python" / f"{stem}.ql").exists()
 
     def test_run_codeql_query_ignores_current_path_hash_database_when_profile_was_generated_elsewhere(
         self,
@@ -509,7 +528,8 @@ class TestRunCodeqlQuery:
         assert result.success is True
         assert captured["database_path"].endswith(expected_db_name)
         assert not captured["database_path"].endswith(current_hash_db_name)
-        assert (output_dir / "codeql-queries" / "python" / "ignore_current_hash_query.ql").exists()
+        stem = tk._codeql_artifact_stem("ignore_current_hash_query")
+        assert (output_dir / "codeql-queries" / "python" / f"{stem}.ql").exists()
 
     def test_run_codeql_query_prefers_matching_profile_source_database_over_newer_collision(self, tmp_path):
         tk, repo_path, output_dir, _ = _make_toolkit(tmp_path)
@@ -555,7 +575,8 @@ class TestRunCodeqlQuery:
         assert result.success is True
         assert captured["database_path"].endswith(expected_db_name)
         assert not captured["database_path"].endswith(colliding_db_name)
-        assert (output_dir / "codeql-queries" / "python" / "multi_relocation_query.ql").exists()
+        stem = tk._codeql_artifact_stem("multi_relocation_query")
+        assert (output_dir / "codeql-queries" / "python" / f"{stem}.ql").exists()
 
     def test_run_codeql_query_rejects_exact_profile_generated_database_with_mismatched_metadata(
         self,
@@ -656,7 +677,8 @@ class TestRunCodeqlQuery:
         assert result.success is True
         assert captured["database_path"].endswith(hashed_db_name)
         assert not captured["database_path"].endswith(legacy_db_name)
-        assert (output_dir / "codeql-queries" / "python" / "prefer_hashed_query.ql").exists()
+        stem = tk._codeql_artifact_stem("prefer_hashed_query")
+        assert (output_dir / "codeql-queries" / "python" / f"{stem}.ql").exists()
 
 
 class TestSetMemoryManagerLate:
@@ -722,8 +744,32 @@ class TestMultiLanguageBehavior:
         assert result.success is True
         normalized_query_path = captured["query"].replace("\\", "/")
         assert captured["database_path"].endswith(db_js)
-        assert "/codeql-queries/javascript/js_query.ql" in normalized_query_path
-        assert (output_dir / "codeql-queries" / "javascript" / "js_query.ql").exists()
+        stem = tk._codeql_artifact_stem("js_query")
+        assert f"/codeql-queries/javascript/{stem}.ql" in normalized_query_path
+        assert (output_dir / "codeql-queries" / "javascript" / f"{stem}.ql").exists()
+
+    def test_explicit_query_language_never_falls_back_to_another_database(
+        self,
+        tmp_path,
+    ):
+        tk, _, _, _ = _make_toolkit(
+            tmp_path,
+            language="python",
+            languages=["python", "javascript"],
+        )
+        db_python = "test-db-python"
+        (tk._codeql_db_base_path / db_python).mkdir(parents=True)
+        tk._codeql_database_names = {"python": db_python}
+        tk._codeql_analyzer.run_query = MagicMock()
+
+        result = tk._run_codeql_query(
+            query="import javascript\nselect 1",
+            query_name="missing_js_database",
+        )
+
+        assert result.success is False
+        assert "language 'javascript'" in result.error
+        tk._codeql_analyzer.run_query.assert_not_called()
 
     def test_switch_memory_manager_rebuilds_query_dir_under_new_output(self, tmp_path):
         tk, _, first_output_dir, _ = _make_toolkit(tmp_path, with_memory=True)
@@ -744,3 +790,145 @@ class TestMultiLanguageBehavior:
         second_query_dir = second_output_dir / "codeql-queries" / "python"
         assert tk._codeql_query_dirs.get("python") == second_query_dir
         assert second_query_dir.is_dir()
+
+
+def test_frozen_global_schedule_groups_codeql_output_once_per_file(tmp_path):
+    tk, repo_path, output_dir, _ = _make_toolkit(tmp_path)
+    for relative_path in ("a.py", "b.py", "unscheduled.py"):
+        (repo_path / relative_path).write_text("pass\n", encoding="utf-8")
+    tk.set_file_enumeration_order(["b.py", "a.py"])
+    tk.set_active_file_window(["b.py", "a.py"], cursor=0)
+
+    findings = [
+        {
+            "file": "unscheduled.py",
+            "start_line": 1,
+            "rule_id": "outside",
+            "message": "outside",
+        },
+        {
+            "file": "a.py",
+            "start_line": 2,
+            "rule_id": "a-rule",
+            "message": "a-message",
+        },
+        *[
+            {
+                "file": "b.py",
+                "start_line": index + 1,
+                "rule_id": f"b-rule-{index}",
+                "message": f"b-message-{index}",
+            }
+            for index in range(7)
+        ],
+    ]
+
+    summary = tk._format_codeql_summary("demo", findings)
+    assert "Found **8** potential issue(s)" in summary
+    assert summary.index("### b.py") < summary.index("### a.py")
+    assert summary.count("### b.py") == 1
+    assert summary.count("### a.py") == 1
+    assert "unscheduled.py" not in summary
+    assert all(f"b-message-{index}" in summary for index in range(7))
+
+    results_dir = output_dir / "codeql-results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    stem = tk._codeql_artifact_stem("demo")
+    (results_dir / f"{stem}_findings.json").write_text(
+        json.dumps({"findings": findings}),
+        encoding="utf-8",
+    )
+    result = tk._read_codeql_results("demo")
+    assert result.success is True
+    payload = json.loads(result.content)
+    assert [row["file"] for row in payload["files"]] == ["b.py", "a.py"]
+    assert [row["finding_count"] for row in payload["files"]] == [7, 1]
+    assert "unscheduled.py" not in result.content
+    assert result.content.count('"b.py"') == 1
+    assert result.content.count('"a.py"') == 1
+
+
+def test_colliding_query_slugs_keep_distinct_codeql_artifacts(tmp_path):
+    tk, _, output_dir, _ = _make_toolkit(tmp_path)
+    db_name = "test-db-python"
+    tk._codeql_database_names = {"python": db_name}
+    (tk._codeql_db_base_path / db_name).mkdir(parents=True)
+
+    first = tk._run_codeql_query("import python\nselect 1", "a/b")
+    second = tk._run_codeql_query("import python\nselect 2", "a?b")
+
+    assert first.success is True
+    assert second.success is True
+    first_stem = tk._codeql_artifact_stem("a/b")
+    second_stem = tk._codeql_artifact_stem("a?b")
+    assert first_stem != second_stem
+    results_dir = output_dir / "codeql-results"
+    first_payload = json.loads(
+        (results_dir / f"{first_stem}_findings.json").read_text(encoding="utf-8")
+    )
+    second_payload = json.loads(
+        (results_dir / f"{second_stem}_findings.json").read_text(encoding="utf-8")
+    )
+    assert first_payload["query_name"] == "a/b"
+    assert second_payload["query_name"] == "a?b"
+    assert tk._read_codeql_results("a/b").success is True
+    assert tk._read_codeql_results("a?b").success is True
+
+
+
+def test_codeql_actual_manager_save_failure_rolls_back_findings_and_touches(
+    tmp_path
+):
+    memory_output = tmp_path / "memory"
+    manager = AgentMemoryManager(output_dir=memory_output)
+    manager.initialize(
+        target_repo="repo",
+        target_commit="a" * 40,
+        cve_id="CVE-2026-7000",
+        module_priorities={"api": 1},
+        file_to_module={"a.py": "api", "b.py": "api"},
+    )
+    before_disk = manager.memory_file.read_bytes()
+    toolkit_root = tmp_path / "toolkit"
+    toolkit_root.mkdir()
+    toolkit, _, _, _ = _make_toolkit(toolkit_root)
+    toolkit._memory_manager = manager
+
+    def fail_save():
+        raise RuntimeError("injected CodeQL save failure")
+
+    manager.save = fail_save
+    with pytest.raises(RuntimeError, match="injected CodeQL save failure"):
+        toolkit._record_codeql_findings_in_memory(
+            "atomic-query",
+            [
+                {
+                    "file": "a.py",
+                    "rule_id": "py/xml-parsing",
+                    "message": "low signal but still a visible touch",
+                    "snippet": "",
+                    "start_line": 1,
+                },
+                {
+                    "file": "b.py",
+                    "rule_id": "python/command-injection",
+                    "message": "eligible finding",
+                    "snippet": "sink(user_input)",
+                    "start_line": 2,
+                },
+            ],
+        )
+
+    assert manager.memory.findings == []
+    assert manager.memory.coverage_first_touches == []
+    assert manager.memory_file.read_bytes() == before_disk
+    reloaded = AgentMemoryManager(output_dir=memory_output)
+    assert reloaded.initialize(
+        target_repo="repo",
+        target_commit="a" * 40,
+        cve_id="CVE-2026-7000",
+        module_priorities={"api": 1},
+        file_to_module={"a.py": "api", "b.py": "api"},
+    ) is True
+    assert reloaded.memory.findings == []
+    assert reloaded.memory.coverage_first_touches == []

@@ -53,6 +53,11 @@ import shutil
 import subprocess
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
+from config_snapshot import (
+    consume_scanner_config_bytes,
+    read_config_file_bytes,
+    scanner_config_path,
+)
 from utils.logger import get_logger
 
 # Initialize logger for this module
@@ -84,16 +89,15 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     import yaml
     from pathlib import Path
 
-    # Try importing the config module (to obtain default paths)
-    try:
-        from config import _path_config
-    except ImportError:
-        logger.debug("Could not import config module in load_codeql_config")
-        _path_config = None
+    from config import _path_config
 
     # Default config file path
-    if config_path is None:
-        config_path = Path(__file__).parent.parent.parent / "config" / "codeql_config.yaml"
+    default_path = config_path is None
+    config_path = (
+        scanner_config_path("codeql_config.yaml")
+        if default_path
+        else Path(config_path).expanduser().absolute()
+    )
 
     config = {
         'cli_path': '',
@@ -105,33 +109,44 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         'cpp_build_mode': 'auto',
     }
 
-    if config_path.exists():
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                yaml_config = yaml.safe_load(f) or {}
-        except Exception as exc:
-            raise RuntimeError(f"Failed to load CodeQL config from {config_path}: {exc}") from exc
-        if not isinstance(yaml_config, dict):
-            raise RuntimeError(f"CodeQL config must be a mapping: {config_path}")
-        codeql_cli = yaml_config.get('codeql_cli', {})
-        if not isinstance(codeql_cli, dict):
-            raise RuntimeError(f"codeql_cli section must be a mapping: {config_path}")
-        config['cli_path'] = codeql_cli.get('cli_path', '')
-        config['queries_path'] = codeql_cli.get('queries_path', '')
-        config['database_dir'] = codeql_cli.get('database_dir', '')
-        config['threads'] = codeql_cli.get('threads', 0)
-        config['memory'] = codeql_cli.get('memory', 0)
-        config['timeout'] = codeql_cli.get('timeout', 600)
-        config['cpp_build_mode'] = codeql_cli.get('cpp_build_mode', 'auto')
+    try:
+        raw_bytes = (
+            consume_scanner_config_bytes("codeql_config.yaml")
+            if default_path
+            else read_config_file_bytes(
+                config_path,
+                label="CodeQL config",
+            )
+        )
+        yaml_config = yaml.safe_load(
+            raw_bytes.decode("utf-8")
+        ) or {}
+        if default_path:
+            verified_bytes = consume_scanner_config_bytes(
+                "codeql_config.yaml"
+            )
+            if verified_bytes != raw_bytes:
+                raise ValueError(
+                    "codeql_config.yaml bytes changed while parsing"
+                )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load CodeQL config from {config_path}: {exc}") from exc
+    if not isinstance(yaml_config, dict):
+        raise RuntimeError(f"CodeQL config must be a mapping: {config_path}")
+    codeql_cli = yaml_config.get('codeql_cli', {})
+    if not isinstance(codeql_cli, dict):
+        raise RuntimeError(f"codeql_cli section must be a mapping: {config_path}")
+    config['cli_path'] = codeql_cli.get('cli_path', '')
+    config['queries_path'] = codeql_cli.get('queries_path', '')
+    config['database_dir'] = codeql_cli.get('database_dir', '')
+    config['threads'] = codeql_cli.get('threads', 0)
+    config['memory'] = codeql_cli.get('memory', 0)
+    config['timeout'] = codeql_cli.get('timeout', 600)
+    config['cpp_build_mode'] = codeql_cli.get('cpp_build_mode', 'auto')
 
     logger.debug(f"Loaded CodeQL config: queries_path={config.get('queries_path')}, database_dir={config.get('database_dir')}")
 
-    # Determine the repo root (llm-vulvariant/) for resolving relative paths
-    if _path_config and 'repo_root' in _path_config:
-        _repo_root = str(_path_config['repo_root'])
-    else:
-        # __file__ is src/utils/codeql_native.py → go up 3 levels to llm-vulvariant/
-        _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    _repo_root = str(_path_config['repo_root'])
 
     # If no query path is provided, use the default (.codeql under repo root)
     if not config['queries_path']:
@@ -140,12 +155,8 @@ def load_codeql_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         # Resolve relative queries_path against the repo root, not the CWD
         config['queries_path'] = os.path.join(_repo_root, config['queries_path'])
 
-    # If no database directory is provided, use the project's configured path
     if not config['database_dir']:
-        if _path_config:
-            config['database_dir'] = str(_path_config['codeql_db_path'])
-        else:
-            config['database_dir'] = os.path.join(tempfile.gettempdir(), "codeql-dbs")
+        config['database_dir'] = str(_path_config['codeql_db_path'])
 
     os.makedirs(config['database_dir'], exist_ok=True)
     return config

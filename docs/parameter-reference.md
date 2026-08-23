@@ -9,6 +9,8 @@
 提供默认路径：
 
 - `project_root`
+- `repo_root`
+- `results_base_path`
 - `profile_base_path`
 - `vuln_data_path`
 - `repo_base_path`
@@ -23,7 +25,7 @@
 - `openai` -> `NY_API_KEY`
 - `lab` -> `LAB_LLM_API_KEY`
 
-其中 `lab` 当前配置里带有回退到 `deepseek` 的策略。
+`lab` 可由 `LAB_LLM_API_BASE` 与 `LAB_LLM_MODEL` 覆盖部署身份；当前配置不启用重试耗尽后的 provider fallback。
 
 ### `config/scanner_config.yaml`
 
@@ -41,7 +43,7 @@
 | `vuln-profile` | 主要依赖所选 LLM provider；批量脚本版还依赖 `vuln-profile` 命令在 `PATH` |
 | `scanner` | target repo 需要是可 checkout 的 git working tree；自动目标选择还依赖本地 embedding 模型目录 |
 | `batch-scanner` | source/target repo 需要是 git working tree；`--skip-existing-scans` 最好配 clean tree |
-| `python -m cli.exploitability` | 依赖 `claude` CLI、可写 `.claude-runtime`、clean target repo；`EXPLOITABLE` finding 会自动触发 Docker PoC |
+| `python -m cli.exploitability` | 依赖 `claude` CLI、可写 `results/runtime/claude`、clean target repo；`EXPLOITABLE` finding 会自动触发 Docker PoC |
 | `run_all_vuln_software_profile.sh` | 依赖 `jq`、`software-profile`、`python` / `python3` 或 `PYTHON_BIN` |
 | `run_all_vulnerability_profiles.sh` | 依赖 `vuln-profile` 或 `VULN_PROFILE_CMD`，并且当前脚本内部直接调用 `python -` |
 | `run_microsoft_scan_full.sh` | 使用 `PYTHON_BIN` 或回退到 `python` / `python3`，默认 `LLM_PROVIDER=lab` |
@@ -51,10 +53,8 @@
 ## 3. 通用规则
 
 - `--output-dir` 通常优先级最高，显式指定后会覆盖 `--profile-base-path + dirname` 的组合。
-- `--llm-provider` 负责选择 provider，`--llm-name` 只在你要覆盖默认模型时再传。
+- revision 正式示例固定 `--llm-provider lab --llm-name GLM-5.2`，并设置 `LAB_LLM_API_BASE=https://llm.shtech.org/v1`。
 - `-v` / `--verbose` 适合先在小样本上打开，批量场景下日志会很多。
-- 本页不记录 superpower / 协作文档参数；那部分统一留在根级 `vuln/docs/superpowers/`。
-
 ## 4. `software-profile`
 
 用途：为某个仓库的某个提交生成 `software_profile.json`。
@@ -126,7 +126,7 @@
 
 ## 6. `scanner`
 
-用途：对单个漏洞画像执行单目标扫描，或自动选择多个目标仓库扫描。
+用途：对单个漏洞画像执行单目标扫描，或自动选择多个目标仓库扫描；仅用于调试，不能直接作为正式 exploitability 输入。
 
 ### 必填
 
@@ -236,14 +236,16 @@
 
 ## 8. `python -m cli.exploitability`
 
-用途：对 scan result folder 做可利用性判定，并按需产出报告与聚合提交材料。
+用途：对完整 batch manifest v2 绑定的 scan result folder 做可利用性判定，并按需产出报告与聚合提交材料。direct scan 仅用于调试，不能作为正式输入。
 
 ### 选择输入范围
 
 | 参数 | 说明 |
 |------|------|
 | `--scan-results-dir` | 扫描结果根目录，必填 |
-| `--folder` | 只处理某个子目录；不传时处理整个结果目录 |
+| `--scan-output-commit-manifest` | 完整 batch 生成的 manifest v2，必填 |
+| `--scan-output-commit-manifest-sha256` | manifest 的小写 SHA-256，必填 |
+| `--folder` | 只处理某个子目录；该目录必须属于上述完整 manifest 的 binding |
 
 ### Profile 与仓库定位
 
@@ -280,7 +282,8 @@
 补充前提：
 
 - 需要 `claude -p` 可非交互运行；如果当前 CLI 不支持 `--output-format json`，代码会尝试纯文本回退
-- 需要可写 `.claude-runtime` 或 `--claude-runtime-root`
+- 需要可写 `results/runtime/claude` 或 `--claude-runtime-root`
+- 输入必须来自完整结束的 batch，且 manifest 为 `schema_version=2`；不得传入部分 batch 或 direct scan 目录
 - target repo 需要 clean worktree
 - `EXPLOITABLE` finding 会自动触发 Docker PoC
 - 当 `--jobs > 1` 时，必须使用 `--claude-runtime-mode folder`

@@ -32,6 +32,22 @@ def _findings_context(vulnerabilities):
     return current_findings, compute_findings_signature(vulnerabilities)
 
 
+def _complete_result(finding_id, original_finding, verdict="NOT_EXPLOITABLE"):
+    """构造满足终态证据契约的测试结果。"""
+    return {
+        "finding_id": finding_id,
+        "verdict": verdict,
+        "confidence": "medium",
+        "verdict_rationale": "Repository code determines the verdict.",
+        "preconditions": [],
+        "static_evidence": ["src/app.py:10 provides the checked code path."],
+        "dynamic_plan": [],
+        "docker_verification": {"verification_verdict": "NOT_VERIFIED"},
+        "open_questions": [],
+        "original_finding": original_finding,
+    }
+
+
 def test_infer_verdict_prefers_longer_tokens_first():
     checker = _checker()
 
@@ -287,11 +303,12 @@ def test_parse_claude_result_keeps_structured_unknown_json():
     assert parsed["attack_scenario"]["impact"] == "unclear"
 
 
-def test_build_prompt_uses_ny_api_key_when_openai_proxy_env_is_set(monkeypatch, tmp_path):
+def test_build_prompt_forbids_forwarding_host_provider_credentials(monkeypatch, tmp_path):
     checker = _checker()
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-host-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-host-key")
     monkeypatch.setenv("NY_API_KEY", "ny-proxy-key")
+    monkeypatch.setenv("LAB_LLM_API_KEY", "lab-host-key")
 
     prompt = checker._build_prompt(
         vuln={
@@ -303,11 +320,21 @@ def test_build_prompt_uses_ny_api_key_when_openai_proxy_env_is_set(monkeypatch, 
         repo_path=tmp_path,
     )
 
-    assert "NY_API_KEY" in prompt
-    assert "-e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY -e LAB_LLM_API_KEY" in prompt
-    assert 'DEEPSEEK_API_KEY="<API_KEY>"' not in prompt
-    assert 'OPENAI_API_KEY="<API_KEY>"' not in prompt
-    assert "ny-proxy-key" not in prompt
+    for name in (
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+        "NY_API_KEY",
+        "LAB_LLM_API_KEY",
+    ):
+        assert name not in prompt
+    for value in (
+        "deepseek-host-key",
+        "openai-host-key",
+        "ny-proxy-key",
+        "lab-host-key",
+    ):
+        assert value not in prompt
+    assert "Never pass host model, platform, cloud, or repository credentials" in prompt
 
 
 def test_build_prompt_requests_structured_evidence_contract(tmp_path):
@@ -331,6 +358,9 @@ def test_build_prompt_requests_structured_evidence_contract(tmp_path):
     assert '"open_questions":["..."]' in prompt
     assert "Ground every claim in the provided repository evidence." in prompt
     assert "If evidence is missing, say so explicitly in the relevant field." in prompt
+    assert "return UNKNOWN with low confidence" in prompt
+    assert "terminal verdict requires at least one concrete static_evidence" in prompt
+    assert "NOT_EXPLOITABLE|UNKNOWN" in prompt
 
 
 def test_build_prompt_includes_full_finding_context_and_general_verification_contract(tmp_path):
@@ -543,7 +573,12 @@ def test_analyze_single_vuln_falls_back_to_output_file(monkeypatch, tmp_path):
 
     def fake_run_claude(prompt, record_path=None):
         (evidence_dir / "analysis_output.json").write_text(
-            json.dumps({"verdict": "NOT_EXPLOITABLE", "confidence": "high"}),
+            json.dumps({
+                "verdict": "NOT_EXPLOITABLE",
+                "confidence": "high",
+                "verdict_rationale": "The checked path rejects shell metacharacters.",
+                "static_evidence": ["x.py:10 validates the value before the sink."],
+            }),
             encoding="utf-8",
         )
         return False, None, {
@@ -574,7 +609,12 @@ def test_analyze_single_vuln_falls_back_to_output_file_when_stdout_is_schema_ech
 
     def fake_run_claude(prompt, record_path=None):
         (evidence_dir / "analysis_output.json").write_text(
-            json.dumps({"verdict": "NOT_EXPLOITABLE", "confidence": "high"}),
+            json.dumps({
+                "verdict": "NOT_EXPLOITABLE",
+                "confidence": "high",
+                "verdict_rationale": "The checked path rejects shell metacharacters.",
+                "static_evidence": ["x.py:10 validates the value before the sink."],
+            }),
             encoding="utf-8",
         )
         return True, {
@@ -600,6 +640,42 @@ def test_analyze_single_vuln_falls_back_to_output_file_when_stdout_is_schema_ech
     assert result["confidence"] == "high"
     assert result["finding_id"] == "vuln_000"
     assert result["llm_usage"]["selected_model_usage"]["output_tokens"] == 22
+
+
+def test_analyze_single_vuln_downgrades_terminal_without_static_evidence(
+    monkeypatch,
+    tmp_path,
+):
+    checker = _checker()
+    monkeypatch.setattr(
+        checker,
+        "_run_claude",
+        lambda prompt, record_path=None: (
+            True,
+            {
+                "result": json.dumps({
+                    "verdict": "NOT_EXPLOITABLE",
+                    "confidence": "high",
+                    "verdict_rationale": "No reachable path was found.",
+                    "preconditions": ["Input would need to reach the sink."],
+                    "static_evidence": [],
+                    "dynamic_plan": ["Inspect another entry point."],
+                    "open_questions": ["Whether another entry point exists."],
+                })
+            },
+            {},
+        ),
+    )
+
+    result = checker._analyze_single_vuln(
+        vuln={"file_path": "x.py", "vulnerability_type": "x"},
+        finding_id="vuln_000",
+        repo_path=tmp_path,
+    )
+
+    assert result["verdict"] == "UNKNOWN"
+    assert result["confidence"] == "low"
+    assert result["static_evidence"] == []
 
 
 def test_analyze_single_vuln_ignores_stale_output_file(monkeypatch, tmp_path):
@@ -800,10 +876,10 @@ def test_build_docker_verification_incomplete_build(tmp_path):
     assert dv is not None
     assert dv["build_success"] is False
     assert dv["run_success"] is False
-    assert "did not complete" in (dv["error"] or "")
+    assert "independently recognized success marker" in (dv["error"] or "")
 
 
-def test_build_docker_verification_promotes_build_success_if_exec_exists(tmp_path):
+def test_build_docker_verification_does_not_infer_build_success_from_exec_output(tmp_path):
     checker = _checker()
     evidence = tmp_path / "evidence"
     evidence.mkdir()
@@ -814,11 +890,11 @@ def test_build_docker_verification_promotes_build_success_if_exec_exists(tmp_pat
     dv = checker._build_docker_verification_from_evidence(evidence, commit_hash="xyz")
 
     assert dv is not None
-    assert dv["build_success"] is True
+    assert dv["build_success"] is False
     assert dv["run_success"] is True
     assert dv["exploit_confirmed"] is False
     assert dv["verification_verdict"] == "VERIFICATION_FAILED"
-    assert "did not confirm" in (dv["error"] or "")
+    assert "independently recognized success marker" in (dv["error"] or "")
 
 
 def test_build_docker_verification_rejects_failed_marker_even_with_confirmation_token(tmp_path):
@@ -889,8 +965,8 @@ def test_build_docker_verification_downgrades_structured_verified_output_with_fa
 
     assert dv is not None
     assert dv["exploit_confirmed"] is False
-    assert dv["verification_verdict"] == "VERIFICATION_FAILED"
-    assert "EXPLOIT_FAILED" in (dv["error"] or "")
+    assert dv["verification_verdict"] == "NOT_VERIFIED"
+    assert "not independent execution evidence" in (dv["error"] or "")
 
 
 def test_build_docker_verification_ignores_placeholder_structured_output_without_real_activity(tmp_path):
@@ -933,6 +1009,7 @@ def test_build_docker_verification_prefers_real_runtime_evidence_over_stale_stru
         ),
         encoding="utf-8",
     )
+    (evidence / "Dockerfile.exploit").write_text("FROM python:3.11", encoding="utf-8")
     (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
     (evidence / "execution_output.txt").write_text("VULNERABILITY_CONFIRMED", encoding="utf-8")
 
@@ -950,6 +1027,7 @@ def test_recover_docker_verification_upgrades_retryable_verdict_when_runtime_con
     evidence = tmp_path / "evidence"
     evidence.mkdir()
 
+    (evidence / "Dockerfile.exploit").write_text("FROM python:3.11", encoding="utf-8")
     (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
     (evidence / "execution_output.txt").write_text("VULNERABILITY_CONFIRMED", encoding="utf-8")
 
@@ -1007,6 +1085,7 @@ def test_recover_docker_verification_prefers_on_disk_success_over_stale_claude_f
     evidence = tmp_path / "evidence"
     evidence.mkdir()
 
+    (evidence / "Dockerfile.exploit").write_text("FROM python:3.11", encoding="utf-8")
     (evidence / "docker_build.log").write_text("writing image sha256:abc", encoding="utf-8")
     (evidence / "execution_output.txt").write_text("VULNERABILITY_CONFIRMED", encoding="utf-8")
 
@@ -1481,11 +1560,10 @@ def test_check_single_resumes_existing_results_and_processes_remaining(monkeypat
         "metadata": {"started_at": "t", "completed_at": None},
         "summary": {},
         "results": [
-            {
-                "finding_id": "vuln_000",
-                "verdict": "NOT_EXPLOITABLE",
-                "original_finding": {"file_path": "a.py", "vulnerability_type": "x"},
-            }
+            _complete_result(
+                "vuln_000",
+                {"file_path": "a.py", "vulnerability_type": "x"},
+            )
         ],
     }
     output_path.write_text(json.dumps(existing), encoding="utf-8")
@@ -1494,11 +1572,11 @@ def test_check_single_resumes_existing_results_and_processes_remaining(monkeypat
 
     def fake_analyze_single_vuln(**kwargs):
         calls.append(kwargs["finding_id"])
-        return {
-            "finding_id": kwargs["finding_id"],
-            "verdict": "EXPLOITABLE",
-            "original_finding": kwargs["vuln"],
-        }
+        return _complete_result(
+            kwargs["finding_id"],
+            kwargs["vuln"],
+            verdict="EXPLOITABLE",
+        )
 
     monkeypatch.setattr(checker, "_analyze_single_vuln", fake_analyze_single_vuln)
 
@@ -1542,14 +1620,14 @@ def test_check_single_resume_retries_stale_error_after_intermediate_save(monkeyp
         },
         "summary": {},
         "results": [
-            {
-                "finding_id": "vuln_000",
-                "verdict": "NOT_EXPLOITABLE",
-                "original_finding": {"file_path": "a.py", "vulnerability_type": "x"},
-            },
+            _complete_result(
+                "vuln_000",
+                {"file_path": "a.py", "vulnerability_type": "x"},
+            ),
             {
                 "finding_id": "vuln_002",
                 "verdict": "ERROR",
+                "confidence": "low",
                 "original_finding": {"file_path": "c.py", "vulnerability_type": "z"},
             },
         ],
@@ -1561,11 +1639,11 @@ def test_check_single_resume_retries_stale_error_after_intermediate_save(monkeyp
     def fake_analyze_single_vuln(**kwargs):
         calls.append(kwargs["finding_id"])
         verdict = "EXPLOITABLE" if kwargs["finding_id"] == "vuln_001" else "NOT_EXPLOITABLE"
-        return {
-            "finding_id": kwargs["finding_id"],
-            "verdict": verdict,
-            "original_finding": kwargs["vuln"],
-        }
+        return _complete_result(
+            kwargs["finding_id"],
+            kwargs["vuln"],
+            verdict=verdict,
+        )
 
     monkeypatch.setattr(checker, "_analyze_single_vuln", fake_analyze_single_vuln)
 
@@ -1670,10 +1748,12 @@ def test_init_or_load_results_preserves_retried_usage_summary(tmp_path):
         },
         "summary": {},
         "results": [
-            {
-                "finding_id": "vuln_000",
-                "verdict": "NOT_EXPLOITABLE",
-                "llm_usage": {
+                {
+                    **_complete_result(
+                        "vuln_000",
+                        {"finding_id": "vuln_000"},
+                    ),
+                    "llm_usage": {
                     "selected_model_usage": {
                         "model": "deepseek-chat",
                         "input_tokens": 10,
@@ -1684,10 +1764,12 @@ def test_init_or_load_results_preserves_retried_usage_summary(tmp_path):
                     },
                 },
             },
-            {
-                "finding_id": "vuln_001",
-                "verdict": "ERROR",
-                "llm_usage": {
+                {
+                    "finding_id": "vuln_001",
+                    "verdict": "ERROR",
+                    "confidence": "low",
+                    "original_finding": {"finding_id": "vuln_001"},
+                    "llm_usage": {
                     "selected_model_usage": {
                         "model": "deepseek-chat",
                         "input_tokens": 1,
@@ -1815,8 +1897,14 @@ def test_get_exploitability_output_state_for_findings_downgrades_changed_signatu
         },
         "summary": {},
         "results": [
-            {"finding_id": "vuln_000"},
-            {"finding_id": "vuln_001"},
+            _complete_result(
+                "vuln_000",
+                {"file_path": "a.py", "vulnerability_type": "cmd"},
+            ),
+            _complete_result(
+                "vuln_001",
+                {"file_path": "b.py", "vulnerability_type": "ssrf"},
+            ),
         ],
     }
 
@@ -1840,7 +1928,7 @@ def test_get_exploitability_output_state_for_findings_requires_signature(tmp_pat
         },
         "summary": {},
         "results": [
-            {"finding_id": "vuln_000"},
+            _complete_result("vuln_000", {"file_path": "a.py"}),
         ],
     }
 
@@ -1850,7 +1938,7 @@ def test_get_exploitability_output_state_for_findings_requires_signature(tmp_pat
     )
 
 
-def test_get_exploitability_output_state_for_findings_preserves_complete_output_without_findings_file(
+def test_get_exploitability_output_state_for_findings_requires_findings_file(
     tmp_path,
 ):
     findings_path = tmp_path / "findings.json"
@@ -1863,13 +1951,13 @@ def test_get_exploitability_output_state_for_findings_preserves_complete_output_
         },
         "summary": {},
         "results": [
-            {"finding_id": "vuln_000"},
+            _complete_result("vuln_000", {"file_path": "a.py"}),
         ],
     }
 
     assert (
         get_exploitability_output_state_for_findings(exploitability_data, findings_path)
-        == "complete"
+        == "in_progress"
     )
 
 
@@ -1886,7 +1974,7 @@ def test_get_exploitability_output_state_for_findings_downgrades_invalid_finding
         },
         "summary": {},
         "results": [
-            {"finding_id": "vuln_000"},
+            _complete_result("vuln_000", {"file_path": "a.py"}),
         ],
     }
 
@@ -1916,6 +2004,42 @@ def test_get_exploitability_output_state_treats_retryable_rows_as_in_progress():
     assert get_exploitability_output_state(exploitability_data) == "in_progress"
 
 
+def test_save_results_downgrades_forged_terminal_without_static_evidence(tmp_path):
+    checker = _checker()
+    output_path = tmp_path / "exploitability.json"
+    finding = {"file_path": "x.py", "vulnerability_type": "x"}
+    current_findings, findings_signature = _findings_context([finding])
+    result_doc = {
+        "metadata": {
+            "completed_at": "2026-03-11T00:00:00",
+            "total_vulnerabilities": 1,
+            "findings_signature": findings_signature,
+        },
+        "summary": {},
+        "results": [{
+            "finding_id": "vuln_000",
+            "original_finding": finding,
+            "verdict": "NOT_EXPLOITABLE",
+            "confidence": "high",
+            "verdict_rationale": "Only a plan was recorded.",
+            "preconditions": ["Attacker input is needed."],
+            "static_evidence": [],
+            "dynamic_plan": ["Inspect the source."],
+            "open_questions": ["Where is the source?"],
+        }],
+    }
+
+    saved = checker._save_results(
+        output_path,
+        result_doc,
+        current_findings=current_findings,
+    )
+
+    assert saved["results"][0]["verdict"] == "UNKNOWN"
+    assert saved["results"][0]["confidence"] == "low"
+    assert get_exploitability_output_state(saved) == "in_progress"
+
+
 def test_init_or_load_results_drops_results_outside_current_findings_scope(tmp_path):
     checker = _checker()
     output_path = tmp_path / "exploitability.json"
@@ -1926,12 +2050,20 @@ def test_init_or_load_results_drops_results_outside_current_findings_scope(tmp_p
                     "started_at": "t",
                     "completed_at": None,
                     "total_vulnerabilities": 3,
-                },
-                "summary": {},
-                "results": [
-                    {"finding_id": "vuln_000", "verdict": "NOT_EXPLOITABLE"},
-                    {"finding_id": "vuln_001", "verdict": "EXPLOITABLE"},
-                    {"finding_id": "vuln_002", "verdict": "LIBRARY_RISK"},
+                    },
+                    "summary": {},
+                    "results": [
+                        _complete_result("vuln_000", {"file_path": "a.py"}),
+                        _complete_result(
+                            "vuln_001",
+                            {"file_path": "b.py"},
+                            verdict="EXPLOITABLE",
+                        ),
+                        _complete_result(
+                            "vuln_002",
+                            {"file_path": "c.py"},
+                            verdict="LIBRARY_RISK",
+                        ),
                 ],
             }
         ),
@@ -1977,19 +2109,15 @@ def test_init_or_load_results_drops_results_for_changed_findings_with_same_count
                     "completed_at": "2026-03-11T00:00:00",
                     "total_vulnerabilities": 2,
                     "findings_signature": compute_findings_signature(old_findings),
-                },
-                "summary": {},
-                "results": [
-                    {
-                        "finding_id": "vuln_000",
-                        "verdict": "NOT_EXPLOITABLE",
-                        "original_finding": old_findings[0],
                     },
-                    {
-                        "finding_id": "vuln_001",
-                        "verdict": "EXPLOITABLE",
-                        "original_finding": old_findings[1],
-                    },
+                    "summary": {},
+                    "results": [
+                        _complete_result("vuln_000", old_findings[0]),
+                        _complete_result(
+                            "vuln_001",
+                            old_findings[1],
+                            verdict="EXPLOITABLE",
+                        ),
                 ],
             }
         ),
@@ -2086,16 +2214,15 @@ def test_init_or_load_results_keeps_results_when_findings_reorder(tmp_path):
                 },
                 "summary": {},
                 "results": [
-                    {
-                        "finding_id": "vuln_000",
-                        "verdict": "NOT_EXPLOITABLE",
-                        "original_finding": current_findings["vuln_000"],
-                    },
-                    {
-                        "finding_id": "vuln_001",
-                        "verdict": "EXPLOITABLE",
-                        "original_finding": current_findings["vuln_001"],
-                    },
+                    _complete_result(
+                        "vuln_000",
+                        current_findings["vuln_000"],
+                    ),
+                    _complete_result(
+                        "vuln_001",
+                        current_findings["vuln_001"],
+                        verdict="EXPLOITABLE",
+                    ),
                 ],
             }
         ),
@@ -2263,6 +2390,8 @@ def test_init_or_load_results_ignores_zero_call_retried_results(tmp_path):
             {
                 "finding_id": "vuln_000",
                 "verdict": "ERROR",
+                "confidence": "low",
+                "original_finding": {"finding_id": "vuln_000"},
                 "llm_usage": {
                     "source": "claude_cli",
                     "calls_total": 0,
@@ -2271,8 +2400,10 @@ def test_init_or_load_results_ignores_zero_call_retried_results(tmp_path):
                 },
             },
             {
-                "finding_id": "vuln_001",
-                "verdict": "NOT_EXPLOITABLE",
+                **_complete_result(
+                    "vuln_001",
+                    {"finding_id": "vuln_001"},
+                ),
                 "llm_usage": {
                     "source": "claude_cli",
                     "calls_total": 1,
@@ -2356,13 +2487,15 @@ def test_save_results_merges_newer_on_disk_results_for_retried_entries(tmp_path)
         },
         "summary": {},
         "results": [
-            {
-                "finding_id": "vuln_000",
-                "verdict": "NOT_EXPLOITABLE",
-            },
+            _complete_result(
+                "vuln_000",
+                {"finding_id": "vuln_000"},
+            ),
             {
                 "finding_id": "vuln_001",
                 "verdict": "ERROR",
+                "confidence": "low",
+                "original_finding": {"finding_id": "vuln_001"},
             },
         ],
     }
@@ -2388,28 +2521,30 @@ def test_save_results_merges_newer_on_disk_results_for_retried_entries(tmp_path)
 
     concurrent = {
         "metadata": {
-            **initial["metadata"],
+            **loaded["metadata"],
             "completed_at": None,
         },
         "summary": {},
         "results": [
-            {
-                "finding_id": "vuln_000",
-                "verdict": "NOT_EXPLOITABLE",
-            },
-            {
-                "finding_id": "vuln_001",
-                "verdict": "EXPLOITABLE",
-            },
+            _complete_result(
+                "vuln_000",
+                {"finding_id": "vuln_000"},
+            ),
+            _complete_result(
+                "vuln_001",
+                {"finding_id": "vuln_001"},
+                verdict="EXPLOITABLE",
+            ),
         ],
     }
     output_path.write_text(json.dumps(concurrent), encoding="utf-8")
 
     loaded["results"].append(
-        {
-            "finding_id": "vuln_002",
-            "verdict": "LIBRARY_RISK",
-        }
+        _complete_result(
+            "vuln_002",
+            {"finding_id": "vuln_002"},
+            verdict="LIBRARY_RISK",
+        )
     )
     checker._save_results(output_path, loaded)
 
@@ -2466,13 +2601,12 @@ def test_save_results_does_not_restore_stale_retryable_entries_from_disk(tmp_pat
         },
         "summary": {},
         "results": [
-            {
-                "finding_id": "vuln_000",
-                "verdict": "NOT_EXPLOITABLE",
-            },
+            _complete_result("vuln_000", {}),
             {
                 "finding_id": "vuln_002",
                 "verdict": "ERROR",
+                "confidence": "low",
+                "original_finding": {},
             },
         ],
     }
@@ -2482,14 +2616,8 @@ def test_save_results_does_not_restore_stale_retryable_entries_from_disk(tmp_pat
         "metadata": dict(initial["metadata"]),
         "summary": {},
         "results": [
-            {
-                "finding_id": "vuln_000",
-                "verdict": "NOT_EXPLOITABLE",
-            },
-            {
-                "finding_id": "vuln_001",
-                "verdict": "EXPLOITABLE",
-            },
+            _complete_result("vuln_000", {}),
+            _complete_result("vuln_001", {}, verdict="EXPLOITABLE"),
         ],
     }
 
@@ -2518,7 +2646,7 @@ def test_save_results_returns_merged_doc_without_mutating_input(tmp_path):
                 },
                 "summary": {},
                 "results": [
-                    {"finding_id": "vuln_000", "verdict": "NOT_EXPLOITABLE"},
+                    _complete_result("vuln_000", {}),
                 ],
             }
         ),
@@ -2533,7 +2661,7 @@ def test_save_results_returns_merged_doc_without_mutating_input(tmp_path):
         },
         "summary": {},
         "results": [
-            {"finding_id": "vuln_001", "verdict": "EXPLOITABLE"},
+            _complete_result("vuln_001", {}, verdict="EXPLOITABLE"),
         ],
     }
 

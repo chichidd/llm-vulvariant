@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run `software-profile p-analysis` for each first-level repo under data/repos.
+# Run `software-profile p-analysis` for each first-level repo under repos/general.
 #
 # Shared path helper for profile-dir fallback logic.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 APP_DIR="${APP_DIR:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
+REVISION_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 source "$SCRIPT_DIR/profile_paths.sh"
 
 PYTHON_BIN="${PYTHON_BIN:-}"
@@ -23,18 +25,25 @@ read -r -a PYTHON_CMD <<<"$PYTHON_BIN"
 
 # Examples:
 #   ./scripts/run_all_software_profiles.sh
-#   ./scripts/run_all_software_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir ../profiles/soft --verbose
+#   ./scripts/run_all_software_profiles.sh --llm-provider openai --llm-name gpt-4.1 --output-dir $REVISION_ROOT/evidence/profiles/soft --verbose
 #   ./scripts/run_all_software_profiles.sh --force-regenerate
 #   ./scripts/run_all_software_profiles.sh -- --verbose
-#.  under llm-vulvariant: ./scripts/run_all_software_profiles.sh --llm-provider deepseek --output-dir ../profiles/soft
+#.  from the copied scanner checkout: ./scripts/run_all_software_profiles.sh --llm-provider lab --llm-name GLM-5.2 --output-dir $REVISION_ROOT/evidence/profiles/soft
 # Notes:
-# - Repo name A is the folder name under data/repos (first level only).
+# - Repo name A is the folder name under repos/general (first level only).
 # - Extra args must be supported by the current software-profile CLI.
 
-ROOT_DIR="${ROOT_DIR:-../data/repos}"
+SOFTWARE_PROFILE_CMD="${SOFTWARE_PROFILE_CMD:-}"
+if [[ -n "$SOFTWARE_PROFILE_CMD" ]]; then
+  read -r -a SOFTWARE_PROFILE_COMMAND <<<"$SOFTWARE_PROFILE_CMD"
+else
+  SOFTWARE_PROFILE_COMMAND=("${PYTHON_CMD[@]}" -m cli.software)
+fi
 
-LLM_PROVIDER=""   # optional; if empty, don't pass it (tool default applies)
-LLM_NAME=""       # optional; if empty, don't pass it (tool default applies)
+ROOT_DIR="${ROOT_DIR:-$REVISION_ROOT/repos/general}"
+
+LLM_PROVIDER="${LLM_PROVIDER:-lab}"
+LLM_NAME="${LLM_NAME:-GLM-5.2}"
 OUTPUT_DIR=""     # optional; if empty, don't pass it (tool default applies)
 PROFILE_BASE_PATH=""      # optional; used when OUTPUT_DIR is empty
 SOFT_PROFILE_DIRNAME="soft"  # optional; used when OUTPUT_DIR is empty
@@ -69,7 +78,6 @@ sys.path.insert(0, str(app_dir / "src"))
 from config import _path_config
 from utils import repo_lock as repo_lock_module
 
-_path_config["repo_root"] = app_dir
 
 cleaned = False
 with repo_lock_module.hold_repo_lock(repo_dir, purpose="cleanup_codeql_temp_artifacts"):
@@ -103,7 +111,6 @@ from config import _path_config
 from utils import git_utils as git_utils_module
 from utils import repo_lock as repo_lock_module
 
-_path_config["repo_root"] = app_dir
 git_utils_module.logger.disabled = True
 repo_lock_module.logger.disabled = True
 
@@ -122,11 +129,11 @@ usage() {
 Usage: $0 [--root DIR] [--llm-provider X1] [--llm-name X2] [--output-dir C1] [--profile-base-path P] [--soft-profile-dirname N] [--force-regenerate] [-- ...extra args...]
 
 Env overrides:
-  ROOT_DIR=data/repos
+  ROOT_DIR=$REVISION_ROOT/repos/general
 
 Examples:
   $0
-  $0 --llm-provider openai --llm-name gpt-4.1 --output-dir ../profiles/soft --verbose
+  $0 --llm-provider openai --llm-name gpt-4.1 --output-dir $REVISION_ROOT/evidence/profiles/soft --verbose
   $0 --force-regenerate
   $0 -- --verbose
 EOF
@@ -183,7 +190,7 @@ if [[ ! -d "$ROOT_DIR" ]]; then
   exit 1
 fi
 
-BASE_CMD=(software-profile)
+BASE_CMD=("${SOFTWARE_PROFILE_COMMAND[@]}")
 
 # Add optional knobs only if user provided them (otherwise tool defaults apply)
 if [[ -n "$LLM_PROVIDER" ]]; then

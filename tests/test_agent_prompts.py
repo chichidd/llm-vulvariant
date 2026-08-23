@@ -3,15 +3,28 @@ from __future__ import annotations
 import re
 from types import SimpleNamespace
 
+import pytest
+
 from profiler.software.models import ModuleInfo
 from scanner.agent.prompts import (
     build_initial_user_message,
     build_intermediate_user_message,
     build_system_prompt,
 )
+from scanner.agent.schedule_window import (
+    FROZEN_SCHEDULE_CONTRACT,
+    build_schedule_page,
+)
 
 
 class _DummyToolkit:
+    def sanitize_invariant_model_value(self, value):
+        return value
+
+    def sanitize_scheduled_model_value(self, value, *, preserve_active=True):
+        _ = preserve_active
+        return value
+
     def get_available_tools(self):
         return [
             {
@@ -508,3 +521,248 @@ def test_build_intermediate_message_handles_no_priority_one_or_related_without_s
     assert "No PRIORITY-1 or RELATED modules are currently identified" in intermediate
     assert "scan_start_points and focused repo-wide searches" in intermediate
     assert "shared-memory queries" not in intermediate
+
+
+def test_system_prompt_exposes_scoped_verifier_and_candidate_priority_ablations():
+    prompt = build_system_prompt(
+        {
+            "cve_id": "CVE-2026-0001",
+            "sink_features": {"type": "command_injection"},
+            "vuln_description": "desc",
+            "vuln_cause": "cause",
+            "payload": "payload",
+            "source_features": {},
+            "flow_features": {},
+            "exploit_scenarios": [],
+            "exploit_conditions": [],
+        },
+        _DummyToolkit(),
+        verifier_enabled=False,
+        candidate_priority_enabled=False,
+        candidate_file_order=["src/b.py", "src/a.py"],
+    )
+
+    assert "Claim-verifier ablation" in prompt
+    assert "same-type verifier gate are disabled" in prompt
+    assert "Candidate-priority ablation is active" in prompt
+    assert "Frozen global schedule contract" in prompt
+    assert FROZEN_SCHEDULE_CONTRACT in prompt
+    assert "src/b.py" not in prompt and "src/a.py" not in prompt
+
+
+def test_initial_prompt_candidate_priority_ablation_points_to_system_schedule():
+    software_profile = SimpleNamespace(
+        modules=[
+            ModuleInfo(name="api", files=["api.py"]),
+            ModuleInfo(name="worker", files=["worker.py"]),
+        ]
+    )
+
+    prompt = build_initial_user_message(
+        software_profile,
+        {"api": 1, "worker": 3},
+        candidate_priority_enabled=False,
+        candidate_file_order=["worker.py", "api.py"],
+        candidate_schedule_page=build_schedule_page(
+            ["worker.py", "api.py"],
+            cursor=0,
+        ),
+    )
+
+    assert "active_frozen_schedule_window" in prompt
+    assert '"total_file_count": 2' in prompt
+    assert '"modules"' not in prompt
+    assert "UNIFORM" not in prompt
+    assert prompt.index('"worker.py"') < prompt.index('"api.py"')
+
+
+def test_prioritized_initial_prompt_ignores_candidate_file_order_argument():
+    software_profile = SimpleNamespace(
+        modules=[
+            ModuleInfo(name="api", files=["api.py"]),
+            ModuleInfo(name="worker", files=["worker.py"]),
+        ]
+    )
+
+    prompt = build_initial_user_message(
+        software_profile,
+        {"api": 1, "worker": 2},
+        candidate_priority_enabled=True,
+        candidate_file_order=["worker.py", "api.py"],
+    )
+
+    assert prompt.index('"api"') < prompt.index('"worker"')
+    assert prompt.index('"api.py"') < prompt.index('"worker.py"')
+    assert "Frozen global unique file schedule" not in prompt
+
+def test_reference_semantics_ablation_exposes_only_opaque_card_fields():
+    profile = {
+        "schema_version": 1,
+        "card_id": "card-public-7",
+        "weaknesses": ["CWE-22", "CWE-78"],
+        "cve_id": "CVE-2026-9999",
+        "query_terms": ["SECRET-QUERY"],
+        "dangerous_apis": ["SECRET-API"],
+        "source_features": {"sentinel": "SECRET-SOURCE"},
+        "sink_features": {"sentinel": "SECRET-SINK"},
+        "negative_constraints": ["SECRET-NEGATIVE"],
+        "evidence": ["SECRET-EVIDENCE"],
+    }
+    prompt = build_system_prompt(
+        profile,
+        _DummyToolkit(),
+        reference_semantics_enabled=False,
+    )
+    assert "card-public-7" in prompt
+    assert "CWE-22" in prompt and "CWE-78" in prompt
+    for secret in (
+        "CVE-2026-9999", "SECRET-QUERY", "SECRET-API", "SECRET-SOURCE",
+        "SECRET-SINK", "SECRET-NEGATIVE", "SECRET-EVIDENCE",
+    ):
+        assert secret not in prompt
+    for hidden_field in (
+        "query_terms", "dangerous_apis", "source_features", "sink_features",
+        "negative_constraints", "evidence_samples",
+    ):
+        assert hidden_field not in prompt
+
+
+def test_frozen_candidate_order_is_complete_unique_and_module_independent():
+    files = ["src/shared.py", *[f"src/file_{index:02d}.py" for index in range(60)]]
+    schedule = [*files[1::2], *files[::2]]
+    software_profile = {
+        "basic_info": {"name": "demo"},
+        "modules": [
+            {
+                "name": "alpha-overlap-module",
+                "files": ["src/shared.py", *files[2::2]],
+                "description": "alpha",
+            },
+            {
+                "name": "beta-overlap-module",
+                "files": ["src/shared.py", *files[1::2]],
+                "description": "beta",
+            },
+        ],
+    }
+    vulnerability_profile = {
+        "cve_id": "CVE-2026-0001",
+        "sink_features": {"type": "command_injection"},
+        "vuln_description": "desc",
+        "vuln_cause": "cause",
+        "payload": "payload",
+        "source_features": {},
+        "flow_features": {},
+        "exploit_scenarios": [],
+        "exploit_conditions": [],
+        "scan_start_points": schedule[:3],
+    }
+
+    for reference_semantics_enabled in (True, False):
+        system_prompt = build_system_prompt(
+            vulnerability_profile,
+            _DummyToolkit(),
+            candidate_priority_enabled=False,
+            candidate_file_order=schedule,
+            reference_semantics_enabled=reference_semantics_enabled,
+        )
+        initial_prompt = build_initial_user_message(
+            software_profile,
+            {"alpha-overlap-module": 1, "beta-overlap-module": 1},
+            candidate_priority_enabled=False,
+            candidate_file_order=schedule,
+            candidate_schedule_page=build_schedule_page(schedule, cursor=0),
+            reference_semantics_enabled=reference_semantics_enabled,
+        )
+        combined = system_prompt + initial_prompt
+
+        assert len(schedule) > 50
+        assert len(schedule) == len(set(schedule))
+        assert all(combined.count(f'"{path}"') == 1 for path in schedule)
+        assert all(path not in system_prompt for path in schedule)
+        assert [initial_prompt.index(f'"{path}"') for path in schedule] == sorted(
+            initial_prompt.index(f'"{path}"') for path in schedule
+        )
+        assert '"total_file_count": 61' in initial_prompt
+        assert '"modules"' not in initial_prompt
+        assert "presented_prefix" not in combined
+        assert "alpha-overlap-module" not in initial_prompt
+        assert "beta-overlap-module" not in initial_prompt
+        assert FROZEN_SCHEDULE_CONTRACT in combined
+
+
+def test_intermediate_prompt_projects_scanned_files_through_frozen_schedule():
+    schedule = ["src/z.py", "src/a.py", "src/m.py"]
+    prompt = build_intermediate_user_message(
+        scanned_files=["src/m.py", "outside.py", "src/a.py", "src/a.py"],
+        pending_files=["src/z.py", "outside.py", "src/z.py"],
+        findings=[
+            {"file": "src/m.py", "type": "cmd", "confidence": "high"},
+            {"file": "src/a.py", "type": "path", "confidence": "medium"},
+            {"file": "src/a.py", "type": "cmd", "confidence": "low"},
+            {"file": "outside.py", "type": "outside", "confidence": "high"},
+        ],
+        shared_observation_count=0,
+        has_priority_one=False,
+        has_related=False,
+        candidate_priority_enabled=False,
+        candidate_file_order=schedule,
+        candidate_schedule_page=build_schedule_page(
+            schedule,
+            cursor=0,
+            completed_files=["src/a.py", "src/m.py"],
+        ),
+    )
+
+    assert "src/a.py" not in prompt
+    assert "src/m.py" not in prompt
+    assert prompt.count("src/z.py") == 1
+    assert "outside.py" not in prompt
+    assert '"completed_window_offsets": [' in prompt
+    assert "PRIORITY-1" not in prompt
+    assert "RELATED" not in prompt
+
+
+def test_intermediate_prompt_does_not_truncate_large_scheduled_scan_history():
+    schedule = [f"src/file_{index:02d}.py" for index in range(61)]
+    scanned = [*reversed(schedule[:55]), schedule[4], "outside.py"]
+    pending = [*reversed(schedule[55:]), schedule[56], "outside.py"]
+
+    for reference_semantics_enabled in (True, False):
+        prompt = build_intermediate_user_message(
+            scanned_files=scanned,
+            pending_files=pending,
+            candidate_priority_enabled=False,
+            candidate_file_order=schedule,
+            candidate_schedule_page=build_schedule_page(
+                schedule,
+                cursor=0,
+                completed_files=schedule[:55],
+            ),
+            reference_semantics_enabled=reference_semantics_enabled,
+        )
+        pending_schedule = schedule[55:]
+        positions = [prompt.index(path) for path in pending_schedule]
+        assert positions == sorted(positions)
+        assert all(path not in prompt for path in schedule[:55])
+        assert all(prompt.count(path) == 1 for path in pending_schedule)
+        assert "outside.py" not in prompt
+        assert "... and" not in prompt
+
+
+def test_candidate_priority_ablation_requires_schedule_at_every_prompt_boundary():
+    with pytest.raises(ValueError, match="requires a frozen global file schedule"):
+        build_system_prompt(
+            {},
+            _DummyToolkit(),
+            candidate_priority_enabled=False,
+        )
+    with pytest.raises(ValueError, match="requires a frozen global file schedule"):
+        build_initial_user_message(
+            SimpleNamespace(modules=[]),
+            candidate_priority_enabled=False,
+        )
+    with pytest.raises(ValueError, match="requires a frozen global file schedule"):
+        build_intermediate_user_message(
+            candidate_priority_enabled=False,
+        )

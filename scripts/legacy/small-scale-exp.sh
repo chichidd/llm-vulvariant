@@ -1,3 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "LEGACY ONLY: paid historical commands; not part of the CCS reproduction surface" >&2
+exit 2
+
 
 scanner --vuln-repo AutoGPT --cve CVE-2025-1040 --target-repo autogen --target-commit 13e144e5476a76ca0d76bf4f07a6401d133a03ed --llm-provider deepseek --max-iterations 3  --verbose --output scan-results-withmem-codeql-selfmark
 scanner --vuln-repo AutoGPT --cve CVE-2025-22603 --target-repo autogen --target-commit 13e144e5476a76ca0d76bf4f07a6401d133a03ed --llm-provider deepseek --max-iterations 3  --verbose --output scan-results-withmem-codeql-selfmark

@@ -536,11 +536,11 @@ def resolve_repo_lock_path(repo_path: Path) -> Path:
         repo_path: Repository path that may be checked out temporarily.
 
     Returns:
-        Stable lock file path under ``.runtime-locks/repos``.
+        Stable lock file path under ``results/runtime/locks/repos``.
     """
     normalized_repo_path = repo_path.expanduser().resolve()
     repo_hash = hashlib.sha1(str(normalized_repo_path).encode("utf-8")).hexdigest()
-    return _path_config["repo_root"] / ".runtime-locks" / "repos" / f"{repo_hash}.lock"
+    return _path_config["results_base_path"] / "runtime" / "locks" / "repos" / f"{repo_hash}.lock"
 
 
 def acquire_repo_lock(

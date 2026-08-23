@@ -2,10 +2,14 @@ import os
 
 import pytest
 
+import scanner.similarity.embedding as embedding_module
+import scanner.similarity.retriever as retriever_module
 from profiler.software.models import ModuleInfo, SoftwareProfile
 from scanner.similarity.retriever import (
     ProfileRef,
     ProfileSimilarityMetrics,
+    EmbeddingUnavailableError,
+    build_text_retriever,
     _embedding_only_text_similarity,
     _jaccard_similarity,
     _module_embedding_text,
@@ -457,3 +461,132 @@ def test_jaccard_similarity_handles_empty_sets():
     assert _jaccard_similarity(set(), {"a"}) == 0.0
     assert _jaccard_similarity({"a"}, set()) == 0.0
     assert _jaccard_similarity({"a"}, {"a", "b"}) == 0.5
+
+
+def test_required_embedding_similarity_fails_closed_and_records_reason():
+    class BrokenRetriever:
+        backend = "sentence-transformers"
+
+        def similarity(self, left, right):
+            raise RuntimeError("backend unavailable")
+
+    provenance = {}
+    with pytest.raises(EmbeddingUnavailableError, match="evaluation mode"):
+        _text_similarity(
+            "left",
+            "right",
+            text_retriever=BrokenRetriever(),
+            require_embedding=True,
+            embedding_provenance=provenance,
+        )
+
+    assert provenance["fallback_used"] is False
+    assert "backend unavailable" in provenance["fallback_reason"]
+
+
+def test_required_embedding_similarity_records_actual_successful_backend():
+    class WorkingRetriever:
+        backend = "transformers-mean-pooling"
+
+        def similarity(self, left, right):
+            return 0.75
+
+    provenance = {}
+    score = _text_similarity(
+        "left",
+        "right",
+        text_retriever=WorkingRetriever(),
+        require_embedding=True,
+        embedding_provenance=provenance,
+    )
+
+    assert score == 0.75
+    assert provenance["backend"] == "transformers-mean-pooling"
+    assert provenance["successful_similarity_calls"] == 1
+    assert provenance["last_event"] == "embedding_similarity"
+
+
+def test_required_embedding_empty_input_is_distinguished_from_fallback():
+    provenance = {}
+
+    assert _text_similarity(
+        "",
+        "right",
+        require_embedding=True,
+        embedding_provenance=provenance,
+    ) == 0.0
+    assert provenance["last_event"] == "skipped_empty_input"
+    assert provenance["skipped_empty_inputs"] == 1
+    assert "fallback_used" not in provenance
+
+
+def test_build_text_retriever_is_fail_closed_only_when_required(monkeypatch):
+    class BrokenRetriever:
+        def __init__(self, **kwargs):
+            raise RuntimeError("model missing")
+
+    monkeypatch.setattr(retriever_module, "EmbeddingRetriever", BrokenRetriever)
+    required_provenance = {}
+    with pytest.raises(EmbeddingUnavailableError, match="required"):
+        build_text_retriever(
+            model_name="missing-model",
+            require_embedding=True,
+            provenance=required_provenance,
+        )
+    assert required_provenance["fallback_used"] is False
+    assert "missing-model" in required_provenance["fallback_reason"]
+
+    compatibility_provenance = {}
+    assert build_text_retriever(
+        model_name="missing-model",
+        require_embedding=False,
+        provenance=compatibility_provenance,
+    ) is None
+    assert compatibility_provenance["fallback_used"] is True
+    assert "missing-model" in compatibility_provenance["fallback_reason"]
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_embedding_scores_fail_closed_or_use_declared_fallback(score):
+    class NonFiniteRetriever:
+        backend = "synthetic"
+
+        def similarity(self, left, right):
+            return score
+
+    required_provenance = {}
+    with pytest.raises(EmbeddingUnavailableError, match="non-finite"):
+        _text_similarity(
+            "same", "same", text_retriever=NonFiniteRetriever(),
+            require_embedding=True, embedding_provenance=required_provenance,
+        )
+    assert required_provenance["fallback_used"] is False
+    assert required_provenance["last_event"] == "embedding_failure"
+    compatibility_provenance = {}
+    assert _text_similarity(
+        "same", "same", text_retriever=NonFiniteRetriever(),
+        embedding_provenance=compatibility_provenance,
+    ) == 1.0
+    assert compatibility_provenance["fallback_used"] is True
+    assert compatibility_provenance["last_event"] == "lexical_fallback"
+    embedding_only_provenance = {}
+    assert _embedding_only_text_similarity(
+        "same", "same", text_retriever=NonFiniteRetriever(),
+        embedding_provenance=embedding_only_provenance,
+    ) == 0.0
+    assert embedding_only_provenance["last_event"] == "zero_fallback"
+
+
+def test_embedding_artifact_signature_depends_on_content_not_mtime(monkeypatch, tmp_path):
+    model_dir = tmp_path / "model-x"
+    model_dir.mkdir()
+    config_path = model_dir / "config.json"
+    config_path.write_bytes(b"aaaa")
+    monkeypatch.setitem(embedding_module._path_config, "embedding_model_path", tmp_path)
+    first = embedding_module.embedding_model_artifact_signature("model-x")
+    os.utime(config_path, (20, 20))
+    same_content = embedding_module.embedding_model_artifact_signature("model-x")
+    assert same_content["artifact_hash"] == first["artifact_hash"]
+    config_path.write_bytes(b"bbbb")
+    os.utime(config_path, (20, 20))
+    changed_content = embedding_module.embedding_model_artifact_signature("model-x")
+    assert changed_content["artifact_hash"] != first["artifact_hash"]

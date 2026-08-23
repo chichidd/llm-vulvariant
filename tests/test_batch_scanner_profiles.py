@@ -208,7 +208,7 @@ def test_loads_cached_vulnerability_profile_from_disk_when_repo_is_missing(monke
     )
 
     assert getattr(profile, "cve_id", None) == cve_id
-    assert getattr(cache[(repo_name, cve_id)], "cve_id", None) == cve_id
+    assert getattr(cache[(repo_name, commit_hash, cve_id)], "cve_id", None) == cve_id
 
 
 def test_missing_repo_cached_vulnerability_profile_returns_none_when_source_profile_changes(
@@ -433,7 +433,7 @@ def test_loads_cached_vulnerability_profile_from_disk_when_repo_is_dirty(monkeyp
     )
 
     assert getattr(profile, "cve_id", None) == cve_id
-    assert getattr(cache[(repo_name, cve_id)], "cve_id", None) == cve_id
+    assert getattr(cache[(repo_name, commit_hash, cve_id)], "cve_id", None) == cve_id
 
 
 def test_loads_cached_software_profile_from_disk_when_repo_is_dirty(monkeypatch, tmp_path):
@@ -975,7 +975,7 @@ def test_force_regenerate_vulnerability_profile_bypasses_cached_final_result(mon
     )
 
     assert getattr(profile, "cve_id", None) == cve_id
-    assert getattr(cache[(repo_name, cve_id)], "cve_id", None) == cve_id
+    assert getattr(cache[(repo_name, commit_hash, cve_id)], "cve_id", None) == cve_id
 
 
 def test_force_regenerate_reuses_same_run_cached_profile(monkeypatch, tmp_path):

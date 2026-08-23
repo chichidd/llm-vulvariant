@@ -120,6 +120,7 @@ def test_run_all_vuln_software_profile_exits_non_zero_when_any_profile_fails(tmp
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["SOFTWARE_PROFILE_CMD"] = "software-profile"
     result = subprocess.run(
         [
             "bash",
@@ -184,6 +185,7 @@ def test_run_all_vuln_software_profile_prefers_active_python_for_repo_lock_helpe
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["SOFTWARE_PROFILE_CMD"] = "software-profile"
     env["CALLS_LOG"] = str(calls_log)
     result = subprocess.run(
         [
@@ -247,6 +249,7 @@ def test_run_all_vuln_software_profile_supports_multiword_python_bin(tmp_path: P
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["SOFTWARE_PROFILE_CMD"] = "software-profile"
     env["CALLS_LOG"] = str(calls_log)
     env["PYTHON_BIN"] = "conda run -n custom-env python"
     result = subprocess.run(
@@ -326,12 +329,11 @@ def test_run_all_vuln_software_profile_uses_repo_relative_defaults(tmp_path: Pat
     )
     fake_cmd.chmod(fake_cmd.stat().st_mode | stat.S_IEXEC)
 
-    repo_root = tmp_path / "llm-vulvariant"
-    project_root = tmp_path
-    data_root = project_root / "data"
-    profiles_root = project_root / "profiles"
-    (data_root / "repos" / "demo").mkdir(parents=True)
-    vuln_json = data_root / "vuln.json"
+    repos_root = tmp_path / "repos" / "general"
+    profiles_root = tmp_path / "evidence" / "profiles"
+    (repos_root / "demo").mkdir(parents=True)
+    vuln_json = tmp_path / "benchmark" / "input" / "vuln.json"
+    vuln_json.parent.mkdir(parents=True)
     vuln_json.write_text(
         '[{"repo_name":"demo","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]\n',
         encoding="utf-8",
@@ -339,8 +341,9 @@ def test_run_all_vuln_software_profile_uses_repo_relative_defaults(tmp_path: Pat
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["SOFTWARE_PROFILE_CMD"] = "software-profile"
     env["CALLS_LOG"] = str(calls_log)
-    env["_PROFILE_PATHS_REPO_ROOT"] = str(repo_root)
+    env["REVISION_ROOT"] = str(tmp_path)
     result = subprocess.run(
         ["bash", str(SCRIPT)],
         cwd=ROOT,
@@ -358,5 +361,5 @@ def test_run_all_vuln_software_profile_uses_repo_relative_defaults(tmp_path: Pat
     ]
     assert len(calls) == 1
     assert f"VULN_JSON:      {vuln_json}" in result.stdout
-    assert str(data_root / "repos") in calls[0]
+    assert str(repos_root) in calls[0]
     assert str(profiles_root / "soft") in calls[0]

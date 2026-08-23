@@ -13,6 +13,10 @@ from profiler.software.module_analyzer.skill import SkillModuleAnalyzer
 from profiler.software import analyzer as analyzer_module
 
 
+FULL_COMMIT = "a" * 40
+TARGET_COMMIT = "d" * 40
+
+
 class StubStorageManager:
     def __init__(
         self,
@@ -85,7 +89,7 @@ def _stub_profiler(storage_manager):
     return profiler
 
 
-def _stub_git(monkeypatch, commit="abc123"):
+def _stub_git(monkeypatch, commit=FULL_COMMIT):
     monkeypatch.setattr(analyzer_module, "has_uncommitted_changes", lambda _repo: False)
     monkeypatch.setattr(analyzer_module, "get_git_commit", lambda _repo: commit)
     monkeypatch.setattr(analyzer_module, "get_git_restore_target", lambda _repo: commit)
@@ -119,7 +123,7 @@ def test_generate_profile_loads_cached_final_result(tmp_path, monkeypatch):
     cached_profile = {
         "basic_info": {
             "name": "demo",
-            "version": "abc123",
+            "version": FULL_COMMIT,
             "description": "cached",
             "target_application": ["inference"],
             "target_user": ["platform engineer"],
@@ -155,7 +159,7 @@ def test_generate_profile_rejects_cached_final_result_with_incomplete_basic_info
     _stub_git(monkeypatch)
 
     cached_profile = {
-        "basic_info": {"name": "demo", "version": "abc123", "description": "cached"},
+        "basic_info": {"name": "demo", "version": FULL_COMMIT, "description": "cached"},
         "repo_info": {"files": ["app.py"]},
         "modules": [{"name": "api", "files": ["app.py"]}],
         "metadata": {"profile_fingerprint": {"hash": "expected"}},
@@ -165,7 +169,7 @@ def test_generate_profile_rejects_cached_final_result_with_incomplete_basic_info
 
     regenerated = SoftwareProfile(
         name="demo",
-        version="abc123",
+        version=FULL_COMMIT,
         description="regenerated",
         capabilities=["serve inference traffic"],
         interfaces=["HTTP API"],
@@ -189,7 +193,7 @@ def test_generate_profile_rejects_cached_final_result_with_empty_modules(tmp_pat
     _stub_git(monkeypatch)
 
     cached_profile = {
-        "basic_info": {"name": "demo", "version": "abc123", "description": "cached"},
+        "basic_info": {"name": "demo", "version": FULL_COMMIT, "description": "cached"},
         "repo_info": {"files": ["app.py"]},
         "modules": [],
         "metadata": {"profile_fingerprint": {"hash": "expected"}},
@@ -197,7 +201,7 @@ def test_generate_profile_rejects_cached_final_result_with_empty_modules(tmp_pat
     profiler = _stub_profiler(StubStorageManager(final_result=json.dumps(cached_profile)))
     profiler._build_profile_fingerprint = lambda: {"hash": "expected"}
 
-    regenerated = SoftwareProfile(name="demo", version="abc123", description="regenerated")
+    regenerated = SoftwareProfile(name="demo", version=FULL_COMMIT, description="regenerated")
     profiler._generate_profile_full = lambda *args, **kwargs: regenerated
 
     profile = profiler.generate_profile(str(repo_dir))
@@ -211,7 +215,7 @@ def test_generate_profile_force_regenerate_bypasses_cached_final_result(tmp_path
     _stub_git(monkeypatch)
 
     cached_profile = {
-        "basic_info": {"name": "demo", "version": "abc123", "description": "cached"},
+        "basic_info": {"name": "demo", "version": FULL_COMMIT, "description": "cached"},
         "repo_info": {"files": ["app.py"]},
         "modules": [{"name": "api", "files": ["app.py"]}],
         "metadata": {"profile_fingerprint": {"hash": "expected"}},
@@ -219,7 +223,7 @@ def test_generate_profile_force_regenerate_bypasses_cached_final_result(tmp_path
     profiler = _stub_profiler(StubStorageManager(final_result=json.dumps(cached_profile)))
     profiler._build_profile_fingerprint = lambda: {"hash": "expected"}
 
-    regenerated = SoftwareProfile(name="demo", version="abc123", description="regenerated")
+    regenerated = SoftwareProfile(name="demo", version=FULL_COMMIT, description="regenerated")
     profiler._generate_profile_full = lambda *args, **kwargs: regenerated
 
     profile = profiler.generate_profile(str(repo_dir), force_regenerate=True)
@@ -233,7 +237,7 @@ def test_generate_profile_regenerates_when_cached_fingerprint_is_stale(tmp_path,
     _stub_git(monkeypatch)
 
     cached_profile = {
-        "basic_info": {"name": "demo", "version": "abc123", "description": "cached"},
+        "basic_info": {"name": "demo", "version": FULL_COMMIT, "description": "cached"},
         "repo_info": {"files": ["app.py"]},
         "modules": [{"name": "api", "files": ["app.py"]}],
         "metadata": {"profile_fingerprint": {"hash": "stale"}},
@@ -241,7 +245,7 @@ def test_generate_profile_regenerates_when_cached_fingerprint_is_stale(tmp_path,
     profiler = _stub_profiler(StubStorageManager(final_result=json.dumps(cached_profile)))
     profiler._build_profile_fingerprint = lambda: {"hash": "expected"}
 
-    regenerated = SoftwareProfile(name="demo", version="abc123", description="regenerated")
+    regenerated = SoftwareProfile(name="demo", version=FULL_COMMIT, description="regenerated")
     profiler._generate_profile_full = lambda *args, **kwargs: regenerated
 
     profile = profiler.generate_profile(str(repo_dir))
@@ -255,7 +259,7 @@ def test_generate_profile_stale_final_result_forces_full_regeneration(tmp_path, 
     _stub_git(monkeypatch)
 
     cached_profile = {
-        "basic_info": {"name": "demo", "version": "abc123", "description": "cached"},
+        "basic_info": {"name": "demo", "version": FULL_COMMIT, "description": "cached"},
         "repo_info": {"files": ["app.py"]},
         "modules": [{"name": "api", "files": ["app.py"]}],
         "metadata": {"profile_fingerprint": {"hash": "stale"}},
@@ -267,7 +271,7 @@ def test_generate_profile_stale_final_result_forces_full_regeneration(tmp_path, 
 
     def _record_generate(*args, **kwargs):
         captured["force_regenerate"] = kwargs["force_regenerate"]
-        return SoftwareProfile(name="demo", version="abc123", description="regenerated")
+        return SoftwareProfile(name="demo", version=FULL_COMMIT, description="regenerated")
 
     profiler._generate_profile_full = _record_generate
 
@@ -306,7 +310,7 @@ def test_generate_profile_missing_resume_state_forces_full_regeneration(tmp_path
 
     def _record_generate(*args, **kwargs):
         captured["force_regenerate"] = kwargs["force_regenerate"]
-        return SoftwareProfile(name="demo", version="abc123", description="regenerated")
+        return SoftwareProfile(name="demo", version=FULL_COMMIT, description="regenerated")
 
     profiler._generate_profile_full = _record_generate
 
@@ -354,7 +358,7 @@ def test_generate_profile_matching_resume_state_allows_checkpoint_reuse(tmp_path
 
     def _record_generate(*args, **kwargs):
         captured["force_regenerate"] = kwargs["force_regenerate"]
-        return SoftwareProfile(name="demo", version="abc123", description="regenerated")
+        return SoftwareProfile(name="demo", version=FULL_COMMIT, description="regenerated")
 
     profiler._generate_profile_full = _record_generate
 
@@ -403,7 +407,7 @@ def test_failed_full_regeneration_persists_resume_state_for_retry(tmp_path, monk
             assert storage_manager.conversations == {}
             storage_manager.checkpoints["repo_info"] = {"files": ["fresh.py"], "repo_analysis": None}
             raise RuntimeError("generation failed")
-        return SoftwareProfile(name="demo", version="abc123", description="regenerated")
+        return SoftwareProfile(name="demo", version=FULL_COMMIT, description="regenerated")
 
     profiler._generate_profile_full = _generate
 
@@ -439,7 +443,8 @@ def test_generate_profile_raises_when_restore_after_success_fails(tmp_path, monk
     repo_dir.mkdir()
 
     monkeypatch.setattr(analyzer_module, "has_uncommitted_changes", lambda _repo: False)
-    monkeypatch.setattr(analyzer_module, "get_git_commit", lambda _repo: "abc123")
+    commits = iter([FULL_COMMIT, TARGET_COMMIT])
+    monkeypatch.setattr(analyzer_module, "get_git_commit", lambda _repo: next(commits))
     monkeypatch.setattr(analyzer_module, "get_git_restore_target", lambda _repo: "master")
     monkeypatch.setattr(analyzer_module, "checkout_commit", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(analyzer_module, "restore_git_position", lambda *_args, **_kwargs: False)
@@ -448,12 +453,55 @@ def test_generate_profile_raises_when_restore_after_success_fails(tmp_path, monk
     profiler._build_profile_fingerprint = lambda: {"hash": "expected"}
     profiler._generate_profile_full = lambda *args, **kwargs: SoftwareProfile(
         name="demo",
-        version="abc123",
+        version=TARGET_COMMIT,
         description="generated",
     )
 
     with pytest.raises(RuntimeError, match="Failed to restore repository to original position"):
         profiler.generate_profile(str(repo_dir), target_version="deadbeef")
+
+
+def test_generate_profile_uses_checkout_head_as_canonical_version(tmp_path, monkeypatch):
+    repo_dir = tmp_path / "demo"
+    repo_dir.mkdir()
+    commits = iter([FULL_COMMIT, TARGET_COMMIT])
+    checkouts = []
+    restores = []
+
+    monkeypatch.setattr(analyzer_module, "has_uncommitted_changes", lambda _repo: False)
+    monkeypatch.setattr(analyzer_module, "get_git_commit", lambda _repo: next(commits))
+    monkeypatch.setattr(analyzer_module, "get_git_restore_target", lambda _repo: "main")
+    monkeypatch.setattr(
+        analyzer_module,
+        "checkout_commit",
+        lambda _repo, target: checkouts.append(target) or True,
+    )
+    monkeypatch.setattr(
+        analyzer_module,
+        "restore_git_position",
+        lambda _repo, target: restores.append(target) or True,
+    )
+
+    profiler = _stub_profiler(StubStorageManager())
+    profiler._build_profile_fingerprint = lambda: {"hash": "expected"}
+    captured = {}
+
+    def _generate(_repo_path, _repo_name, version, **_kwargs):
+        captured["version"] = version
+        captured["path_parts"] = profiler._current_profile_path_parts
+        return SoftwareProfile(name="demo", version=version, description="generated")
+
+    profiler._generate_profile_full = _generate
+
+    profile = profiler.generate_profile(str(repo_dir), target_version="deadbeef")
+
+    assert checkouts == ["deadbeef"]
+    assert restores == ["main"]
+    assert captured == {
+        "version": TARGET_COMMIT,
+        "path_parts": ("demo", TARGET_COMMIT),
+    }
+    assert profile.version == TARGET_COMMIT
 
 
 def test_generate_profile_rejects_dirty_worktree_before_loading_matching_cache(tmp_path, monkeypatch):

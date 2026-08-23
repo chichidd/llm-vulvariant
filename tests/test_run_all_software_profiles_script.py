@@ -213,6 +213,7 @@ def _stays_call_free(calls_log: Path, duration_seconds: float = 0.2) -> bool:
 def _run_script(launch_dir: Path, path_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PATH"] = f"{path_root / 'bin'}:{env['PATH']}"
+    env["SOFTWARE_PROFILE_CMD"] = "software-profile"
     env["CALLS_LOG"] = str(path_root / "calls.log")
     env["_PROFILE_PATHS_REPO_ROOT"] = str(path_root / "repo-root")
     env["FAKE_GIT_HEAD"] = FAKE_GIT_HEAD
@@ -266,6 +267,10 @@ def test_run_all_software_profiles_anchors_relative_profile_base_to_repo_root(tm
     ]
     assert calls == [
         [
+            "--llm-provider",
+            "lab",
+            "--llm-name",
+            "GLM-5.2",
             "--profile-base-path",
             str(repo_root / "profiles"),
             "--software-profile-dirname",
@@ -328,6 +333,7 @@ def test_run_all_software_profiles_supports_multiword_python_bin(tmp_path: Path)
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["SOFTWARE_PROFILE_CMD"] = "software-profile"
     env["CALLS_LOG"] = str(calls_log)
     env["_PROFILE_PATHS_REPO_ROOT"] = str(repo_root)
     env["FAKE_GIT_HEAD"] = FAKE_GIT_HEAD
@@ -359,6 +365,10 @@ def test_run_all_software_profiles_supports_multiword_python_bin(tmp_path: Path)
     ]
     assert calls == [
         [
+            "--llm-provider",
+            "lab",
+            "--llm-name",
+            "GLM-5.2",
             "--profile-base-path",
             str(repo_root / "profiles"),
             "--software-profile-dirname",
@@ -393,6 +403,7 @@ def test_run_all_software_profiles_continues_after_repo_failure_and_reports_it(t
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["SOFTWARE_PROFILE_CMD"] = "software-profile"
     env["CALLS_LOG"] = str(calls_log)
     env["FAIL_REPO_NAME"] = "demo-broken"
     env["_PROFILE_PATHS_REPO_ROOT"] = str(repo_root)
@@ -455,6 +466,7 @@ def test_run_all_software_profiles_waits_for_repo_lock_before_cleaning_codeql_ar
 
         env = os.environ.copy()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        env["SOFTWARE_PROFILE_CMD"] = "software-profile"
         env["CALLS_LOG"] = str(calls_log)
         env["_PROFILE_PATHS_REPO_ROOT"] = str(repo_root)
         env["FAKE_GIT_HEAD"] = FAKE_GIT_HEAD

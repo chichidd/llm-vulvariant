@@ -19,17 +19,58 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 import json
+import math
 import re
 
 from profiler.software.models import ModuleInfo, SoftwareProfile, is_valid_software_basic_info
 from scanner.similarity.embedding import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingRetriever,
+    embedding_model_artifact_signature,
     get_cached_embedding_retriever,
 )
 from utils.logger import get_logger
+from utils.number_utils import to_int
 
 logger = get_logger(__name__)
+
+class EmbeddingUnavailableError(RuntimeError):
+    """Raised when a run that requires embeddings cannot use the configured backend."""
+
+    def __init__(self, message: str, provenance: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.embedding_provenance = dict(provenance or {})
+
+
+def _update_embedding_provenance(
+    provenance: Optional[Dict[str, Any]],
+    *,
+    model_name: Optional[str],
+    device: Optional[str],
+    required: bool,
+    backend: Optional[str] = None,
+    fallback_used: bool = False,
+    fallback_reason: Optional[str] = None,
+) -> None:
+    """Populate caller-owned embedding provenance without inventing missing values."""
+    if provenance is None:
+        return
+    signature = embedding_model_artifact_signature(model_name)
+    artifact_hash = str(signature.get("artifact_hash", "") or "").strip()
+    provenance.clear()
+    provenance.update(
+        {
+            "backend": backend,
+            "model": model_name or DEFAULT_EMBEDDING_MODEL_NAME,
+            "revision": artifact_hash or None,
+            "revision_source": signature.get("fingerprint_type") if artifact_hash else None,
+            "resolved_model_path": str(signature.get("resolved_model_path", "") or "") or None,
+            "device": str(device or "cpu").strip() or "cpu",
+            "required": bool(required),
+            "fallback_used": bool(fallback_used),
+            "fallback_reason": fallback_reason,
+        }
+    )
 
 
 DEFAULT_SIMILARITY_WEIGHTS: Dict[str, float] = {
@@ -253,15 +294,43 @@ def select_profile_ref(
 def build_text_retriever(
     model_name: Optional[str] = None,
     device: str = "cpu",
+    *,
+    require_embedding: bool = False,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> Optional[EmbeddingRetriever]:
     """Build an embedding retriever for text similarity.
 
     Returns ``None`` when the configured model path or backend cannot be
-    loaded so callers can fall back to lexical similarity.
+    loaded so compatibility callers can fall back to lexical similarity.
+    Evaluation callers set ``require_embedding=True`` to fail closed.
     """
     try:
-        return get_cached_embedding_retriever(model_name=model_name, device=device)
+        retriever = get_cached_embedding_retriever(model_name=model_name, device=device)
+        _update_embedding_provenance(
+            provenance,
+            model_name=model_name,
+            device=device,
+            required=require_embedding,
+            backend=getattr(retriever, "backend", None),
+        )
+        return retriever
     except Exception as exc:  # pylint: disable=broad-except
+        reason = f"{type(exc).__name__}: {exc}"
+        _update_embedding_provenance(
+            provenance,
+            model_name=model_name,
+            device=device,
+            required=require_embedding,
+            fallback_used=not require_embedding,
+            fallback_reason=reason,
+        )
+        if require_embedding:
+            raise EmbeddingUnavailableError(
+                "Embedding backend is required for evaluation mode but could not be loaded: "
+                f"model_name={model_name or DEFAULT_EMBEDDING_MODEL_NAME!r}, "
+                f"device={device!r}, error={reason}",
+                provenance=provenance,
+            ) from exc
         logger.warning(
             "Failed to build embedding retriever for auto-target similarity; "
             "falling back to lexical similarity. model_name=%r, device=%r, error=%s",
@@ -277,6 +346,8 @@ def compute_profile_similarity(
     target_profile: SoftwareProfile,
     text_retriever: Optional[EmbeddingRetriever] = None,
     weights: Optional[Dict[str, float]] = None,
+    require_embedding: bool = False,
+    embedding_provenance: Optional[Dict[str, Any]] = None,
 ) -> ProfileSimilarityMetrics:
     """Compute profile similarity with five dimensions.
 
@@ -295,16 +366,22 @@ def compute_profile_similarity(
         source_description_text,
         target_description_text,
         text_retriever=text_retriever,
+        require_embedding=require_embedding,
+        embedding_provenance=embedding_provenance,
     )
     target_application_sim = _text_similarity(
         " | ".join(source_profile.target_application or []),
         " | ".join(target_profile.target_application or []),
         text_retriever=text_retriever,
+        require_embedding=require_embedding,
+        embedding_provenance=embedding_provenance,
     )
     target_user_sim = _text_similarity(
         " | ".join(source_profile.target_user or []),
         " | ".join(target_profile.target_user or []),
         text_retriever=text_retriever,
+        require_embedding=require_embedding,
+        embedding_provenance=embedding_provenance,
     )
     module_jaccard_sim = _jaccard_similarity(
         _module_name_set(source_profile),
@@ -373,6 +450,8 @@ def rank_similar_profiles(
     min_overall_similarity: float = 0.0,
     text_retriever: Optional[EmbeddingRetriever] = None,
     weights: Optional[Dict[str, float]] = None,
+    require_embedding: bool = False,
+    embedding_provenance: Optional[Dict[str, Any]] = None,
     exclude_same_repo: bool = True,
 ) -> List[SimilarProfileCandidate]:
     """Rank candidate profiles by similarity to source profile."""
@@ -383,14 +462,27 @@ def rank_similar_profiles(
     for candidate_ref in candidate_refs:
         if candidate_ref.repo_name == source_ref.repo_name and exclude_same_repo:
             continue
-        if candidate_ref.repo_name == source_ref.repo_name and candidate_ref.commit_hash == source_ref.commit_hash:
+        if (
+            candidate_ref.repo_name == source_ref.repo_name
+            and candidate_ref.commit_hash == source_ref.commit_hash
+        ):
             continue
 
+        similarity_kwargs: Dict[str, Any] = {
+            "text_retriever": text_retriever,
+            "weights": weights,
+        }
+        if require_embedding or embedding_provenance is not None:
+            similarity_kwargs.update(
+                {
+                    "require_embedding": require_embedding,
+                    "embedding_provenance": embedding_provenance,
+                }
+            )
         metrics = compute_profile_similarity(
             source_ref.profile,
             candidate_ref.profile,
-            text_retriever=text_retriever,
-            weights=weights,
+            **similarity_kwargs,
         )
         if metrics.overall_sim < min_overall_similarity:
             continue
@@ -515,20 +607,60 @@ def _text_similarity(
     right: str,
     *,
     text_retriever: Optional[EmbeddingRetriever] = None,
+    require_embedding: bool = False,
+    embedding_provenance: Optional[Dict[str, Any]] = None,
 ) -> float:
     left = left or ""
     right = right or ""
     if not left.strip() or not right.strip():
+        if embedding_provenance is not None:
+            embedding_provenance["skipped_empty_inputs"] = (
+                to_int(embedding_provenance.get("skipped_empty_inputs")) + 1
+            )
+            embedding_provenance["last_event"] = "skipped_empty_input"
         return 0.0
 
     if text_retriever is not None:
         try:
-            return float(text_retriever.similarity(left, right))
+            score = float(text_retriever.similarity(left, right))
+            if not math.isfinite(score):
+                raise ValueError(f"non-finite embedding similarity score: {score!r}")
+            if embedding_provenance is not None:
+                embedding_provenance["backend"] = (
+                    getattr(text_retriever, "backend", None)
+                    or embedding_provenance.get("backend")
+                )
+                embedding_provenance["successful_similarity_calls"] = (
+                    to_int(embedding_provenance.get("successful_similarity_calls")) + 1
+                )
+                embedding_provenance["last_event"] = "embedding_similarity"
+            return score
         except Exception as exc:  # pylint: disable=broad-except
+            reason = f"{type(exc).__name__}: {exc}"
+            if embedding_provenance is not None:
+                embedding_provenance["fallback_used"] = not require_embedding
+                embedding_provenance["fallback_reason"] = reason
+                embedding_provenance["last_event"] = (
+                    "embedding_failure" if require_embedding else "lexical_fallback"
+                )
+            if require_embedding:
+                raise EmbeddingUnavailableError(
+                    f"Embedding similarity failed during evaluation mode: {reason}",
+                    provenance=embedding_provenance,
+                ) from exc
             logger.warning(
                 "Embedding similarity failed at runtime; falling back to lexical similarity. error=%s",
                 exc,
             )
+    elif require_embedding:
+        reason = "embedding retriever is unavailable"
+        if embedding_provenance is not None:
+            embedding_provenance["fallback_used"] = False
+            embedding_provenance["fallback_reason"] = reason
+        raise EmbeddingUnavailableError(
+            "Embedding similarity is required for evaluation mode, but the retriever is unavailable",
+            provenance=embedding_provenance,
+        )
 
     return _jaccard_similarity(_tokenize_text(left), _tokenize_text(right))
 
@@ -538,15 +670,54 @@ def _embedding_only_text_similarity(
     right: str,
     *,
     text_retriever: Optional[EmbeddingRetriever] = None,
+    require_embedding: bool = False,
+    embedding_provenance: Optional[Dict[str, Any]] = None,
 ) -> float:
     """Compute embedding similarity without lexical fallback."""
     left = left or ""
     right = right or ""
-    if not left.strip() or not right.strip() or text_retriever is None:
+    if not left.strip() or not right.strip():
+        if embedding_provenance is not None:
+            embedding_provenance["skipped_empty_inputs"] = (
+                to_int(embedding_provenance.get("skipped_empty_inputs")) + 1
+            )
+            embedding_provenance["last_event"] = "skipped_empty_input"
+        return 0.0
+    if text_retriever is None:
+        if require_embedding:
+            reason = "embedding retriever is unavailable"
+            if embedding_provenance is not None:
+                embedding_provenance["fallback_used"] = False
+                embedding_provenance["fallback_reason"] = reason
+            raise EmbeddingUnavailableError(reason, provenance=embedding_provenance)
         return 0.0
 
     try:
-        return float(text_retriever.similarity(left, right))
+        score = float(text_retriever.similarity(left, right))
+        if not math.isfinite(score):
+            raise ValueError(f"non-finite embedding similarity score: {score!r}")
+        if embedding_provenance is not None:
+            embedding_provenance["backend"] = (
+                getattr(text_retriever, "backend", None)
+                or embedding_provenance.get("backend")
+            )
+            embedding_provenance["successful_similarity_calls"] = (
+                to_int(embedding_provenance.get("successful_similarity_calls")) + 1
+            )
+            embedding_provenance["last_event"] = "embedding_similarity"
+        return score
     except Exception as exc:  # pylint: disable=broad-except
+        reason = f"{type(exc).__name__}: {exc}"
+        if embedding_provenance is not None:
+            embedding_provenance["fallback_used"] = not require_embedding
+            embedding_provenance["fallback_reason"] = reason
+            embedding_provenance["last_event"] = (
+                "embedding_failure" if require_embedding else "zero_fallback"
+            )
+        if require_embedding:
+            raise EmbeddingUnavailableError(
+                f"Embedding-only similarity failed during evaluation mode: {reason}",
+                provenance=embedding_provenance,
+            ) from exc
         logger.warning("Embedding-only similarity failed at runtime; treating score as 0. error=%s", exc)
         return 0.0

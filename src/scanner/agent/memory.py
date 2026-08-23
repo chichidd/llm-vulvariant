@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from utils.logger import get_logger
 from utils.io_utils import write_atomic_text
+from .schedule_window import FROZEN_SCHEDULE_PAGE_SIZE
 
 logger = get_logger(__name__)
 
@@ -30,6 +31,14 @@ class ScanMemory:
     
     # File completion reasons: {file_path: reason}
     file_completion_reasons: Dict[str, str] = field(default_factory=dict)
+
+    # 跨续跑记录首次成功且带路径的工具结果顺序。
+    # 显式完成也算首次触达；页面展示单独记录，不计入触达任务 ledger。
+    coverage_first_touches: List[str] = field(default_factory=list)
+
+    # 有界 schedule 窗口的跨续跑主机控制证据。
+    schedule_presented_page_indices: List[int] = field(default_factory=list)
+    schedule_window_events: List[Dict[str, Any]] = field(default_factory=list)
     
     # Module priorities: {module_name: priority (1=highest)}
     module_priorities: Dict[str, int] = field(default_factory=dict)
@@ -96,6 +105,14 @@ class AgentMemoryManager:
         if not isinstance(llm_config, dict):
             llm_config = {}
 
+        def exact_object(container: Dict[str, Any], key: str) -> Dict[str, Any]:
+            value = container.get(key, {})
+            return dict(value) if isinstance(value, dict) else {}
+
+        def exact_string(container: Dict[str, Any], key: str) -> str:
+            value = container.get(key, "")
+            return value if isinstance(value, str) else ""
+
         scan_languages = scan_config.get("scan_languages", [])
         if not isinstance(scan_languages, list):
             scan_languages = []
@@ -128,9 +145,18 @@ class AgentMemoryManager:
             "threshold": normalized_module_similarity_threshold,
             "model_name": str(module_similarity.get("model_name", "")).strip(),
             "device": str(module_similarity.get("device", "cpu")).strip(),
+            "require_embedding": bool(module_similarity.get("require_embedding", False)),
             "resolved_model_path": str(module_similarity.get("resolved_model_path", "")).strip(),
             "artifact_hash": str(module_similarity.get("artifact_hash", "")).strip(),
         }
+        raw_ablations = scan_config.get("ablations", {})
+        if not isinstance(raw_ablations, dict):
+            raw_ablations = {}
+        normalized_ablations = {
+            key: bool(raw_ablations.get(key, False))
+            for key in ("repo_semantics", "reference_semantics", "candidate_priority", "memory", "verifier")
+        }
+
 
         shared_public_memory = scan_config.get("shared_public_memory", {})
         if not isinstance(shared_public_memory, dict):
@@ -150,6 +176,15 @@ class AgentMemoryManager:
             for label, file_hash in source_hashes.items()
             if str(label).strip() and str(file_hash).strip()
         }
+        config_hashes = scan_signature.get("config_hashes", {})
+        if not isinstance(config_hashes, dict):
+            config_hashes = {}
+        normalized_config_hashes = {
+            str(label).strip(): str(file_hash).strip()
+            for label, file_hash in config_hashes.items()
+            if str(label).strip() and str(file_hash).strip()
+        }
+
 
         max_iterations = scan_config.get("max_iterations", 0)
         try:
@@ -166,27 +201,122 @@ class AgentMemoryManager:
         if normalized_critical_priority != 1:
             normalized_critical_priority = 2
 
+        reference_profile_hash = str(scan_config.get("reference_profile_hash", "")).strip()
+        candidate_file_schedule = scan_config.get("candidate_file_schedule", {})
+        if not isinstance(candidate_file_schedule, dict):
+            candidate_file_schedule = {}
+        model_visible_input_projection = scan_config.get(
+            "model_visible_input_projection",
+            {},
+        )
+        if not isinstance(model_visible_input_projection, dict):
+            model_visible_input_projection = {}
+        model_input_stage_hashes = scan_config.get("model_input_stage_hashes", {})
+        if not isinstance(model_input_stage_hashes, dict):
+            model_input_stage_hashes = {}
+
         normalized_scan_signature = {
             "scan_config": {
                 "max_iterations": normalized_max_iterations,
+                "require_full_universe_completion": bool(
+                    scan_config.get("require_full_universe_completion", False)
+                ),
                 "stop_when_critical_complete": bool(scan_config.get("stop_when_critical_complete", False)),
                 "critical_stop_mode": critical_stop_mode,
                 "critical_stop_max_priority": normalized_critical_priority,
+                "model_visible_input_projection": model_visible_input_projection,
+                "model_revision_attestation": exact_object(
+                    scan_config,
+                    "model_revision_attestation",
+                ),
+                "model_visible_input_runtime_projection": exact_object(
+                    scan_config,
+                    "model_visible_input_runtime_projection",
+                ),
+                "model_input_stage_hashes": model_input_stage_hashes,
+                "endpoint_snapshot": exact_object(
+                    scan_config,
+                    "endpoint_snapshot",
+                ),
+                "endpoint_snapshot_sha256": exact_string(
+                    scan_config,
+                    "endpoint_snapshot_sha256",
+                ),
+                "decoding_config_requested": exact_object(
+                    scan_config,
+                    "decoding_config_requested",
+                ),
+                "decoding_config_requested_sha256": exact_string(
+                    scan_config,
+                    "decoding_config_requested_sha256",
+                ),
+                "decoding_config_effective": exact_object(
+                    scan_config,
+                    "decoding_config_effective",
+                ),
+                "decoding_config_effective_sha256": exact_string(
+                    scan_config,
+                    "decoding_config_effective_sha256",
+                ),
                 "scan_languages": normalized_languages,
                 "codeql_database_names": normalized_codeql_database_names,
                 "shared_public_memory": normalized_shared_public_memory,
                 "module_similarity": normalized_module_similarity,
+                "ablations": normalized_ablations,
+                "reference_profile_hash": reference_profile_hash,
+                "candidate_file_schedule": candidate_file_schedule,
             },
             "llm": {
                 "provider": str(llm_config.get("provider", "")).strip(),
                 "model": str(llm_config.get("model", "")).strip(),
+                "model_revision": exact_string(
+                    llm_config,
+                    "model_revision",
+                ),
+                "model_revision_attestation": exact_object(
+                    llm_config,
+                    "model_revision_attestation",
+                ),
+                "endpoint_snapshot": exact_object(
+                    llm_config,
+                    "endpoint_snapshot",
+                ),
+                "endpoint_snapshot_sha256": exact_string(
+                    llm_config,
+                    "endpoint_snapshot_sha256",
+                ),
+                "decoding_config_requested": exact_object(
+                    llm_config,
+                    "decoding_config_requested",
+                ),
+                "decoding_config_requested_sha256": exact_string(
+                    llm_config,
+                    "decoding_config_requested_sha256",
+                ),
+                "decoding_config_effective": exact_object(
+                    llm_config,
+                    "decoding_config_effective",
+                ),
+                "decoding_config_effective_sha256": exact_string(
+                    llm_config,
+                    "decoding_config_effective_sha256",
+                ),
                 "base_url": str(llm_config.get("base_url", "")).strip(),
                 "temperature": llm_config.get("temperature"),
                 "top_p": llm_config.get("top_p"),
                 "max_tokens": llm_config.get("max_tokens"),
                 "enable_thinking": llm_config.get("enable_thinking"),
+                "reasoning_effort": llm_config.get("reasoning_effort"),
+                "service_tier": llm_config.get("service_tier"),
+                "fallback_on_retry_exhausted": bool(
+                    llm_config.get("fallback_on_retry_exhausted", False)
+                ),
+                "exact_decoding_enforced": bool(
+                    llm_config.get("exact_decoding_enforced", False)
+                ),
             },
             "source_hashes": normalized_source_hashes,
+            "config_hashes": normalized_config_hashes,
         }
         return normalized_scan_signature
 
@@ -204,6 +334,7 @@ class AgentMemoryManager:
         file_to_module: Dict[str, str],
         critical_stop_max_priority: int = 2,
         scan_signature: Optional[Dict[str, Any]] = None,
+        resume_enabled: bool = True,
     ) -> bool:
         """Initialize memory for a new scan or resume existing.
         
@@ -216,7 +347,7 @@ class AgentMemoryManager:
         normalized_scan_signature = self._normalize_scan_signature(
             scan_signature or {}
         )
-        if self.load():
+        if resume_enabled and self.load():
             if self._memory_matches_current_inputs(
                 target_repo=target_repo,
                 target_commit=target_commit,
@@ -238,6 +369,8 @@ class AgentMemoryManager:
                 return True
             logger.warning("Discarding stale scan memory that does not match current scan inputs")
 
+        if not resume_enabled and self.memory_file.exists():
+            logger.info("Memory ablation enabled; ignoring persisted scan memory at %s", self.memory_file)
         self.memory = ScanMemory(
             target_repo=target_repo,
             target_commit=target_commit[:12],
@@ -274,19 +407,151 @@ class AgentMemoryManager:
         )
     
     def mark_file(self, file_path: str, status: str):
-        """Update file status."""
-        if file_path in self.memory.file_status:
-            self.memory.file_status[file_path] = status
+        """更新文件状态并保持 completed <= reached。"""
+        if file_path not in self.memory.file_status:
+            return
+        previous_status = self.memory.file_status[file_path]
+        previous_touches = list(self.memory.coverage_first_touches)
+        self.memory.file_status[file_path] = status
+        if status == "completed" and file_path not in self.memory.coverage_first_touches:
+            self.memory.coverage_first_touches.append(file_path)
+        try:
             self.save()
+        except Exception:
+            self.memory.file_status[file_path] = previous_status
+            self.memory.coverage_first_touches = previous_touches
+            raise
 
     def mark_file_completed(self, file_path: str, reason: str = "") -> None:
         """Mark a tracked file as completed and persist the optional reason."""
         if file_path not in self.memory.file_status:
             return
+        previous_status = self.memory.file_status[file_path]
+        had_previous_reason = file_path in self.memory.file_completion_reasons
+        previous_reason = self.memory.file_completion_reasons.get(file_path, "")
+        previous_touches = list(self.memory.coverage_first_touches)
         self.memory.file_status[file_path] = "completed"
+        if file_path not in self.memory.coverage_first_touches:
+            self.memory.coverage_first_touches.append(file_path)
         if reason:
             self.memory.file_completion_reasons[file_path] = reason
-        self.save()
+        try:
+            self.save()
+        except Exception:
+            self.memory.file_status[file_path] = previous_status
+            if had_previous_reason:
+                self.memory.file_completion_reasons[file_path] = previous_reason
+            else:
+                self.memory.file_completion_reasons.pop(file_path, None)
+            self.memory.coverage_first_touches = previous_touches
+            raise
+
+    def record_coverage_first_touches(self, file_paths: List[str]) -> None:
+        """原子追加新的成功带路径首次触达。"""
+        if not isinstance(file_paths, list):
+            raise ValueError("coverage first touches must be a list")
+        normalized = [str(path).strip() for path in file_paths]
+        if any(not path for path in normalized):
+            raise ValueError("coverage first touches contain an empty path")
+        previous = list(self.memory.coverage_first_touches)
+        seen = set(previous)
+        changed = False
+        for path in normalized:
+            if path in seen:
+                continue
+            seen.add(path)
+            self.memory.coverage_first_touches.append(path)
+            changed = True
+        if not changed:
+            return
+        try:
+            self.save()
+        except Exception:
+            self.memory.coverage_first_touches = previous
+            raise
+
+    def record_schedule_presented_page(self, page_index: int) -> None:
+        """按连续顺序保存成功展示的 schedule 页。"""
+        if isinstance(page_index, bool) or not isinstance(page_index, int) or page_index < 0:
+            raise ValueError("presented schedule page index must be a non-negative integer")
+        previous = list(self.memory.schedule_presented_page_indices)
+        if page_index in previous:
+            return
+        expected = 0 if not previous else previous[-1] + 1
+        if page_index != expected:
+            raise ValueError("presented schedule pages must form a contiguous prefix")
+        events = self.memory.schedule_window_events
+        if (
+            page_index >= len(events)
+            or events[page_index].get("cursor_index")
+            != page_index * FROZEN_SCHEDULE_PAGE_SIZE
+        ):
+            raise ValueError("presented schedule page has no matching entered-window event")
+        self.memory.schedule_presented_page_indices.append(page_index)
+        try:
+            self.save()
+        except Exception:
+            self.memory.schedule_presented_page_indices = previous
+            raise
+
+    def record_schedule_window_event(self, event: Dict[str, Any]) -> None:
+        """原子保存一个精确连续页条目事件。"""
+        if not isinstance(event, dict):
+            raise ValueError("schedule window event must be an object")
+        normalized = json.loads(json.dumps(event, ensure_ascii=False))
+        expected_keys = {
+            "schema_version",
+            "cursor_index",
+            "window_end_index_exclusive",
+            "window_file_count",
+            "active_pending_file_count",
+            "completed_window_count",
+            "window_sha256",
+        }
+        if set(normalized) != expected_keys:
+            raise ValueError("schedule window event must use the exact key set")
+        cursor = normalized.get("cursor_index")
+        end_cursor = normalized.get("window_end_index_exclusive")
+        window_count = normalized.get("window_file_count")
+        active_count = normalized.get("active_pending_file_count")
+        completed_count = normalized.get("completed_window_count")
+        window_sha256 = normalized.get("window_sha256")
+        integer_values = (cursor, end_cursor, window_count, active_count, completed_count)
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in integer_values):
+            raise ValueError("schedule window event counters must be integers")
+        if (
+            normalized.get("schema_version") != 1
+            or cursor < 0
+            or cursor % FROZEN_SCHEDULE_PAGE_SIZE != 0
+            or window_count < 1
+            or window_count > FROZEN_SCHEDULE_PAGE_SIZE
+            or end_cursor != cursor + window_count
+            or active_count != window_count
+            or completed_count != 0
+            or not isinstance(window_sha256, str)
+            or len(window_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in window_sha256)
+        ):
+            raise ValueError("schedule window event content is invalid")
+        previous = list(self.memory.schedule_window_events)
+        for prior in previous:
+            if prior.get("cursor_index") == cursor:
+                if prior != normalized:
+                    raise ValueError("schedule window event changed for an existing cursor")
+                return
+        expected_cursor = (
+            0
+            if not previous
+            else previous[-1].get("window_end_index_exclusive")
+        )
+        if cursor != expected_cursor:
+            raise ValueError("schedule window events must be exactly contiguous")
+        self.memory.schedule_window_events.append(normalized)
+        try:
+            self.save()
+        except Exception:
+            self.memory.schedule_window_events = previous
+            raise
 
     @staticmethod
     def _normalize_finding(
@@ -328,38 +593,105 @@ class AgentMemoryManager:
         return dedupe_keys
 
     def add_finding(self, finding: Dict[str, Any]) -> bool:
-        """Record a vulnerability finding.
-
-        Returns:
-            True if finding was added, False if it was a duplicate.
-        """
+        """记录一条漏洞 finding，保存失败时回滚。"""
         normalized_finding, finding_key = self._normalize_finding(finding)
         if finding_key in self._build_existing_finding_keys():
             return False
-        
+        previous_findings = list(self.memory.findings)
         self.memory.findings.append(normalized_finding)
-        self.save()
+        try:
+            self.save()
+        except Exception:
+            self.memory.findings = previous_findings
+            raise
         return True
 
     def add_findings(self, findings: List[Dict[str, Any]]) -> int:
-        """Record multiple findings with one dedupe pass and one save."""
+        """一次去重记录多条 findings，并支持保存失败回滚。"""
         if not findings:
             return 0
-
+        normalized_batch = [self._normalize_finding(finding) for finding in findings]
         dedupe_keys = self._build_existing_finding_keys()
-        added = 0
-        for finding in findings:
-            normalized_finding, finding_key = self._normalize_finding(finding)
+        pending_findings: List[Dict[str, Any]] = []
+        for normalized_finding, finding_key in normalized_batch:
             if finding_key in dedupe_keys:
                 continue
-            self.memory.findings.append(normalized_finding)
+            pending_findings.append(normalized_finding)
             dedupe_keys.add(finding_key)
-            added += 1
-
-        if added:
+        if not pending_findings:
+            return 0
+        previous_findings = list(self.memory.findings)
+        self.memory.findings.extend(pending_findings)
+        try:
             self.save()
-        return added
-    
+        except Exception:
+            self.memory.findings = previous_findings
+            raise
+        return len(pending_findings)
+
+    def add_findings_with_first_touches(
+        self,
+        findings: List[Dict[str, Any]],
+        file_paths: List[str],
+    ) -> int:
+        """在一次可回滚转换中保存路径触达及其 findings。"""
+        if not isinstance(findings, list) or not isinstance(file_paths, list):
+            raise ValueError("atomic finding transition requires list inputs")
+        normalized_paths = [str(path).strip() for path in file_paths]
+        if any(not path for path in normalized_paths):
+            raise ValueError("atomic finding transition contains an empty path")
+        path_set = set(normalized_paths)
+        normalized_findings: List[
+            tuple[Dict[str, Any], tuple[str, str, str, Optional[int]]]
+        ] = []
+        for finding in findings:
+            if not isinstance(finding, dict):
+                raise ValueError("atomic finding transition contains an invalid finding")
+            normalized_finding, finding_key = self._normalize_finding(finding)
+            finding_path = normalized_finding.get("file_path", "")
+            if not finding_path or finding_path not in path_set:
+                raise ValueError("atomic finding transition has an unbound finding path")
+            normalized_findings.append((normalized_finding, finding_key))
+
+        dedupe_keys = self._build_existing_finding_keys()
+        pending_findings: List[Dict[str, Any]] = []
+        for normalized_finding, finding_key in normalized_findings:
+            if finding_key in dedupe_keys:
+                continue
+            pending_findings.append(normalized_finding)
+            dedupe_keys.add(finding_key)
+        seen_touches = set(self.memory.coverage_first_touches)
+        pending_touches: List[str] = []
+        for path in normalized_paths:
+            if path in seen_touches:
+                continue
+            seen_touches.add(path)
+            pending_touches.append(path)
+        if not pending_findings and not pending_touches:
+            return 0
+
+        previous_findings = list(self.memory.findings)
+        previous_touches = list(self.memory.coverage_first_touches)
+        self.memory.coverage_first_touches.extend(pending_touches)
+        self.memory.findings.extend(pending_findings)
+        try:
+            self.save()
+        except Exception:
+            self.memory.findings = previous_findings
+            self.memory.coverage_first_touches = previous_touches
+            raise
+        return len(pending_findings)
+
+    def add_issue(self, issue: str):
+        """记录扫描问题，保存失败时回滚。"""
+        previous_issues = list(self.memory.issues)
+        self.memory.issues.append(issue)
+        try:
+            self.save()
+        except Exception:
+            self.memory.issues = previous_issues
+            raise
+
     def get_scanned_files(self) -> List[str]:
         """Get list of files that have been scanned (completed status)."""
         return [f for f, s in self.memory.file_status.items() if s == "completed"]
@@ -375,10 +707,6 @@ class AgentMemoryManager:
             for f in self.memory.findings
         ]
     
-    def add_issue(self, issue: str):
-        """Record an issue encountered during scan."""
-        self.memory.issues.append(issue)
-        self.save()
 
     def count_statuses(self, file_status: Dict[str, str]) -> Dict[str, int]:
         """Count file status values used for scan progress summaries."""
@@ -451,23 +779,18 @@ class AgentMemoryManager:
         }
     
     def is_critical_complete(self, max_priority: int = 2) -> bool:
-        """Check if the configured critical scope is satisfied.
-
-        Args:
-            max_priority: Highest priority included in the critical scope.
-
-        Returns:
-            Whether all files within the configured critical scope are complete.
-        """
+        """仅当非空关键范围内的文件全部完成时返回真。"""
         normalized_max_priority = 1 if max_priority <= 1 else 2
+        critical_total = 0
         for f, status in self.memory.file_status.items():
             module = self.memory.file_to_module.get(f, "")
             priority = self.memory.module_priorities.get(module, 3)
             if priority > normalized_max_priority:
                 continue
+            critical_total += 1
             if status == "pending":
                 return False
-        return True
+        return critical_total > 0
     
     def generate_summary(self) -> str:
         """Generate summary using LLM."""
@@ -555,11 +878,15 @@ If coverage status is partial or empty, explicitly say the scan is incomplete an
                 "### ⚠️ Incomplete Critical Files",
                 "",
             ])
+            pending_critical_files = 0
             for f, status in self.memory.file_status.items():
                 module = self.memory.file_to_module.get(f, "")
                 priority = self.memory.module_priorities.get(module, 3)
                 if priority <= critical_stop_max_priority and status == "pending":
+                    pending_critical_files += 1
                     lines.append(f"- [ ] `{f}`")
+            if pending_critical_files == 0:
+                lines.append("- No files are bound to the configured critical scope.")
             lines.append("")
         
         # Findings

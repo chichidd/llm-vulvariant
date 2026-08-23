@@ -8,6 +8,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from llm.client import LLMResponseIdentityError
+
 from utils.logger import get_logger
 from utils.llm_utils import extract_json_from_text
 
@@ -282,6 +284,8 @@ def compress_iteration_conversation(
         compressed_data["iteration_number"] = iteration
         compressed_data["compression_timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
         return compressed_data
+    except LLMResponseIdentityError:
+        raise
     except Exception as exc:  # pylint: disable=broad-except
         if verbose:
             logger.warning(f"Failed to compress iteration {iteration}: {exc}")

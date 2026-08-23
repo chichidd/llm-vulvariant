@@ -9,11 +9,15 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
+from config_snapshot import (
+    SCANNER_CONFIG_FILENAMES,
+    read_config_file_bytes,
+)
+from source_snapshot import hash_python_source_tree as hash_python_source_tree
+
 
 PROFILE_FINGERPRINT_SCHEMA_VERSION = 1
 UNREADABLE_FILE_HASH = "__unreadable__"
-
-
 def _stable_json_dumps(data: Any) -> str:
     """Serialize data into a stable JSON string for hashing."""
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
@@ -22,6 +26,27 @@ def _stable_json_dumps(data: Any) -> str:
 def stable_data_hash(data: Any) -> str:
     """Hash structured data using stable JSON serialization."""
     return hashlib.sha256(_stable_json_dumps(data).encode("utf-8")).hexdigest()
+
+
+def hash_scanner_config_files(config_root: Path) -> Dict[str, str]:
+    """用原始文件字节哈希精确扫描配置集。"""
+    root = Path(config_root)
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError("scanner config root must be a regular directory")
+    hashes: Dict[str, str] = {}
+    for filename in SCANNER_CONFIG_FILENAMES:
+        path = root / filename
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(
+                f"required scanner config is not a regular file: {filename}"
+            )
+        hashes[filename] = hashlib.sha256(
+            read_config_file_bytes(
+                path,
+                label=f"scanner config {filename}",
+            )
+        ).hexdigest()
+    return hashes
 
 
 def _hash_file(path: Path) -> str:
@@ -50,11 +75,32 @@ def _llm_fingerprint(llm_client: Any) -> Dict[str, Any]:
     return {
         "provider": getattr(config, "provider", ""),
         "model": getattr(config, "model", ""),
+        "model_revision": getattr(config, "model_revision", None),
         "base_url": getattr(config, "base_url", ""),
         "temperature": getattr(config, "temperature", None),
         "top_p": getattr(config, "top_p", None),
         "max_tokens": getattr(config, "max_tokens", None),
+        "timeout": getattr(config, "timeout", None),
+        "context_limit": getattr(config, "context_limit", None),
+        "max_retries": getattr(config, "max_retries", None),
+        "initial_delay": getattr(config, "initial_delay", None),
+        "max_delay": getattr(config, "max_delay", None),
+        "backoff_factor": getattr(config, "backoff_factor", None),
+        "fallback_provider": getattr(config, "fallback_provider", None),
+        "fallback_on_retry_exhausted": getattr(
+            config,
+            "fallback_on_retry_exhausted",
+            None,
+        ),
         "enable_thinking": getattr(config, "enable_thinking", None),
+        "reasoning_effort": getattr(config, "reasoning_effort", None),
+        "service_tier": getattr(config, "service_tier", None),
+        "enforce_exact_decoding": getattr(
+            config,
+            "enforce_exact_decoding",
+            False,
+        ),
+        "sdk_max_retries": getattr(llm_client, "sdk_max_retries", None),
     }
 
 
@@ -246,7 +292,9 @@ def build_software_profile_fingerprint(
             profiler_root / "software" / "module_analyzer" / "skill.py",
             profiler_root / "software" / "module_analyzer" / "taxonomy_loader.py",
             profiler_root / "software" / "module_analyzer" / "toolkit.py",
+            src_root / "llm" / "client.py",
             src_root / "utils" / "codeql_native.py",
+            src_root / "utils" / "llm_utils.py",
             repo_root / ".claude" / "skills" / "ai-infra-module-modeler" / "scripts" / "ai_infra_taxonomy.py",
             repo_root / ".claude" / "skills" / "ai-infra-module-modeler" / "scripts" / "scan_repo.py",
         ]
@@ -294,11 +342,14 @@ def build_vulnerability_profile_fingerprint(
 ) -> Dict[str, Any]:
     """Build the cache invalidation fingerprint for vulnerability profiles."""
     profiler_root = Path(__file__).resolve().parent
+    src_root = profiler_root.parent
     source_hashes = _hash_files(
         [
             profiler_root / "vulnerability" / "analyzer.py",
             profiler_root / "vulnerability" / "models.py",
             profiler_root / "vulnerability" / "prompts.py",
+            src_root / "llm" / "client.py",
+            src_root / "utils" / "llm_utils.py",
         ]
     )
     source_profile_fingerprint = extract_profile_fingerprint(repo_profile)

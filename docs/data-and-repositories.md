@@ -7,32 +7,41 @@
 3. 哪些路径必须是 git working tree
 4. 什么时候用批量脚本准备数据
 
+先显式选择这份自包含 revision：
+
+```bash
+export CCS_REVISION_ROOT=/absolute/path/to/ccs-revision
+cd "$CCS_REVISION_ROOT/code/llm-vulvariant"
+```
+
 ## 1. 默认目录布局
 
-默认路径来自 `config/paths.yaml`。按当前配置，项目默认假设你在 `..` 下组织数据：
+默认路径来自 `config/paths.yaml`。按当前配置，项目默认假设你在 `$CCS_REVISION_ROOT` 下组织数据：
 
 ```text
-../
-├── data/
-│   ├── vuln.json
-│   └── repos/
-├── profiles/
+$CCS_REVISION_ROOT/
+├── benchmark/input/vuln.json
+├── code/llm-vulvariant/
+├── evidence/profiles/
 │   ├── soft/
 │   └── vuln/
-├── codeql_dbs/
+├── repos/
+│   ├── general/
+│   └── nvidia/
 ├── models/
-└── llm-vulvariant/
+└── results/
+    └── codeql-dbs/
 ```
 
 关键路径含义：
 
 | 路径 | 用途 |
 |------|------|
-| `data/vuln.json` | 漏洞条目输入 |
-| `data/repos/` | 默认 source repo 根目录，也可以同时作为 target repo 根目录 |
-| `profiles/soft/` | 软件画像输出目录 |
-| `profiles/vuln/` | 漏洞画像输出目录 |
-| `results/` | 扫描结果、exploitability 结果、聚合提交材料 |
+| `benchmark/input/vuln.json` | 漏洞条目输入 |
+| `repos/general/` | 默认 source repo 根目录，也可以同时作为 target repo 根目录 |
+| `evidence/profiles/soft/` | 软件画像输出目录 |
+| `evidence/profiles/vuln/` | 漏洞画像输出目录 |
+| `results/` | 扫描、CodeQL、runtime、exploitability 与聚合提交材料 |
 | `models/` | 自动目标选择使用的本地 embedding 模型目录 |
 
 如果你不用默认路径，可以在命令行覆盖：
@@ -53,9 +62,9 @@
 ```json
 [
   {
-    "repo_name": "NeMo",
+    "repo_name": "REPO_NAME",
     "commit": "a1b2c3d4e5f6",
-    "cve_id": "CVE-2025-23361",
+    "cve_id": "CVE_ID",
     "call_chain": [
       "nemo/api/server.py#handle_request",
       "nemo/runtime/loader.py#load_model",
@@ -86,18 +95,18 @@ source repo 必须能够按 `repo_name` 找到：
 <repo-base-path>/<repo_name>
 ```
 
-例如 `repo_name=NeMo` 时，默认路径是：
+例如 `repo_name=REPO_NAME` 时，默认路径是：
 
 ```text
-../data/repos/NeMo
+$CCS_REVISION_ROOT/repos/general/REPO_NAME
 ```
 
 ### target repo
 
 target repo 有两种常见方式：
 
-- 与 source repo 放在同一个根目录，直接复用 `data/repos`
-- 单独放到另一个根目录，例如 `data/repos-nvidia`、`data/repos-microsoft`
+- 与 source repo 放在同一个根目录，直接复用 `repos/general`
+- 单独放到另一个根目录，例如 `repos/nvidia`、`repos/microsoft`
 
 对应地：
 
@@ -124,7 +133,7 @@ target repo 有两种常见方式：
 默认输出结构：
 
 ```text
-profiles/
+evidence/profiles/
 ├── soft/<repo>/<commit>/software_profile.json
 └── vuln/<repo>/<cve>/vulnerability_profile.json
 
@@ -161,7 +170,7 @@ results/
 示例：
 
 ```bash
-ROOT=../data/repos-nvidia bash scripts/update_repos.sh
+ROOT=$CCS_REVISION_ROOT/repos/nvidia bash scripts/update_repos.sh
 ```
 
 ### `scripts/run_all_vuln_software_profile.sh`
@@ -178,11 +187,12 @@ ROOT=../data/repos-nvidia bash scripts/update_repos.sh
 
 ```bash
 bash scripts/run_all_vuln_software_profile.sh \
-  --vuln-json ../data/vuln.json \
-  --repo-base-path ../data/repos \
-  --profile-base-path ../profiles \
+  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --repo-base-path $CCS_REVISION_ROOT/repos/general \
+  --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --soft-profile-dirname soft \
-  --llm-provider deepseek
+  --llm-provider lab \
+  --llm-name GLM-5.2
 ```
 
 ### `scripts/run_all_vulnerability_profiles.sh`
@@ -198,11 +208,12 @@ bash scripts/run_all_vuln_software_profile.sh \
 
 ```bash
 bash scripts/run_all_vulnerability_profiles.sh \
-  --vuln-json ../data/vuln.json \
-  --profile-base-path ../profiles \
+  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --soft-profile-dirname soft \
   --vuln-profile-dirname vuln \
-  --llm-provider deepseek
+  --llm-provider lab \
+  --llm-name GLM-5.2
 ```
 
 ### `scripts/run_all_software_profiles.sh`
@@ -219,9 +230,10 @@ bash scripts/run_all_vulnerability_profiles.sh \
 
 ```bash
 bash scripts/run_all_software_profiles.sh \
-  --root ../data/repos-nvidia \
-  --output-dir ../profiles/soft-nvidia \
-  --llm-provider deepseek
+  --root $CCS_REVISION_ROOT/repos/nvidia \
+  --output-dir $CCS_REVISION_ROOT/evidence/profiles/soft-nvidia \
+  --llm-provider lab \
+  --llm-name GLM-5.2
 ```
 
 ## 7. 准备数据时最容易踩的坑

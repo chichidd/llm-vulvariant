@@ -2,6 +2,7 @@ import json
 import subprocess
 
 from utils.claude_cli import (
+    DEFAULT_SELECTED_MODEL_HINT,
     aggregate_usage_summaries,
     coerce_aggregated_usage_summary,
     count_claude_cli_attempts,
@@ -9,6 +10,10 @@ from utils.claude_cli import (
     run_claude_cli,
     summarize_claude_usage,
 )
+
+
+def test_revision_claude_default_model_hint_is_glm_5_2():
+    assert DEFAULT_SELECTED_MODEL_HINT == "GLM-5.2"
 
 
 def test_summarize_claude_usage_prefers_deepseek_model_usage():
@@ -65,6 +70,31 @@ def test_summarize_claude_usage_reuses_selected_model_cost_for_session_totals():
     assert summary["total_cost_usd"] == 0.014061
     assert summary["session_usage"]["cost_usd"] == 0.014061
     assert summary["selected_model_usage"]["cost_usd"] == 0.014061
+
+
+def test_summarize_claude_usage_sums_all_model_costs_without_flat_total():
+    summary = summarize_claude_usage(
+        {
+            "usage": {"input_tokens": 110, "output_tokens": 55},
+            "modelUsage": {
+                "orchestrator-model": {
+                    "inputTokens": 10,
+                    "outputTokens": 5,
+                    "costUSD": 0.25,
+                },
+                "backend-model": {
+                    "inputTokens": 100,
+                    "outputTokens": 50,
+                    "costUSD": 1.5,
+                },
+            }
+        },
+        selected_model="backend-model",
+    )
+
+    assert summary["selected_model_usage"]["cost_usd"] == 1.5
+    assert summary["total_cost_usd"] == 1.75
+    assert summary["session_usage"]["cost_usd"] == 1.75
 
 
 def test_summarize_claude_usage_uses_single_available_model():
@@ -945,7 +975,10 @@ def test_run_claude_cli_writes_record(monkeypatch, tmp_path):
         stdout = '{"type":"result","subtype":"success","result":"API_KEY: super-secret-token","modelUsage":{"deepseek-chat":{"inputTokens":3,"outputTokens":4}}}'
         stderr = ""
 
-    def _fake_run(*args, **kwargs):
+    calls = []
+
+    def _fake_run(command, *args, **kwargs):
+        calls.append((list(command), dict(kwargs)))
         return _Result()
 
     monkeypatch.setattr("utils.claude_cli.subprocess.run", _fake_run)
@@ -962,11 +995,13 @@ def test_run_claude_cli_writes_record(monkeypatch, tmp_path):
     saved = record_path.read_text(encoding="utf-8")
     assert '"prompt_sha256":' in saved
     assert f'"prompt_length": {len(prompt)}' in saved
-    assert f"<prompt-redacted:{len(prompt)} chars>" in saved
     assert '"prompt":' not in saved
     assert "super-secret-token" not in saved
     assert "API_KEY: [REDACTED]" in saved
     assert '"output_tokens": 4' in saved
+    assert calls[0][1]["input"] == prompt
+    assert all(prompt not in argument for argument in calls[0][0])
+    assert prompt not in json.loads(saved)["command"]
 
 
 def test_run_claude_cli_preserves_json_stdout_after_redaction(monkeypatch, tmp_path):
@@ -998,6 +1033,43 @@ def test_run_claude_cli_preserves_json_stdout_after_redaction(monkeypatch, tmp_p
     assert sanitized_stdout["result"] == "API_KEY: [REDACTED]"
     assert sanitized_stdout["tool_output"] == "Authorization: [REDACTED]"
     assert sanitized_stdout["modelUsage"]["deepseek-chat"]["outputTokens"] == 4
+
+
+def test_run_claude_cli_strips_host_credentials_from_subprocess(monkeypatch, tmp_path):
+    captured_env = None
+
+    class _Result:
+        returncode = 0
+        stdout = '{"type":"result","subtype":"success","result":"ok"}'
+        stderr = ""
+
+    def _fake_run(*args, **kwargs):
+        nonlocal captured_env
+        captured_env = kwargs["env"]
+        return _Result()
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-profile"))
+    monkeypatch.setenv("LAB_LLM_API_KEY", "lab-secret")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-secret")
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(tmp_path / "ssh-agent.sock"))
+    monkeypatch.setattr("utils.claude_cli.subprocess.run", _fake_run)
+
+    response = run_claude_cli(prompt="safe env", cwd=str(tmp_path))
+
+    assert response.success is True
+    assert captured_env is not None
+    assert captured_env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-profile")
+    assert "PATH" in captured_env
+    for name in (
+        "LAB_LLM_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "SSH_AUTH_SOCK",
+    ):
+        assert name not in captured_env
 
 
 def test_run_claude_cli_redacts_structured_api_key_fields(monkeypatch, tmp_path):
@@ -1126,6 +1198,7 @@ def test_run_claude_cli_uses_explicit_model_arg_for_selection(monkeypatch, tmp_p
 def test_run_claude_cli_falls_back_to_plain_text_when_json_output_is_unsupported(monkeypatch, tmp_path):
     record_path = tmp_path / "claude_cli_invocation.json"
     commands = []
+    inputs = []
 
     class _JsonUnsupportedResult:
         returncode = 2
@@ -1141,6 +1214,7 @@ def test_run_claude_cli_falls_back_to_plain_text_when_json_output_is_unsupported
 
     def _fake_run(cmd, *args, **kwargs):
         commands.append(cmd)
+        inputs.append(kwargs.get("input"))
         return results.pop(0)
 
     monkeypatch.setattr("utils.claude_cli.subprocess.run", _fake_run)
@@ -1162,12 +1236,14 @@ def test_run_claude_cli_falls_back_to_plain_text_when_json_output_is_unsupported
     assert response.usage_summary["calls_total"] == 2
     assert "--output-format" in commands[0]
     assert "--output-format" not in commands[1]
+    assert inputs == ["fallback run", "fallback run"]
+    assert all("fallback run" not in command for command in commands)
 
     saved_record = json.loads(record_path.read_text(encoding="utf-8"))
     assert saved_record["output_format"] == "text"
     assert saved_record["fallback_from_json_output"] is True
     assert saved_record["prior_attempts"][0]["output_format"] == "json"
-    assert saved_record["prior_attempts"][0]["command"][-1].startswith("<prompt-redacted:")
+    assert "fallback run" not in saved_record["prior_attempts"][0]["command"]
 
 
 def test_run_claude_cli_counts_failed_plain_text_fallback_attempt(monkeypatch, tmp_path):

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+[[ "$SCRIPT_PATH" == */* ]] || SCRIPT_PATH="./$SCRIPT_PATH"
+SCRIPT_DIR="$(cd -- "${SCRIPT_PATH%/*}" && pwd -P)"
 APP_DIR="${APP_DIR:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
-ROOT="${ROOT:-$SCRIPT_DIR/../data/repos}"
+REVISION_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+ROOT="${ROOT:-$REVISION_ROOT/repos/general}"
 
 if command -v realpath >/dev/null 2>&1; then
   ROOT="$(realpath -m "$ROOT")"
@@ -46,7 +50,6 @@ sys.path.insert(0, str(app_dir / "src"))
 from config import _path_config
 from utils import repo_lock as repo_lock_module
 
-_path_config["repo_root"] = app_dir
 
 with repo_lock_module.hold_repo_lock(repo_dir, purpose="update_repos"):
     subprocess.run(["git", "-C", str(repo_dir), "pull", "--ff-only"], check=True)

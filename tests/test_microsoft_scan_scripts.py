@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import stat
 import subprocess
@@ -49,13 +50,16 @@ def _write_fake_python(bin_dir: Path, name: str = "python") -> Path:
                 "args = sys.argv[1:]",
                 "with log_path.open('a', encoding='utf-8') as handle:",
                 "    handle.write(json.dumps(args) + '\\n')",
-                "if args[:2] == ['-m', 'cli.batch_scanner'] and os.environ.get('FAKE_BATCH_SCANNER_EXIT'):",
+                "if args[:2] == ['-m', 'cli.batch_scanner']:",
                 "    scan_output = Path(args[args.index('--scan-output-dir') + 1])",
-                "    if os.environ.get('FAKE_BATCH_SCANNER_WRITE_PARTIAL') == '1':",
-                "        out = scan_output / 'CVE-TEST' / 'demo-repo-abcdef123456'",
-                "        out.mkdir(parents=True, exist_ok=True)",
-                "        (out / 'agentic_vuln_findings.json').write_text('{\"vulnerabilities\": []}', encoding='utf-8')",
-                "    raise SystemExit(int(os.environ['FAKE_BATCH_SCANNER_EXIT']))",
+                "    if os.environ.get('FAKE_BATCH_SCANNER_EXIT'):",
+                "        if os.environ.get('FAKE_BATCH_SCANNER_WRITE_PARTIAL') == '1':",
+                "            out = scan_output / 'CVE-TEST' / 'demo-repo-abcdef123456'",
+                "            out.mkdir(parents=True, exist_ok=True)",
+                "            (out / 'agentic_vuln_findings.json').write_text('{\"vulnerabilities\": []}', encoding='utf-8')",
+                "        raise SystemExit(int(os.environ['FAKE_BATCH_SCANNER_EXIT']))",
+                "    scan_output.mkdir(parents=True, exist_ok=True)",
+                "    (scan_output / 'scan-output-commit-bindings-fixture.json').write_text('{}', encoding='utf-8')",
             ]
         )
         + "\n",
@@ -72,20 +76,22 @@ def _fake_python_bin(fake_python: Path) -> str:
 def _prepare_pipeline_root(tmp_path: Path) -> Path:
     pipeline_root = tmp_path / "pipeline-root"
     (pipeline_root / "llm-vulvariant").mkdir(parents=True)
-    (pipeline_root / "data" / "repos").mkdir(parents=True)
-    (pipeline_root / "data" / "repos-microsoft").mkdir(parents=True)
-    (pipeline_root / "profiles").mkdir(parents=True)
-    vuln_json = pipeline_root / "data" / "vuln.json"
+    (pipeline_root / "repos" / "general").mkdir(parents=True)
+    (pipeline_root / "repos" / "microsoft").mkdir(parents=True)
+    (pipeline_root / "evidence" / "profiles").mkdir(parents=True)
+    vuln_json = pipeline_root / "benchmark" / "input" / "vuln.json"
+    vuln_json.parent.mkdir(parents=True)
     vuln_json.write_text("[]", encoding="utf-8")
     return pipeline_root
 
 
 def _prepare_repo_root(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo-root"
-    (repo_root / "data" / "repos").mkdir(parents=True)
-    (repo_root / "data" / "repos-microsoft").mkdir(parents=True)
-    (repo_root / "profiles").mkdir(parents=True)
-    vuln_json = repo_root / "data" / "vuln.json"
+    (repo_root / "repos" / "general").mkdir(parents=True)
+    (repo_root / "repos" / "microsoft").mkdir(parents=True)
+    (repo_root / "evidence" / "profiles").mkdir(parents=True)
+    vuln_json = repo_root / "benchmark" / "input" / "vuln.json"
+    vuln_json.parent.mkdir(parents=True)
     vuln_json.write_text("[]", encoding="utf-8")
     return repo_root
 
@@ -156,11 +162,11 @@ def test_run_microsoft_scan_full_executes_scan_and_exploitability(tmp_path: Path
 
     assert "--target-repos-root" in batch_call
     assert batch_call[batch_call.index("--target-repos-root") + 1] == str(
-        pipeline_root / "data" / "repos-microsoft"
+        pipeline_root / "repos" / "microsoft"
     )
     assert "--target-soft-profiles-dir" in batch_call
     assert batch_call[batch_call.index("--target-soft-profiles-dir") + 1] == str(
-        pipeline_root / "profiles" / "soft-microsoft"
+        pipeline_root / "evidence" / "profiles" / "soft-microsoft"
     )
     assert "--scan-all-profiled-targets" in batch_call
     assert "--max-workers" in batch_call
@@ -169,6 +175,9 @@ def test_run_microsoft_scan_full_executes_scan_and_exploitability(tmp_path: Path
     assert batch_call[batch_call.index("--scan-workers") + 1] == "8"
     assert "--target-scan-timeout" in batch_call
     assert batch_call[batch_call.index("--target-scan-timeout") + 1] == "7200"
+    assert batch_call[batch_call.index("--llm-provider") + 1] == "lab"
+    assert batch_call[batch_call.index("--llm-name") + 1] == "GLM-5.2"
+    assert batch_call[batch_call.index("--run-id") + 1] == "microsoft-full-20260406-000000"
 
     assert "--scan-results-dir" in exploitability_call
     assert exploitability_call[exploitability_call.index("--scan-results-dir") + 1] == str(
@@ -176,11 +185,11 @@ def test_run_microsoft_scan_full_executes_scan_and_exploitability(tmp_path: Path
     )
     assert "--repo-base-path" in exploitability_call
     assert exploitability_call[exploitability_call.index("--repo-base-path") + 1] == str(
-        pipeline_root / "data" / "repos-microsoft"
+        pipeline_root / "repos" / "microsoft"
     )
     assert "--soft-profile-dir" in exploitability_call
     assert exploitability_call[exploitability_call.index("--soft-profile-dir") + 1] == str(
-        pipeline_root / "profiles" / "soft-microsoft"
+        pipeline_root / "evidence" / "profiles" / "soft-microsoft"
     )
     assert "--generate-report" in exploitability_call
     assert "--report-only-exploitable" in exploitability_call
@@ -192,6 +201,18 @@ def test_run_microsoft_scan_full_executes_scan_and_exploitability(tmp_path: Path
     assert exploitability_call[exploitability_call.index("--claude-runtime-mode") + 1] == "folder"
     assert "--run-id" in exploitability_call
     assert exploitability_call[exploitability_call.index("--run-id") + 1] == "microsoft-full-20260406-000000"
+    manifest_path = (
+        pipeline_root
+        / "results"
+        / "scan-microsoft-full-20260406-000000"
+        / "scan-output-commit-bindings-fixture.json"
+    )
+    assert exploitability_call[
+        exploitability_call.index("--scan-output-commit-manifest") + 1
+    ] == str(manifest_path)
+    assert exploitability_call[
+        exploitability_call.index("--scan-output-commit-manifest-sha256") + 1
+    ] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     assert "--timeout" in exploitability_call
     assert exploitability_call[exploitability_call.index("--timeout") + 1] == "321"
 
@@ -228,7 +249,7 @@ def test_run_microsoft_scan_full_accepts_repo_root_without_nested_llm_vulvariant
     assert any(call[:2] == ["-m", "cli.batch_scanner"] for call in calls)
 
 
-def test_run_microsoft_scan_full_uses_default_provider_and_empty_model_when_unset(tmp_path: Path) -> None:
+def test_run_microsoft_scan_full_uses_fixed_formal_glm_when_unset(tmp_path: Path) -> None:
     bash_path = _require_script_runtime()
     pipeline_root = _prepare_pipeline_root(tmp_path)
     bin_dir = tmp_path / "bin"
@@ -260,7 +281,7 @@ def test_run_microsoft_scan_full_uses_default_provider_and_empty_model_when_unse
     assert "--llm-provider" in batch_call
     assert batch_call[batch_call.index("--llm-provider") + 1] == "lab"
     assert "--llm-name" in batch_call
-    assert batch_call[batch_call.index("--llm-name") + 1] == ""
+    assert batch_call[batch_call.index("--llm-name") + 1] == "GLM-5.2"
 
 
 def test_run_microsoft_scan_full_default_run_id_is_unique_when_run_tag_unset(tmp_path: Path) -> None:
@@ -331,7 +352,7 @@ def test_run_microsoft_scan_full_aborts_on_scan_failure_even_with_partial_output
     assert "abort before exploitability" in result.stdout
 
 
-def test_run_microsoft_scan_full_allows_partial_exploitability_when_explicitly_enabled(tmp_path: Path) -> None:
+def test_run_microsoft_scan_full_ignores_legacy_partial_override(tmp_path: Path) -> None:
     bash_path = _require_script_runtime()
     pipeline_root = _prepare_pipeline_root(tmp_path)
     bin_dir = tmp_path / "bin"
@@ -359,8 +380,8 @@ def test_run_microsoft_scan_full_allows_partial_exploitability_when_explicitly_e
 
     assert result.returncode == 7
     calls = _load_logged_calls(calls_log)
-    assert any(call[:2] == ["-m", "cli.exploitability"] for call in calls)
-    assert "Partial exploitability explicitly allowed" in result.stdout
+    assert not any(call[:2] == ["-m", "cli.exploitability"] for call in calls)
+    assert "abort before exploitability" in result.stdout
 
 
 def test_run_microsoft_scan_full_does_not_auto_activate_named_conda_env(tmp_path: Path) -> None:
@@ -369,7 +390,7 @@ def test_run_microsoft_scan_full_does_not_auto_activate_named_conda_env(tmp_path
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     calls_log = tmp_path / "calls.log"
-    fake_python = _write_fake_python(bin_dir)
+    _write_fake_python(bin_dir)
 
     fake_conda = bin_dir / "conda"
     fake_conda.write_text(

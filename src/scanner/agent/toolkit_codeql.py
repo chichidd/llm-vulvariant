@@ -29,6 +29,13 @@ LOW_SIGNAL_CODEQL_RULE_IDS_FOR_MEMORY = frozenset({
 class ToolkitCodeQLMixin:
     """CodeQL query workspace, database, and result helpers."""
 
+    @staticmethod
+    def _codeql_artifact_stem(query_name: str) -> str:
+        """Return a readable, collision-resistant stem for query artifacts."""
+        raw_name = str(query_name)
+        slug = re.sub(r"[^\w\-]", "_", raw_name).strip("_")[:80] or "query"
+        return f"{slug}-{stable_data_hash(raw_name)[:12]}"
+
     def _init_codeql(self) -> None:
         """Initialize CodeQL analyzer and query directory state."""
         try:
@@ -151,6 +158,10 @@ dependencies:
         query_language = self._resolve_query_language(language)
         if query_language in self._codeql_database_names:
             return self._codeql_database_names[query_language]
+        if language is not None:
+            return self._build_profile_generated_codeql_database_name(
+                language=query_language
+            )
         primary_language = self._primary_language()
         if primary_language in self._codeql_database_names:
             return self._codeql_database_names[primary_language]
@@ -342,9 +353,7 @@ dependencies:
     def _choose_query_language(self, query: str) -> str:
         """Choose the most suitable language for query pack/database routing."""
         inferred = self._infer_query_language(query)
-        if inferred and inferred in self._languages:
-            return inferred
-        if inferred and inferred in self._codeql_database_names:
+        if inferred:
             return inferred
         for lang in self._languages:
             if self._get_codeql_database_path(lang):
@@ -368,7 +377,8 @@ dependencies:
                 success=False,
                 content="",
                 error=(
-                    f"CodeQL database not found. Database name: {db_name}, "
+                    f"CodeQL database not found for language '{query_language}'. "
+                    f"Database name: {db_name}, "
                     f"Search path: {self._codeql_db_base_path}"
                 ),
             )
@@ -388,7 +398,7 @@ dependencies:
                 error=f"CodeQL query directory not initialized for language: {query_language}",
             )
 
-        safe_name = re.sub(r"[^\w\-]", "_", query_name)
+        safe_name = self._codeql_artifact_stem(query_name)
         query_path = query_dir / f"{safe_name}.ql"
         query_path.write_text(query, encoding="utf-8")
 
@@ -421,19 +431,34 @@ dependencies:
                 query_language=query_language,
                 database_name=db_name,
             )
-            self._record_codeql_findings_in_memory(query_name, findings)
-            summary = self._format_codeql_summary(query_name, findings)
-            return ToolResult(
+            visible_findings = self._scheduled_codeql_findings(findings)
+            summary = self._format_codeql_summary(query_name, visible_findings)
+            tool_result = ToolResult(
                 success=True,
                 content=summary,
                 metadata={
                     "query_name": query_name,
                     "query_language": query_language,
                     "database_name": db_name,
-                    "finding_count": len(findings),
-                    "findings": findings[:20],
+                    "finding_count": len(visible_findings),
+                    "findings": (
+                        visible_findings
+                        if self._file_enumeration_rank
+                        else visible_findings[:20]
+                    ),
+                    **(
+                        {
+                            "files": self.order_repo_relative_paths(
+                                [finding.get("file", "") for finding in visible_findings]
+                            )
+                        }
+                        if self._file_enumeration_rank
+                        else {}
+                    ),
                 },
             )
+            self._record_codeql_findings_in_memory(query_name, visible_findings)
+            return tool_result
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("CodeQL query execution error: %s", exc)
             return ToolResult(
@@ -494,7 +519,7 @@ dependencies:
         results_dir = output_dir / "codeql-results"
         results_dir.mkdir(parents=True, exist_ok=True)
 
-        safe_name = re.sub(r"[^\w\-]", "_", query_name)
+        safe_name = self._codeql_artifact_stem(query_name)
         sarif_file = results_dir / f"{safe_name}.sarif"
         sarif_file.write_text(
             json.dumps(sarif_result, indent=2, ensure_ascii=False),
@@ -516,15 +541,23 @@ dependencies:
         )
 
         logger.info("CodeQL results saved to %s/%s.*", results_dir, safe_name)
-
-    def _record_codeql_findings_in_memory(self, query_name: str, findings: List[Dict[str, Any]]) -> None:
-        """Record CodeQL findings in agent memory."""
+    def _record_codeql_findings_in_memory(
+        self,
+        query_name: str,
+        findings: List[Dict[str, Any]],
+    ) -> None:
+        """Atomically record visible CodeQL paths and eligible findings."""
         if not self._memory_manager:
             return
 
+        visible_paths: List[str] = []
         filtered_count = 0
         finding_records = []
         for finding in findings:
+            file_path = str(finding.get("file", "") or "").strip()
+            if not file_path:
+                raise ValueError("CodeQL finding is missing a repository path")
+            visible_paths.append(file_path)
             rule_id = str(finding.get("rule_id", "unknown") or "unknown").strip()
             if rule_id in LOW_SIGNAL_CODEQL_RULE_IDS_FOR_MEMORY:
                 filtered_count += 1
@@ -532,7 +565,7 @@ dependencies:
             finding_records.append({
                 "source": "codeql",
                 "query_name": query_name,
-                "file_path": finding.get("file", ""),
+                "file_path": file_path,
                 "vulnerability_type": rule_id,
                 "description": finding.get("message", ""),
                 "evidence": finding.get("snippet", ""),
@@ -541,25 +574,53 @@ dependencies:
                 "similarity_to_known": f"Detected by CodeQL query: {query_name}",
             })
 
-        eligible_count = len(finding_records)
-        add_findings = getattr(self._memory_manager, "add_findings", None)
-        if callable(add_findings) and finding_records:
-            added_count = int(add_findings(finding_records))
-        else:
-            added_count = 0
-            for finding_record in finding_records:
-                if self._memory_manager.add_finding(finding_record):
-                    added_count += 1
-
+        transition = getattr(
+            self._memory_manager,
+            "add_findings_with_first_touches",
+            None,
+        )
+        if findings and not callable(transition):
+            raise RuntimeError("Atomic CodeQL finding transition is unavailable")
+        added_count = (
+            int(transition(finding_records, visible_paths))
+            if findings
+            else 0
+        )
         if findings:
             summary = (
                 f"CodeQL query '{query_name}' found {len(findings)} potential issues "
-                f"({filtered_count} filtered, {eligible_count} eligible, {added_count} new)"
+                f"({filtered_count} filtered, {len(finding_records)} eligible, "
+                f"{added_count} new)"
             )
-            self._memory_manager.add_issue(summary)
+            try:
+                self._memory_manager.add_issue(summary)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning("Failed to persist CodeQL summary issue: %s", exc)
+
+    def _scheduled_codeql_findings(
+        self,
+        findings: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Project findings through the frozen file schedule when active."""
+        if not getattr(self, "_file_enumeration_rank", {}):
+            return list(findings)
+        by_file: Dict[str, List[Dict[str, Any]]] = {}
+        for finding in findings:
+            file_path = str(finding.get("file", "") or "").strip()
+            by_file.setdefault(file_path, []).append(finding)
+        visible_findings = [
+            finding
+            for file_path in self.order_repo_relative_paths(list(by_file))
+            for finding in by_file[file_path]
+        ]
+        return [
+            self._sanitize_scheduled_structured_value(finding)
+            for finding in visible_findings
+        ]
 
     def _format_codeql_summary(self, query_name: str, findings: List[Dict[str, Any]]) -> str:
         """Format CodeQL findings into a readable summary."""
+        findings = self._scheduled_codeql_findings(findings)
         if not findings:
             return f"CodeQL query '{query_name}' completed. No vulnerabilities found."
 
@@ -574,18 +635,30 @@ dependencies:
             file_path = finding.get("file", "unknown")
             by_file.setdefault(file_path, []).append(finding)
 
-        for file_path, file_findings in sorted(by_file.items()):
+        scheduled_mode = bool(getattr(self, "_file_enumeration_rank", {}))
+        file_paths = (
+            self.order_repo_relative_paths(list(by_file))
+            if scheduled_mode
+            else sorted(by_file)
+        )
+        for file_path in file_paths:
+            file_findings = by_file[file_path]
             lines.append(f"### {file_path}")
-            for finding in file_findings[:5]:
+            visible_file_findings = (
+                file_findings if scheduled_mode else file_findings[:5]
+            )
+            for finding in visible_file_findings:
                 line = finding.get("start_line", "?")
                 rule = finding.get("rule_id", "unknown")
                 message = finding.get("message", "")[:100]
                 lines.append(f"- **L{line}** [{rule}]: {message}")
-            if len(file_findings) > 5:
-                lines.append(f"  ... and {len(file_findings) - 5} more in this file")
+            if not scheduled_mode and len(file_findings) > 5:
+                lines.append(
+                    f"  ... and {len(file_findings) - 5} more in this file"
+                )
             lines.append("")
 
-        if len(by_file) > 10:
+        if not scheduled_mode and len(by_file) > 10:
             lines.append(f"... and issues in {len(by_file) - 10} more files")
 
         lines.append("")
@@ -604,7 +677,7 @@ dependencies:
                 error="Memory manager not available. Cannot read CodeQL results.",
             )
 
-        safe_name = re.sub(r"[^\w\-]", "_", query_name)
+        safe_name = self._codeql_artifact_stem(query_name)
         results_dir = self._memory_manager.output_dir / "codeql-results"
         findings_file = results_dir / f"{safe_name}_findings.json"
 
@@ -621,22 +694,55 @@ dependencies:
         try:
             data = json.loads(findings_file.read_text(encoding="utf-8"))
             findings = data.get("findings", [])
-            total = len(findings)
-            paginated = findings[offset:offset + limit]
-
-            result = {
-                "query_name": query_name,
-                "total_findings": total,
-                "offset": offset,
-                "limit": limit,
-                "returned": len(paginated),
-                "has_more": offset + limit < total,
-                "findings": paginated,
-            }
+            if getattr(self, "_file_enumeration_rank", {}):
+                ordered_findings = self._scheduled_codeql_findings(findings)
+                by_file: Dict[str, List[Dict[str, Any]]] = {}
+                for finding in ordered_findings:
+                    file_path = str(finding.get("file", "") or "").strip()
+                    by_file.setdefault(file_path, []).append(
+                        {
+                            key: value
+                            for key, value in finding.items()
+                            if key != "file"
+                        }
+                    )
+                file_rows = [
+                    {
+                        "file": file_path,
+                        "finding_count": len(by_file[file_path]),
+                        "findings": by_file[file_path],
+                    }
+                    for file_path in self.order_repo_relative_paths(list(by_file))
+                ]
+                total = len(file_rows)
+                paginated = file_rows[offset:offset + limit]
+                result = {
+                    "query_name": query_name,
+                    "schedule_scope": "frozen_global_unique",
+                    "total_files": total,
+                    "offset": offset,
+                    "limit": limit,
+                    "returned": len(paginated),
+                    "has_more": offset + limit < total,
+                    "files": paginated,
+                }
+            else:
+                total = len(findings)
+                paginated = findings[offset:offset + limit]
+                result = {
+                    "query_name": query_name,
+                    "total_findings": total,
+                    "offset": offset,
+                    "limit": limit,
+                    "returned": len(paginated),
+                    "has_more": offset + limit < total,
+                    "findings": paginated,
+                }
 
             return ToolResult(
                 success=True,
                 content=json.dumps(result, indent=2, ensure_ascii=False),
+                metadata=result,
             )
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(

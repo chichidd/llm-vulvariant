@@ -2,6 +2,13 @@
 
 这页专门记录代码里已经存在、但用户最容易漏掉的运行条件。建议在第一次跑命令前先过一遍。
 
+运行任何命令前，先显式选择这份自包含 revision：
+
+```bash
+export CCS_REVISION_ROOT=/absolute/path/to/ccs-revision
+cd "$CCS_REVISION_ROOT/code/llm-vulvariant"
+```
+
 ## 1. 核心前提
 
 | 项目 | 是否必须 | 说明 |
@@ -26,7 +33,7 @@
 - 已完成登录，且 `claude -p` 能在仓库根目录非交互运行。
 - `exploitability` 路径优先使用 `claude -p` 的 JSON 输出；如果当前 Claude CLI 不支持 `--output-format json`，代码会回退到纯文本模式，并继续尝试从结构化输出文件恢复结果。
 - 本仓库内置的 `.claude/skills/ai-infra-module-modeler` 仍用于默认模块分析路径。
-- Claude runtime 目录必须可写。默认是仓库根目录下的 `.claude-runtime/`，也可以显式传 `--claude-runtime-root`。
+- Claude runtime 目录必须可写。默认是 revision 根目录下的 `results/runtime/claude/`，也可以显式传 `--claude-runtime-root`。
 - 并发跑 `python -m cli.exploitability --jobs > 1` 时，必须使用 `--claude-runtime-mode folder`。
 
 补充说明：
@@ -159,7 +166,7 @@ claude -p '{"ok":true}'
 ```bash
 test -d .claude/skills/ai-infra-module-modeler
 ls .claude/skills
-ls ../models/<model-name>
+ls $CCS_REVISION_ROOT/models/<model-name>
 ```
 
 ## 10. 常见报错与定位方向

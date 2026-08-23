@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from llm import BaseLLMClient, aggregate_llm_usage_since, capture_llm_usage_snapshot
 from config import _path_config
 from profiler.profile_storage import ProfileStorageManager
+from profiler.rq1_trace import profile_cache_allowed, record_final_profile
 from utils.number_utils import to_int
 from utils.git_utils import (
     checkout_commit,
@@ -332,6 +333,13 @@ class SoftwareProfiler:
         except Exception as exc:
             logger.warning(f"Failed to parse cached software profile for {path_parts}: {exc}")
             return None
+        if (
+            len(path_parts) < 2
+            or cached_profile.name != str(path_parts[0])
+            or cached_profile.version != str(path_parts[1])
+        ):
+            logger.info("Cached software profile identity is stale, regenerating...")
+            return None
         if not getattr(cached_profile, "modules", []):
             logger.info("Cached software profile is empty, regenerating...")
             return None
@@ -559,16 +567,6 @@ class SoftwareProfiler:
             original_version = get_git_commit(str(repo_path))
             original_restore_target = get_git_restore_target(str(repo_path))
             changed_commit = False
-            version = target_version if target_version else original_version
-
-            if version:
-                logger.info(f"Git commit hash: {version[:8]}...")
-            else:
-                logger.warning("Could not get git commit hash, using 'unknown'")
-                version = "unknown"
-
-            path_parts = (repo_name, version) if version else (repo_name,)
-            self._current_profile_path_parts = path_parts
             if has_uncommitted_changes(str(repo_path)):
                 raise RuntimeError(
                     f"Repository {repo_name} has local changes; please clean/stash before profiling"
@@ -586,8 +584,20 @@ class SoftwareProfiler:
                     if not checkout_commit(str(repo_path), target_version):
                         raise RuntimeError(f"Failed to checkout to: {target_version}")
                     changed_commit = True
+
+            version = str(get_git_commit(str(repo_path)) or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{40}", version):
+                if changed_commit and original_restore_target:
+                    restore_git_position(str(repo_path), original_restore_target)
+                raise RuntimeError(
+                    f"Repository {repo_name} did not resolve to a full 40-character commit"
+                )
+            logger.info(f"Git commit hash: {version[:8]}...")
+
+            path_parts = (repo_name, version)
+            self._current_profile_path_parts = path_parts
             self._current_fingerprint_repo_path = repo_path
-            self._current_fingerprint_repo_version = get_git_commit(str(repo_path)) or version
+            self._current_fingerprint_repo_version = version
             expected_fingerprint = self._build_profile_fingerprint()
             storage_lock_path = (
                 self.storage_manager._get_profile_dir(*path_parts)  # pylint: disable=protected-access
@@ -602,7 +612,7 @@ class SoftwareProfiler:
             )
             try:
                 with storage_lock_context:
-                    if self.storage_manager and not force_regenerate:
+                    if self.storage_manager and profile_cache_allowed(force_regenerate):
                         cached_profile = self._load_cached_profile_if_compatible(
                             path_parts=path_parts,
                             expected_fingerprint=expected_fingerprint,
@@ -612,9 +622,12 @@ class SoftwareProfiler:
 
                     resume_state = self._load_resume_state_fingerprint()
                     self._save_config_to_output_dir()
-                    should_force_full_regeneration = force_regenerate or not self._resume_state_matches(
-                        resume_state,
-                        expected_fingerprint,
+                    should_force_full_regeneration = (
+                        not profile_cache_allowed(force_regenerate)
+                        or not self._resume_state_matches(
+                            resume_state,
+                            expected_fingerprint,
+                        )
                     )
                     if should_force_full_regeneration:
                         # Clear stale checkpoints before persisting the new fingerprint so retries
@@ -878,6 +891,11 @@ class SoftwareProfiler:
             if profile.modules and hasattr(profile.modules[0], 'external_dependencies'):
                 logger.debug(f"[DEBUG] First module before save - external_deps: {len(profile.modules[0].external_dependencies)}, called_by: {len(profile.modules[0].called_by_modules)}")
             self.storage_manager.save_final_result("software_profile.json", profile.to_json(), *path_parts)
+        record_final_profile(
+            kind="software_profile",
+            identity={"repository_id": repo_name, "commit": version},
+            profile=profile,
+        )
         if llm_usage_summary.get("sessions_total", llm_usage_summary.get("calls_total", 0)) > 0:
             logger.info(
                 "LLM usage summary: sessions=%s turns=%s input_tokens=%s output_tokens=%s cache_read_input_tokens=%s cost_usd=%.6f",

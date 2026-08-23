@@ -16,6 +16,7 @@ from llm import (
 from utils.logger import get_logger
 from utils.llm_utils import parse_llm_json, extract_message_content
 from profiler.profile_storage import ProfileStorageManager
+from profiler.rq1_trace import install_client_trace, record_stage_result, trace_stage
 from .models import is_valid_software_basic_info
 from .prompts import BASIC_INFO_PROMPT, SOFTWARE_BASIC_INFO_SYSTEM_PROMPT
 
@@ -26,7 +27,7 @@ class BasicInfoAnalyzer:
     """Analyze basic information about the software."""
 
     def __init__(self, llm_client: BaseLLMClient):
-        self.llm_client = llm_client
+        self.llm_client = install_client_trace(llm_client)
 
     def analyze(
         self,
@@ -67,53 +68,61 @@ class BasicInfoAnalyzer:
             provider=getattr(getattr(self.llm_client, "config", None), "provider", None),
         )
         usage_snapshot = capture_llm_usage_snapshot(self.llm_client)
+        identity = {"repository_id": repo_name or repo_path.name, "commit": version}
+        messages = [
+            {"role": "system", "content": SOFTWARE_BASIC_INFO_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
         
         try:
-            response = safe_chat_call(
-                self.llm_client,
-                messages=[
-                    {"role": "system", "content": SOFTWARE_BASIC_INFO_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.1,
-            )
-
-            content = extract_message_content(response)
-            llm_result = parse_llm_json(
-                content,
-                required_keys=[
-                    "description",
-                    "target_application",
-                    "target_user",
-                    "capabilities",
-                    "interfaces",
-                    "deployment_style",
-                    "operator_inputs",
-                    "external_surfaces",
-                    "evidence_summary",
-                    "confidence",
-                    "open_questions",
-                ],
-                expected_types={
-                    "description": str,
-                    "target_application": list,
-                    "target_user": list,
-                    "capabilities": list,
-                    "interfaces": list,
-                    "deployment_style": list,
-                    "operator_inputs": list,
-                    "external_surfaces": list,
-                    "evidence_summary": str,
-                    "confidence": str,
-                    "open_questions": list,
-                },
-                llm_client=self.llm_client,
-                max_repair_attempts=2,
-                task_hint="software basic information extraction",
-            )
-            if not is_valid_software_basic_info(llm_result):
-                raise ValueError("LLM returned invalid software basic info payload")
-            llm_usage = aggregate_llm_usage_since(self.llm_client, usage_snapshot)
+            with trace_stage("software_profile", identity, "basic_info"):
+                response = safe_chat_call(
+                    self.llm_client, messages=messages, temperature=0.1
+                )
+                content = extract_message_content(response)
+                llm_result = parse_llm_json(
+                    content,
+                    required_keys=[
+                        "description",
+                        "target_application",
+                        "target_user",
+                        "capabilities",
+                        "interfaces",
+                        "deployment_style",
+                        "operator_inputs",
+                        "external_surfaces",
+                        "evidence_summary",
+                        "confidence",
+                        "open_questions",
+                    ],
+                    expected_types={
+                        "description": str,
+                        "target_application": list,
+                        "target_user": list,
+                        "capabilities": list,
+                        "interfaces": list,
+                        "deployment_style": list,
+                        "operator_inputs": list,
+                        "external_surfaces": list,
+                        "evidence_summary": str,
+                        "confidence": str,
+                        "open_questions": list,
+                    },
+                    llm_client=self.llm_client,
+                    max_repair_attempts=2,
+                    task_hint="software basic information extraction",
+                )
+                if not is_valid_software_basic_info(llm_result):
+                    raise ValueError("LLM returned invalid software basic info payload")
+                llm_usage = aggregate_llm_usage_since(self.llm_client, usage_snapshot)
+                record_stage_result(
+                    kind="software_profile",
+                    identity=identity,
+                    stage="basic_info",
+                    parser_rule_id="parse-llm-json-v1",
+                    result=llm_result,
+                    usage=llm_usage,
+                )
 
             if storage_manager:
                 conversation_data = {
@@ -145,6 +154,16 @@ class BasicInfoAnalyzer:
                     "llm_calls": llm_usage.get("sessions_total", llm_usage.get("calls_total", 0)),
                 }
         except Exception as e:
+            record_stage_result(
+                kind="software_profile",
+                identity=identity,
+                stage="basic_info",
+                parser_rule_id="parse-llm-json-v1",
+                result=None,
+                usage=aggregate_llm_usage_since(self.llm_client, usage_snapshot),
+                status="failed",
+                error=f"{type(e).__name__}: {e}",
+            )
             logger.warning(f"LLM-based basic info analysis failed: {e}, using rule-based results")
             llm_usage = aggregate_llm_usage_since(self.llm_client, usage_snapshot)
         

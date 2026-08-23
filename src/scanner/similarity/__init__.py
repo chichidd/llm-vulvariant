@@ -1,6 +1,7 @@
 from .embedding import EmbeddingRetriever, EmbeddingRetrievalConfig
 from .retriever import (
     DEFAULT_SIMILARITY_WEIGHTS,
+    EmbeddingUnavailableError,
     ProfileRef,
     ProfileSimilarityMetrics,
     SimilarProfileCandidate,
@@ -15,6 +16,7 @@ from .retriever import (
 __all__ = [
     "EmbeddingRetriever",
     "EmbeddingRetrievalConfig",
+    "EmbeddingUnavailableError",
     "DEFAULT_SIMILARITY_WEIGHTS",
     "ProfileRef",
     "ProfileSimilarityMetrics",

@@ -18,17 +18,31 @@ LLM 驱动的漏洞变种发现与可利用性验证框架。
 先读 [docs/runtime-requirements.md](docs/runtime-requirements.md)。当前版本有几条容易漏掉的前提：
 
 - 默认 `software-profile` 模块分析依赖本仓库自带的 `.claude/skills/ai-infra-module-modeler`，并要求 `claude -p` 可非交互运行。
-- `python -m cli.exploitability` 依赖可非交互运行的 `claude -p` 和可写 `.claude-runtime`。
+- `python -m cli.exploitability` 依赖可非交互运行的 `claude -p` 和可写 `results/runtime/claude`。
 - `python -m cli.exploitability` 会为 `EXPLOITABLE` finding 自动执行 Docker PoC；并发时 `--jobs > 1` 必须配 `--claude-runtime-mode folder`。
 - 自动目标选择不只需要 `transformers` / `sentence-transformers` / `torch`，还需要 `paths.embedding_model_path/<model_name>` 的本地模型目录真实存在。
 - `scanner`、`batch-scanner`、`exploitability` 都可能临时切换仓库 commit；目标仓库应保持为可 checkout 的 git 工作树，`exploitability` 明确要求 clean worktree。
+- 本目录仅供 CCS revision 内部使用，不是 artifact 或 release；正式可利用性流程只接受完整 batch 的 manifest v2。
+
+正式扫描固定使用 `lab` / `GLM-5.2` / `https://llm.shtech.org/v1`：
+
+```bash
+export LAB_LLM_API_BASE=https://llm.shtech.org/v1
+```
 
 ## 快速开始
+
+所有命令先显式绑定到这份 revision，而不是依赖当前用户的 home 或父工作区：
+
+```bash
+export CCS_REVISION_ROOT=/absolute/path/to/ccs-revision
+cd "$CCS_REVISION_ROOT/code/llm-vulvariant"
+```
 
 ### 1. 安装
 
 ```bash
-cd /path/to/workspace/llm-vulvariant
+# Run from the repository root.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -48,39 +62,52 @@ pip install transformers sentence-transformers torch
 - [docs/runtime-requirements.md](docs/runtime-requirements.md)
 - [docs/getting-started.md](docs/getting-started.md)
 
-### 3. 最小单漏洞流程
+### 3. 单目标 direct scan（仅调试）
+
+direct scan 只用于排查输入或扫描问题；其输出不能直接进入正式 exploitability。正式流程必须由完整 `batch-scanner` 生成 manifest v2，详见 [docs/pipeline-recipes.md](docs/pipeline-recipes.md)。
 
 ```bash
 # 1) 为源仓库生成软件画像
 software-profile \
-  --repo-name NeMo \
-  --repo-base-path ../data/repos \
+  --repo-name <REPO_NAME> \
+  --repo-base-path $CCS_REVISION_ROOT/repos/general \
   --target-version <source_commit> \
-  --llm-provider deepseek
+  --llm-provider lab \
+  --llm-name GLM-5.2
 
 # 2) 生成漏洞画像
 vuln-profile \
   --vuln-index 0 \
-  --vuln-json ../data/vuln.json \
-  --llm-provider deepseek
+  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --llm-provider lab \
+  --llm-name GLM-5.2
 
 # 3) 扫描一个指定目标仓库
 scanner \
-  --vuln-repo NeMo \
-  --cve CVE-2025-23361 \
-  --target-repo Megatron-LM \
+  --vuln-repo <VULN_REPO> \
+  --cve <CVE_ID> \
+  --target-repo <TARGET_REPO> \
   --target-commit <target_commit> \
-  --repo-base-path ../data/repos \
-  --llm-provider deepseek \
+  --repo-base-path $CCS_REVISION_ROOT/repos/general \
+  --llm-provider lab \
+  --llm-name GLM-5.2 \
   --max-iterations 3 \
-  --output ../results/scan-results
+  --output $CCS_REVISION_ROOT/results/scan-results
 
-# 4) 可利用性验证与报告
+```
+
+### 4. 正式 exploitability（完整 batch manifest v2）
+
+只能使用完整 batch 的 `scan-output-commit-bindings-<RUN_ID>.json`；命令必须同时传入 manifest 与其小写 SHA-256。即使使用 `--folder`，该目录也必须是该完整 manifest 中的 binding，不能绕过该约束。
+
+```bash
 python -m cli.exploitability \
-  --scan-results-dir ../results/scan-results \
-  --repo-base-path ../data/repos \
+  --scan-results-dir $CCS_REVISION_ROOT/results/nvidia-batch-scan \
+  --scan-output-commit-manifest $CCS_REVISION_ROOT/results/nvidia-batch-scan/scan-output-commit-bindings-<RUN_ID>.json \
+  --scan-output-commit-manifest-sha256 <MANIFEST_SHA256> \
+  --repo-base-path $CCS_REVISION_ROOT/repos/nvidia \
   --generate-report \
-  --submission-output-dir ../results/exploitability
+  --submission-output-dir $CCS_REVISION_ROOT/results/exploitability
 ```
 
 完整 recipe、批量流程和脚本入口见 [docs/pipeline-recipes.md](docs/pipeline-recipes.md)。
@@ -98,29 +125,26 @@ python -m cli.exploitability \
 默认路径来自 `config/paths.yaml`，常见目录如下：
 
 ```text
-../
-├── data/
-│   ├── vuln.json
-│   └── repos/
-├── profiles/
+$CCS_REVISION_ROOT/
+├── benchmark/input/vuln.json
+├── code/llm-vulvariant/
+├── evidence/profiles/
 │   ├── soft/
 │   └── vuln/
-├── results/
+├── repos/
+│   ├── general/
+│   └── nvidia/
 ├── models/
-└── llm-vulvariant/
+└── results/
 ```
 
 常见输出物：
 
-- `profiles/soft/<repo>/<commit>/software_profile.json`
-- `profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
+- `evidence/profiles/soft/<repo>/<commit>/software_profile.json`
+- `evidence/profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
 - `results/<scan-dir>/<cve>/<target>-<commit>/agentic_vuln_findings.json`
 - `results/<scan-dir>/<cve>/<target>-<commit>/exploitability.json`
 - `results/<submission-dir>/<prefix>_<run-id>.json`
-
-## 内部文档边界
-
-`llm-vulvariant/docs/` 只放项目使用文档，不再承载 superpower 协作资料。相关内部文档入口在根级 [../docs/superpowers/README.md](../docs/superpowers/README.md)。
 
 ## 安全声明
 

@@ -1,4 +1,4 @@
-import logging
+from types import SimpleNamespace
 
 from utils.llm_utils import extract_json_from_text, extract_json_object_matches, parse_llm_json
 
@@ -11,6 +11,18 @@ class RepairLLM:
     def chat(self, messages, temperature=0.0):
         self.calls += 1
         return self.repaired_response
+
+
+class RecordingRepairLLM:
+    def __init__(self, *, enforce_exact_decoding):
+        self.config = SimpleNamespace(
+            enforce_exact_decoding=enforce_exact_decoding,
+        )
+        self.requests = []
+
+    def chat(self, **request):
+        self.requests.append(request)
+        return '{"description": "fixed"}'
 
 
 def test_parse_llm_json_parses_fenced_json():
@@ -68,6 +80,38 @@ def test_parse_llm_json_uses_repair_llm_on_invalid_json():
     assert parsed is not None
     assert parsed["description"] == "fixed"
     assert repair_llm.calls == 1
+
+
+def test_parse_llm_json_repair_inherits_exact_decoding_temperature():
+    repair_llm = RecordingRepairLLM(enforce_exact_decoding=True)
+
+    parsed = parse_llm_json(
+        "{not valid json",
+        required_keys=["description"],
+        expected_types={"description": str},
+        llm_client=repair_llm,
+        max_repair_attempts=1,
+    )
+
+    assert parsed == {"description": "fixed"}
+    assert len(repair_llm.requests) == 1
+    assert "temperature" not in repair_llm.requests[0]
+
+
+def test_parse_llm_json_repair_keeps_zero_temperature_for_non_exact_client():
+    repair_llm = RecordingRepairLLM(enforce_exact_decoding=False)
+
+    parsed = parse_llm_json(
+        "{not valid json",
+        required_keys=["description"],
+        expected_types={"description": str},
+        llm_client=repair_llm,
+        max_repair_attempts=1,
+    )
+
+    assert parsed == {"description": "fixed"}
+    assert len(repair_llm.requests) == 1
+    assert repair_llm.requests[0]["temperature"] == 0.0
 
 
 def test_parse_llm_json_returns_none_when_repair_remains_invalid():

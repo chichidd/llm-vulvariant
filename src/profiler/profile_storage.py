@@ -34,7 +34,7 @@ class ProfileStorageManager:
         Initialize the storage manager.
 
         Args:
-            base_dir: Base storage directory (e.g., ../profiles/soft or ../profiles/vuln)
+            base_dir: Base storage directory (e.g., $CCS_REVISION_ROOT/evidence/profiles/soft or $CCS_REVISION_ROOT/evidence/profiles/vuln)
             profile_type: Profile type label used in log messages.
         """
         self.base_dir = Path(base_dir) if base_dir else None

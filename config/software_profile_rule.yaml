@@ -199,7 +199,7 @@ module_analyzer_config:
   # 模块分析器类型
   # - "skill": 基于 .claude/skills/ai-infra-module-modeler 的 taxonomy + LLM 语义判断 (推荐)
   # - "agent": 基于 LLM agent 的灵活分析器（适用于需要更灵活分析的场景）
-  analyzer_type: skill
+  analyzer_type: agent
   
   # 最大 LLM 调用次数（在单个分析 turn 内允许的最大 LLM 调用次数）
   # agent 分析器使用此配置：整个仓库模块分析允许的最大 LLM 调用次数

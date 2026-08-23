@@ -164,7 +164,7 @@ class SharedPublicMemoryManager:
         *,
         query: str = "",
         tool_names: Optional[List[str]] = None,
-        limit: int = 10,
+        limit: Optional[int] = 10,
     ) -> Dict[str, Any]:
         """Read shared observations for the current repo/commit scope.
 
@@ -182,7 +182,9 @@ class SharedPublicMemoryManager:
             if str(tool_name).strip()
         }
         serialized_query = " ".join(str(query or "").lower().split())
-        normalized_limit = max(1, min(int(limit), 20))
+        normalized_limit = (
+            None if limit is None else max(1, min(int(limit), 20))
+        )
         matching_observations: List[Dict[str, Any]] = []
         for observation_path in sorted(
             self.observations_dir.glob("*.json"),
@@ -213,7 +215,10 @@ class SharedPublicMemoryManager:
                 if not all(token in haystack for token in serialized_query.split()):
                     continue
             matching_observations.append(observation)
-            if len(matching_observations) >= normalized_limit:
+            if (
+                normalized_limit is not None
+                and len(matching_observations) >= normalized_limit
+            ):
                 break
 
         return {

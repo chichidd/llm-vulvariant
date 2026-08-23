@@ -10,14 +10,27 @@
 
 如果还没做这些，先看 [getting-started.md](getting-started.md) 和 [data-and-repositories.md](data-and-repositories.md)。
 
-## Recipe 1: 单漏洞 -> 单目标仓库
+先显式选择这份自包含 revision：
 
-这是最容易排查问题的最小闭环。
+```bash
+export CCS_REVISION_ROOT=/absolute/path/to/ccs-revision
+cd "$CCS_REVISION_ROOT/code/llm-vulvariant"
+```
+
+所有示例固定使用 `lab` / `GLM-5.2` / `https://llm.shtech.org/v1`：
+
+```bash
+export LAB_LLM_API_BASE=https://llm.shtech.org/v1
+```
+
+## Recipe 1: 单漏洞 -> 单目标仓库（仅调试）
+
+这是最容易排查问题的最小扫描闭环。direct scan 输出仅供调试，不能直接进入正式 exploitability。
 
 额外前提：
 
 - 默认 `software-profile` 模块分析依赖 `claude` + `.claude/skills/ai-infra-module-modeler`
-- `python -m cli.exploitability` 依赖 `claude` CLI、可写 `.claude-runtime`
+- `python -m cli.exploitability` 依赖 `claude` CLI、可写 `results/runtime/claude`
 - 如果某条 finding 被判定为 `EXPLOITABLE`，exploitability 会自动进入 Docker PoC
 - target repo 应该是 clean git worktree
 
@@ -25,12 +38,13 @@
 
 ```bash
 software-profile \
-  --repo-name NeMo \
-  --repo-base-path ../data/repos \
+  --repo-name <REPO_NAME> \
+  --repo-base-path $CCS_REVISION_ROOT/repos/general \
   --target-version <source_commit> \
-  --profile-base-path ../profiles \
+  --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --software-profile-dirname soft \
-  --llm-provider deepseek
+  --llm-provider lab \
+  --llm-name GLM-5.2
 ```
 
 ### Step 2. 生成漏洞画像
@@ -38,51 +52,40 @@ software-profile \
 ```bash
 vuln-profile \
   --vuln-index 0 \
-  --vuln-json ../data/vuln.json \
-  --profile-base-path ../profiles \
+  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --software-profile-dirname soft \
   --vuln-profile-dirname vuln \
-  --repo-base-path ../data/repos \
-  --llm-provider deepseek
+  --repo-base-path $CCS_REVISION_ROOT/repos/general \
+  --llm-provider lab \
+  --llm-name GLM-5.2
 ```
 
 ### Step 3. 扫描一个指定目标仓库
 
 ```bash
 scanner \
-  --vuln-repo NeMo \
-  --cve CVE-2025-23361 \
-  --target-repo Megatron-LM \
+  --vuln-repo <VULN_REPO> \
+  --cve <CVE_ID> \
+  --target-repo <TARGET_REPO> \
   --target-commit <target_commit> \
-  --repo-base-path ../data/repos \
-  --profile-base-path ../profiles \
+  --repo-base-path $CCS_REVISION_ROOT/repos/general \
+  --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --software-profile-dirname soft \
   --vuln-profile-dirname vuln \
-  --llm-provider deepseek \
+  --llm-provider lab \
+  --llm-name GLM-5.2 \
   --max-iterations 3 \
-  --output ../results/scan-results
-```
-
-### Step 4. 做 exploitability 检查与报告
-
-```bash
-python -m cli.exploitability \
-  --scan-results-dir ../results/scan-results \
-  --profile-base-path ../profiles \
-  --software-profile-dirname soft \
-  --repo-base-path ../data/repos \
-  --generate-report \
-  --submission-output-dir ../results/exploitability \
-  --submission-prefix exploitable_findings \
-  --run-id demo-001
+  --output $CCS_REVISION_ROOT/results/scan-results
 ```
 
 ### 关键输出
 
-- `profiles/soft/<repo>/<commit>/software_profile.json`
-- `profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
+- `evidence/profiles/soft/<repo>/<commit>/software_profile.json`
+- `evidence/profiles/vuln/<repo>/<cve>/vulnerability_profile.json`
 - `results/scan-results/<cve>/<target>-<commit>/agentic_vuln_findings.json`
-- `results/scan-results/<cve>/<target>-<commit>/exploitability.json`
+
+要做正式 exploitability，请从 Recipe 3 的完整 batch 输出进入 Recipe 4。
 
 ## Recipe 2: 自动选择目标仓库
 
@@ -98,18 +101,19 @@ python -m cli.exploitability \
 
 ```bash
 scanner \
-  --vuln-repo NeMo \
-  --cve CVE-2025-23361 \
+  --vuln-repo <VULN_REPO> \
+  --cve <CVE_ID> \
   --top-k 5 \
   --similarity-threshold 0.70 \
   --similarity-model-name jinaai--jina-code-embeddings-1.5b \
   --similarity-device cpu \
-  --profile-base-path ../profiles \
+  --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --software-profile-dirname soft-nvidia \
   --vuln-profile-dirname vuln \
-  --repo-base-path ../data/repos-nvidia \
-  --llm-provider deepseek \
-  --output ../results/scan-results
+  --repo-base-path $CCS_REVISION_ROOT/repos/nvidia \
+  --llm-provider lab \
+  --llm-name GLM-5.2 \
+  --output $CCS_REVISION_ROOT/results/scan-results
 ```
 
 常用调节项：
@@ -131,19 +135,20 @@ scanner \
 
 ```bash
 batch-scanner \
-  --vuln-json ../data/vuln.json \
-  --source-repos-root ../data/repos \
-  --target-repos-root ../data/repos-nvidia \
-  --source-soft-profiles-dir ../profiles/soft \
-  --target-soft-profiles-dir ../profiles/soft-nvidia \
-  --vuln-profiles-dir ../profiles/vuln \
-  --scan-output-dir ../results/nvidia-batch-scan \
+  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --source-repos-root $CCS_REVISION_ROOT/repos/general \
+  --target-repos-root $CCS_REVISION_ROOT/repos/nvidia \
+  --source-soft-profiles-dir $CCS_REVISION_ROOT/evidence/profiles/soft \
+  --target-soft-profiles-dir $CCS_REVISION_ROOT/evidence/profiles/soft-nvidia \
+  --vuln-profiles-dir $CCS_REVISION_ROOT/evidence/profiles/vuln \
+  --scan-output-dir $CCS_REVISION_ROOT/results/nvidia-batch-scan \
   --run-id run-20260408-001 \
   --similarity-threshold 0.70 \
   --fallback-top-n 3 \
   --jobs 4 \
   --max-iterations-cap 10 \
-  --llm-provider deepseek
+  --llm-provider lab \
+  --llm-name GLM-5.2
 ```
 
 常用参数：
@@ -162,31 +167,36 @@ batch-scanner \
 
 ## Recipe 4: 批量 exploitability、报告与聚合提交材料
 
+这是唯一的正式 exploitability 入口。只接受完整 batch 生成的 manifest v2：`scan-output-commit-bindings-<RUN_ID>.json`；不得使用 direct scan、部分 batch 或脱离 manifest 的 folder。`--folder` 仅可选择该完整 manifest 已绑定的目录。
+
 额外前提：
 
 - `claude -p` 可非交互运行；如果当前 CLI 不支持 `--output-format json`，代码会尝试纯文本回退
-- `.claude-runtime` 或 `--claude-runtime-root` 可写
+- `results/runtime/claude` 或 `--claude-runtime-root` 可写
 - `--jobs > 1` 时使用 `--claude-runtime-mode folder`
 - target repo 是 clean git worktree
 - Docker 可用，因为 `EXPLOITABLE` finding 会自动进入 Phase 5 Docker PoC
 
 ```bash
 python -m cli.exploitability \
-  --scan-results-dir ../results/nvidia-batch-scan \
-  --soft-profile-dir ../profiles/soft-nvidia \
-  --repo-base-path ../data/repos-nvidia \
+  --scan-results-dir $CCS_REVISION_ROOT/results/nvidia-batch-scan \
+  --scan-output-commit-manifest $CCS_REVISION_ROOT/results/nvidia-batch-scan/scan-output-commit-bindings-run-20260408-001.json \
+  --scan-output-commit-manifest-sha256 <MANIFEST_SHA256> \
+  --soft-profile-dir $CCS_REVISION_ROOT/evidence/profiles/soft-nvidia \
+  --repo-base-path $CCS_REVISION_ROOT/repos/nvidia \
   --jobs 4 \
   --generate-report \
   --report-only-exploitable \
-  --submission-output-dir ../results/nvidia-batch-exploitability \
+  --submission-output-dir $CCS_REVISION_ROOT/results/nvidia-batch-exploitability \
   --submission-prefix exploitable_findings \
-  --claude-runtime-root ../results/claude-runtime \
+  --claude-runtime-root $CCS_REVISION_ROOT/results/claude-runtime \
   --claude-runtime-mode folder \
   --run-id run-20260408-001
 ```
 
 注意：
 
+- `<MANIFEST_SHA256>` 使用 batch 结束时输出的 manifest 小写 SHA-256；manifest 必须是 `schema_version=2` 且 batch 完整结束。
 - `--jobs > 1` 时，使用 `--claude-runtime-mode folder`
 - `--skip-existing` 只跳过已经有完整 `exploitability.json` 的目录
 - `--report-only-exploitable` 会让聚合文件名带 `_strict`
@@ -198,9 +208,9 @@ python -m cli.exploitability \
 - `<prefix>_<run-id>_submission_index.json`
 - `<prefix>_<run-id>_exploitable_security_report.md`
 
-## Recipe 5: 一键运行 NVIDIA 全流水线脚本
+## Recipe 5: 一键运行 NVIDIA 全流水线脚本（非正式 exploitability）
 
-仓库内置了 `scripts/run_nvidia_full_pipeline.sh`，适合已有一套 NVIDIA target repo 时直接串起完整流程。
+仓库内置了 `scripts/run_nvidia_full_pipeline.sh`，适合调试扫描串联；正式 exploitability 仍须使用 Recipe 4 的完整 manifest v2 命令。
 
 额外前提：
 
@@ -212,7 +222,9 @@ python -m cli.exploitability \
 最小示例：
 
 ```bash
-LLM_PROVIDER=deepseek \
+LAB_LLM_API_BASE=https://llm.shtech.org/v1 \
+LLM_PROVIDER=lab \
+LLM_NAME=GLM-5.2 \
 SCAN_JOBS=4 \
 EXPLOITABILITY_JOBS=4 \
 bash scripts/run_nvidia_full_pipeline.sh

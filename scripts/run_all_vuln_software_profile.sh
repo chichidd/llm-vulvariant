@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate software profiles for all repo/commit pairs in vuln.json.
+# 为 vuln.json 中的 repo/commit 生成软件画像。
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 APP_DIR="${APP_DIR:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
+REVISION_ROOT="${REVISION_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}"
+export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 source "$SCRIPT_DIR/profile_paths.sh"
 
-VULN_JSON="${VULN_JSON:-../data/vuln.json}"
-REPO_BASE_PATH="${REPO_BASE_PATH:-../data/repos}"
-PROFILE_BASE_PATH="${PROFILE_BASE_PATH:-../profiles}"
+VULN_JSON="${VULN_JSON:-$REVISION_ROOT/benchmark/input/vuln.json}"
+REPO_BASE_PATH="${REPO_BASE_PATH:-$REVISION_ROOT/repos/general}"
+PROFILE_BASE_PATH="${PROFILE_BASE_PATH:-$REVISION_ROOT/evidence/profiles}"
 SOFT_PROFILE_DIRNAME="${SOFT_PROFILE_DIRNAME:-soft}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
-LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
-LLM_NAME="${LLM_NAME:-}"
+LLM_PROVIDER="${LLM_PROVIDER:-lab}"
+LLM_NAME="${LLM_NAME:-GLM-5.2}"
+SOFTWARE_PROFILE_CMD="${SOFTWARE_PROFILE_CMD:-}"
 FORCE_REGENERATE=0
 EXTRA_ARGS=()
 
@@ -29,6 +32,11 @@ if [[ -z "$PYTHON_BIN" ]]; then
   fi
 fi
 read -r -a PYTHON_CMD <<<"$PYTHON_BIN"
+if [[ -n "$SOFTWARE_PROFILE_CMD" ]]; then
+  read -r -a SOFTWARE_PROFILE_COMMAND <<<"$SOFTWARE_PROFILE_CMD"
+else
+  SOFTWARE_PROFILE_COMMAND=("${PYTHON_CMD[@]}" -m cli.software)
+fi
 
 cleanup_codeql_temp_artifacts() {
   local repo_dir="$1"
@@ -47,7 +55,6 @@ sys.path.insert(0, str(app_dir / "src"))
 from config import _path_config
 from utils import repo_lock as repo_lock_module
 
-_path_config["repo_root"] = app_dir
 
 cleaned = False
 with repo_lock_module.hold_repo_lock(repo_dir, purpose="cleanup_codeql_temp_artifacts"):
@@ -83,8 +90,8 @@ Options:
 
 Examples:
   $0
-  $0 --profile-base-path ../profiles --soft-profile-dirname soft
-  $0 --output-dir /tmp/soft-profiles --llm-provider deepseek
+  $0 --profile-base-path $REVISION_ROOT/evidence/profiles --soft-profile-dirname soft
+  $0 --output-dir /tmp/soft-profiles --llm-provider lab
   $0 --force-regenerate
 EOF
 }
@@ -194,7 +201,7 @@ for entry in "${entries[@]}"; do
   fi
 
   cmd=(
-    software-profile
+    "${SOFTWARE_PROFILE_COMMAND[@]}"
     --repo-name "$repo_name"
     --repo-base-path "$REPO_BASE_PATH"
     --target-version "$commit"

@@ -65,6 +65,19 @@ class ToolkitFSMixin:
             "vendor",
             "third_party",
         }
+        if getattr(self, "_scheduled_mode", False):
+            for relative_path in self._active_file_window_order:
+                file_path = self.repo_path / relative_path
+                try:
+                    file_path.relative_to(root)
+                except ValueError:
+                    continue
+                if not recursive and file_path.parent != root:
+                    continue
+                if self._is_source_file(file_path):
+                    yield file_path
+            return
+
         if recursive:
             for dirpath, dirnames, filenames in os.walk(root):
                 dirnames[:] = [dirname for dirname in dirnames if dirname not in ignored_dirs]
@@ -198,7 +211,7 @@ class ToolkitFSMixin:
                 "folder_path": str(full_path.relative_to(self.repo_path)),
                 "pattern": pattern,
                 "match_count": total_matches,
-                "files": sorted(file_results.keys()),
+                "files": self.order_repo_relative_paths(list(file_results)),
                 "matches": match_summaries[:50],
             }
             if not file_results:
@@ -208,7 +221,7 @@ class ToolkitFSMixin:
                     metadata=metadata,
                 )
             result_lines = [f"Found {total_matches} matches in {len(file_results)} files:\n"]
-            for matched_file in sorted(file_results.keys()):
+            for matched_file in self.order_repo_relative_paths(list(file_results)):
                 result_lines.append(f"\n{matched_file}:")
                 for line_num, line_content in file_results[matched_file][:10]:
                     result_lines.append(f"  L{line_num}: {line_content}")
@@ -239,13 +252,28 @@ class ToolkitFSMixin:
                 file_info.append((rel_path, size))
             if not file_info:
                 return ToolResult(success=True, content="No source files found")
-            tree = self._build_path_tree(file_info)
-            tree_lines = self._render_tree(tree, value_formatter=self._format_size)
-            result = (
-                f"Found {len(file_info)} source files (total: {self._format_size(total_size)}):\n\n"
-                + "\n".join(tree_lines)
+            heading = (
+                f"Found {len(file_info)} source files "
+                f"(total: {self._format_size(total_size)}):\n\n"
             )
-            return ToolResult(success=True, content=result)
+            if getattr(self, "_file_enumeration_rank", {}):
+                result = heading + "\n".join(
+                    f"{path} ({self._format_size(size)})"
+                    for path, size in file_info
+                )
+            else:
+                tree = self._build_path_tree(file_info)
+                tree_lines = self._render_tree(tree, value_formatter=self._format_size)
+                result = heading + "\n".join(tree_lines)
+            return ToolResult(
+                success=True,
+                content=result,
+                metadata=(
+                    {"files": [path for path, _ in file_info]}
+                    if getattr(self, "_file_enumeration_rank", {})
+                    else None
+                ),
+            )
         except Exception as exc:  # pylint: disable=broad-except
             return ToolResult(success=False, content="", error=str(exc))
 

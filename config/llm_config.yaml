@@ -30,11 +30,11 @@ llm:
       context_limit: 65536
 
     lab:
-      base_url: "https://hkucvm.dynv6.net/v1"
-      model: "DeepSeek-V3.2"
+      base_url: "https://llm.shtech.org/v1"
+      base_url_env: "LAB_LLM_API_BASE"
+      model: "GLM-5.2"
+      model_env: "LAB_LLM_MODEL"
       api_key_env: "LAB_LLM_API_KEY"
-      max_tokens: 8192
-      context_limit: 163840
-      fallback_provider: "deepseek"
-      fallback_on_retry_exhausted: true
+      max_tokens: 32000
+      context_limit: 200000
     

@@ -30,28 +30,28 @@ A utility script to view and analyze LLM conversation history.
 **Usage examples:**
 ```bash
 # List all conversations
-python view_llm_conversations.py output_dir/NeMo/abc123/conversations
+python view_llm_conversations.py output_dir/REPO_NAME/abc123/conversations
 
 # Show summary
-python view_llm_conversations.py output_dir/NeMo/abc123/conversations summary
+python view_llm_conversations.py output_dir/REPO_NAME/abc123/conversations summary
 
 # View a specific conversation
-python view_llm_conversations.py output_dir/NeMo/abc123/conversations view 20251211_143025_123_basic_info.json
+python view_llm_conversations.py output_dir/REPO_NAME/abc123/conversations view 20251211_143025_123_basic_info.json
 
 # Analyze iterations
-python view_llm_conversations.py output_dir/NeMo/abc123/conversations iterations
+python view_llm_conversations.py output_dir/REPO_NAME/abc123/conversations iterations
 ```
 
 ### Quick view
 ```bash
 # List all conversations
-ls -lh output_dir/NeMo/{version}/conversations/
+ls -lh output_dir/REPO_NAME/{version}/conversations/
 
 # Show latest conversations
-ls -lt output_dir/NeMo/{version}/conversations/ | head
+ls -lt output_dir/REPO_NAME/{version}/conversations/ | head
 
 # Filter by conversation type
-ls output_dir/NeMo/{version}/conversations/*module_analysis*
+ls output_dir/REPO_NAME/{version}/conversations/*module_analysis*
 ```
 
 ### JSON formatted view
@@ -68,7 +68,7 @@ cat conversations/20251211_143025_123_basic_info.json | jq .response
 
 
 # Delete conversations older than 7 days
-find profiles/NeMo/*/conversations -name "*.json" -mtime +7 -delete
+find profiles/REPO_NAME/*/conversations -name "*.json" -mtime +7 -delete
 
 
 """
@@ -258,9 +258,9 @@ def main():
         logger.info("  view <file> - view conversation details")
         logger.info("  iterations  - analyze module-analysis iterations")
         logger.info("\nExamples:")
-        logger.info("  python view_llm_conversations.py output_dir/NeMo/abc123/conversations")
-        logger.info("  python view_llm_conversations.py output_dir/NeMo/abc123/conversations summary")
-        logger.info("  python view_llm_conversations.py output_dir/NeMo/abc123/conversations view 20251211_143025_123_basic_info.json")
+        logger.info("  python view_llm_conversations.py output_dir/REPO_NAME/abc123/conversations")
+        logger.info("  python view_llm_conversations.py output_dir/REPO_NAME/abc123/conversations summary")
+        logger.info("  python view_llm_conversations.py output_dir/REPO_NAME/abc123/conversations view 20251211_143025_123_basic_info.json")
         sys.exit(1)
     
     conversations_dir = Path(sys.argv[1])

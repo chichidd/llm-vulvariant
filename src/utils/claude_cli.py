@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -12,9 +13,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from utils.number_utils import to_float, to_int
 
 
-# Optional diagnostic hint for environments that expect Claude to proxy to DeepSeek.
+# Optional diagnostic hint for the revision's self-hosted Claude CLI backend.
 # This is recorded in metadata, but it is not treated as evidence for model attribution.
-DEFAULT_SELECTED_MODEL_HINT = "deepseek-chat"
+DEFAULT_SELECTED_MODEL_HINT = "GLM-5.2"
 _SECRET_PATTERNS = [
     re.compile(r"((?:[A-Z0-9_-]*API(?:[_-]?KEY)):\s*)(\"[^\"]*\"|'[^']*'|\S+)", flags=re.IGNORECASE),
     re.compile(r"((?:[A-Z0-9_-]*API(?:[_-]?KEY))=)(\"[^\"]*\"|'[^']*'|\S+)", flags=re.IGNORECASE),
@@ -333,8 +334,15 @@ def summarize_claude_usage(
         to_float(claude_output.get("total_cost_usd"))
         if isinstance(claude_output, dict) else 0.0
     )
-    # Claude CLI often omits the flat total but still reports backend-model
-    # costUSD. Reuse that cost so session totals stay aligned with model usage.
+    # Claude CLI can omit the flat total while reporting several backend-model
+    # costs. Sum every reported model rather than silently counting only the
+    # selected model.
+    if total_cost_usd == 0.0:
+        total_cost_usd = sum(
+            to_float(raw_usage.get("costUSD", raw_usage.get("cost_usd")))
+            for raw_usage in model_usage.values()
+            if isinstance(raw_usage, dict)
+        )
     if total_cost_usd == 0.0 and isinstance(selected_model_usage, dict):
         total_cost_usd = to_float(selected_model_usage.get("cost_usd"))
     session_usage = _build_session_usage(
@@ -493,6 +501,9 @@ def aggregate_usage_summaries(
     sources_seen = set()
     providers_seen = set()
     requested_models_seen = set()
+    request_model_ids_seen = set()
+    expected_response_model_ids_seen = set()
+    observed_response_model_ids_seen = set()
     aggregate = {
         "source": "claude_cli",
         "requested_model": selected_model,
@@ -510,6 +521,14 @@ def aggregate_usage_summaries(
         "calls_with_top_level_usage_fallback": 0,
         "calls_missing_selected_model_usage": 0,
         "calls_missing_usage": 0,
+        "response_identity_checks_total": 0,
+        "response_identity_matches_total": 0,
+        "response_identity_mismatches_total": 0,
+        "calls_without_response_identity_check": 0,
+        "response_identity_all_matched": False,
+        "request_model_ids": [],
+        "expected_response_model_ids": [],
+        "observed_response_model_ids": [],
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_input_tokens": 0,
@@ -540,6 +559,43 @@ def aggregate_usage_summaries(
         aggregate["sessions_total"] += item_sessions
         aggregate["turns_total"] += to_int(item.get("turns_total"))
         aggregate["calls_total"] += item_calls_total
+
+        _collect_string_field(
+            request_model_ids_seen,
+            item.get("request_model_id"),
+        )
+        _collect_string_field(
+            expected_response_model_ids_seen,
+            item.get("expected_response_model_id"),
+        )
+        _collect_string_field(
+            observed_response_model_ids_seen,
+            item.get("observed_response_model_id"),
+        )
+        for field, destination in (
+            ("request_model_ids", request_model_ids_seen),
+            ("expected_response_model_ids", expected_response_model_ids_seen),
+            ("observed_response_model_ids", observed_response_model_ids_seen),
+        ):
+            for model_id in item.get(field, []) or []:
+                _collect_string_field(destination, model_id)
+        identity_checks = to_int(item.get("response_identity_checks_total"))
+        identity_matches = to_int(item.get("response_identity_matches_total"))
+        identity_mismatches = to_int(
+            item.get("response_identity_mismatches_total")
+        )
+        if item.get("response_identity_enforced") is True:
+            identity_checks = max(identity_checks, 1)
+            if item.get("response_identity_matched") is True:
+                identity_matches = max(identity_matches, 1)
+            else:
+                identity_mismatches = max(identity_mismatches, 1)
+        aggregate["response_identity_checks_total"] += identity_checks
+        aggregate["response_identity_matches_total"] += identity_matches
+        aggregate["response_identity_mismatches_total"] += max(
+            identity_mismatches,
+            identity_checks - identity_matches,
+        )
 
         selected_usage_raw = item.get("selected_model_usage")
         selected_usage = _normalize_usage_totals(selected_usage_raw)
@@ -604,6 +660,25 @@ def aggregate_usage_summaries(
     if aggregate["calls_with_selected_model_usage"] > 0:
         aggregate["selected_model_usage_summary"] = _finalize_usage_totals(selected_usage_summary)
     aggregate["selected_models"] = sorted(selected_models_seen)
+    aggregate["request_model_ids"] = sorted(request_model_ids_seen)
+    aggregate["expected_response_model_ids"] = sorted(
+        expected_response_model_ids_seen
+    )
+    aggregate["observed_response_model_ids"] = sorted(
+        observed_response_model_ids_seen
+    )
+    aggregate["calls_without_response_identity_check"] = max(
+        aggregate["calls_total"]
+        - aggregate["response_identity_checks_total"],
+        0,
+    )
+    aggregate["response_identity_all_matched"] = (
+        aggregate["response_identity_checks_total"] > 0
+        and aggregate["calls_without_response_identity_check"] == 0
+        and aggregate["response_identity_mismatches_total"] == 0
+        and aggregate["response_identity_matches_total"]
+        == aggregate["response_identity_checks_total"]
+    )
     _set_common_or_mixed_field(aggregate, "source", sources_seen)
     _set_provider_field(
         aggregate,
@@ -642,6 +717,14 @@ def merge_aggregated_usage_summaries(
         "calls_with_top_level_usage_fallback": 0,
         "calls_missing_selected_model_usage": 0,
         "calls_missing_usage": 0,
+        "response_identity_checks_total": 0,
+        "response_identity_matches_total": 0,
+        "response_identity_mismatches_total": 0,
+        "calls_without_response_identity_check": 0,
+        "response_identity_all_matched": False,
+        "request_model_ids": [],
+        "expected_response_model_ids": [],
+        "observed_response_model_ids": [],
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_read_input_tokens": 0,
@@ -658,6 +741,9 @@ def merge_aggregated_usage_summaries(
     selected_models_seen = set()
     fallback_from_providers_seen = set()
     fallback_to_providers_seen = set()
+    request_model_ids_seen = set()
+    expected_response_model_ids_seen = set()
+    observed_response_model_ids_seen = set()
     selected_usage_summary = _new_usage_totals()
 
     for summary in summaries:
@@ -709,6 +795,22 @@ def merge_aggregated_usage_summaries(
             normalized_summary.get("calls_missing_selected_model_usage")
         )
         merged["calls_missing_usage"] += to_int(normalized_summary.get("calls_missing_usage"))
+        merged["response_identity_checks_total"] += to_int(
+            normalized_summary.get("response_identity_checks_total")
+        )
+        merged["response_identity_matches_total"] += to_int(
+            normalized_summary.get("response_identity_matches_total")
+        )
+        merged["response_identity_mismatches_total"] += to_int(
+            normalized_summary.get("response_identity_mismatches_total")
+        )
+        for field, destination in (
+            ("request_model_ids", request_model_ids_seen),
+            ("expected_response_model_ids", expected_response_model_ids_seen),
+            ("observed_response_model_ids", observed_response_model_ids_seen),
+        ):
+            for model_id in normalized_summary.get(field, []) or []:
+                _collect_string_field(destination, model_id)
         merged["input_tokens"] += to_int(normalized_summary.get("input_tokens"))
         merged["output_tokens"] += to_int(normalized_summary.get("output_tokens"))
         merged["cache_read_input_tokens"] += to_int(normalized_summary.get("cache_read_input_tokens"))
@@ -728,6 +830,24 @@ def merge_aggregated_usage_summaries(
     if merged["calls_with_selected_model_usage"] > 0:
         merged["selected_model_usage_summary"] = _finalize_usage_totals(selected_usage_summary)
     merged["selected_models"] = sorted(selected_models_seen)
+    merged["request_model_ids"] = sorted(request_model_ids_seen)
+    merged["expected_response_model_ids"] = sorted(
+        expected_response_model_ids_seen
+    )
+    merged["observed_response_model_ids"] = sorted(
+        observed_response_model_ids_seen
+    )
+    merged["calls_without_response_identity_check"] = max(
+        merged["calls_total"] - merged["response_identity_checks_total"],
+        0,
+    )
+    merged["response_identity_all_matched"] = (
+        merged["response_identity_checks_total"] > 0
+        and merged["calls_without_response_identity_check"] == 0
+        and merged["response_identity_mismatches_total"] == 0
+        and merged["response_identity_matches_total"]
+        == merged["response_identity_checks_total"]
+    )
     _set_common_or_mixed_field(merged, "source", sources_seen)
     _set_provider_field(
         merged,
@@ -813,6 +933,39 @@ def coerce_aggregated_usage_summary(usage: Optional[Dict[str, Any]]) -> Dict[str
             usage.get("calls_missing_selected_model_usage")
         )
         summary["calls_missing_usage"] = to_int(usage.get("calls_missing_usage"))
+        summary["response_identity_checks_total"] = to_int(
+            usage.get("response_identity_checks_total")
+        )
+        summary["response_identity_matches_total"] = to_int(
+            usage.get("response_identity_matches_total")
+        )
+        summary["response_identity_mismatches_total"] = to_int(
+            usage.get("response_identity_mismatches_total")
+        )
+        for field in (
+            "request_model_ids",
+            "expected_response_model_ids",
+            "observed_response_model_ids",
+        ):
+            summary[field] = sorted(
+                {
+                    str(model_id)
+                    for model_id in (usage.get(field) or [])
+                    if model_id not in (None, "")
+                }
+            )
+        summary["calls_without_response_identity_check"] = max(
+            summary["calls_total"]
+            - summary["response_identity_checks_total"],
+            0,
+        )
+        summary["response_identity_all_matched"] = (
+            summary["response_identity_checks_total"] > 0
+            and summary["calls_without_response_identity_check"] == 0
+            and summary["response_identity_mismatches_total"] == 0
+            and summary["response_identity_matches_total"]
+            == summary["response_identity_checks_total"]
+        )
         summary["input_tokens"] = to_int(usage.get("input_tokens"))
         summary["output_tokens"] = to_int(usage.get("output_tokens"))
         summary["cache_read_input_tokens"] = to_int(usage.get("cache_read_input_tokens"))
@@ -966,6 +1119,45 @@ def _is_sensitive_key_name(key_name: Optional[str]) -> bool:
     )
 
 
+def _is_sensitive_environment_name(name: str) -> bool:
+    """Return whether a host environment entry carries reusable credentials."""
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
+    return (
+        _is_sensitive_key_name(name)
+        or normalized in {
+            "AUTH_TOKEN",
+            "ACCESS_TOKEN",
+            "CLIENT_SECRET",
+            "PASSWORD",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "SSH_AUTH_SOCK",
+        }
+        or normalized.endswith(
+            (
+                "_AUTH_TOKEN",
+                "_ACCESS_TOKEN",
+                "_CLIENT_SECRET",
+                "_PASSWORD",
+                "_PRIVATE_KEY",
+                "_SECRET_ACCESS_KEY",
+                "_SESSION_TOKEN",
+            )
+        )
+    )
+
+
+def _claude_subprocess_environment(
+    env: Optional[Dict[str, str]],
+) -> Dict[str, str]:
+    """Build the Claude process environment without unrelated host credentials."""
+    source = os.environ if env is None else env
+    return {
+        name: value
+        for name, value in source.items()
+        if not _is_sensitive_environment_name(name)
+    }
+
+
 def _sanitize_record_value(value: Any, key_name: Optional[str] = None) -> Any:
     if _is_sensitive_key_name(key_name):
         return "[REDACTED]"
@@ -982,7 +1174,8 @@ def _redacted_command(command: List[str], prompt: str) -> List[str]:
     if not command:
         return []
     redacted = list(command)
-    redacted[-1] = f"<prompt-redacted:{len(prompt)} chars>"
+    if redacted[-1] == prompt:
+        redacted[-1] = f"<prompt-redacted:{len(prompt)} chars>"
     return redacted
 
 
@@ -1042,8 +1235,8 @@ def run_claude_cli(
     command = ["claude", "-p", *(extra_args or [])]
     if json_output:
         command.extend(["--output-format", "json"])
-    command.append(prompt)
     requested_model = selected_model or _extract_requested_model_from_args(extra_args)
+    subprocess_env = _claude_subprocess_environment(env)
 
     try:
         result = subprocess.run(
@@ -1051,8 +1244,9 @@ def run_claude_cli(
             check=False,
             capture_output=True,
             text=True,
+            input=prompt,
             cwd=cwd,
-            env=env,
+            env=subprocess_env,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:

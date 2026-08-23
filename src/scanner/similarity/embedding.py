@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import math
+import hashlib
 import logging
 import threading
 
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_EMBEDDING_MODEL_NAME = "jinaai--jina-code-embeddings-1.5b"
 _RETRIEVER_CACHE: Dict[Tuple[str, str, str], "EmbeddingRetriever"] = {}
 _RETRIEVER_CACHE_LOCK = threading.Lock()
+_FILE_CONTENT_HASH_CACHE: Dict[Tuple[str, int, int, int], str] = {}
+_FILE_CONTENT_HASH_CACHE_LOCK = threading.Lock()
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
@@ -58,48 +61,73 @@ def resolve_embedding_model_path(model_name: Optional[str]) -> Path:
 	return base_model_path / resolved_model_name
 
 
-def embedding_model_artifact_signature(model_name: Optional[str]) -> Dict[str, str]:
-	"""Return the selected model path plus a stable on-disk artifact hash."""
-	model_path = resolve_embedding_model_path(model_name)
-	if not model_path.exists():
-		return {
-			"resolved_model_path": str(model_path),
-			"artifact_hash": "",
-		}
-	if model_path.is_file():
-		try:
-			stat_result = model_path.stat()
-			artifact_hash = stable_data_hash(
-				{
-					"path": str(model_path),
-					"size": int(stat_result.st_size),
-					"mtime_ns": int(stat_result.st_mtime_ns),
-				}
-			)
-		except OSError:
-			artifact_hash = ""
-		return {
-			"resolved_model_path": str(model_path),
-			"artifact_hash": artifact_hash,
-		}
+def _file_content_sha256(path: Path) -> str:
+    """Hash file bytes, reusing cached content only while size/mtime/ctime are unchanged."""
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return ""
+    cache_key = (
+        str(path.resolve()),
+        int(stat_result.st_size),
+        int(stat_result.st_mtime_ns),
+        int(stat_result.st_ctime_ns),
+    )
+    with _FILE_CONTENT_HASH_CACHE_LOCK:
+        cached_hash = _FILE_CONTENT_HASH_CACHE.get(cache_key)
+    if cached_hash is not None:
+        return cached_hash
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    content_hash = digest.hexdigest()
+    with _FILE_CONTENT_HASH_CACHE_LOCK:
+        _FILE_CONTENT_HASH_CACHE[cache_key] = content_hash
+    return content_hash
 
-	file_entries = []
-	for child_path in sorted(path for path in model_path.rglob("*") if path.is_file()):
-		try:
-			stat_result = child_path.stat()
-		except OSError:
-			continue
-		file_entries.append(
-			{
-				"path": str(child_path.relative_to(model_path)),
-				"size": int(stat_result.st_size),
-				"mtime_ns": int(stat_result.st_mtime_ns),
-			}
-		)
-	return {
-		"resolved_model_path": str(model_path),
-		"artifact_hash": stable_data_hash(file_entries),
-	}
+
+def embedding_model_artifact_signature(model_name: Optional[str]) -> Dict[str, str]:
+    """Return a path plus a stable fingerprint bound to model file contents."""
+    model_path = resolve_embedding_model_path(model_name)
+    if not model_path.exists():
+        return {
+            "resolved_model_path": str(model_path),
+            "artifact_hash": "",
+            "fingerprint_type": "content_sha256_manifest",
+        }
+    if model_path.is_file():
+        return {
+            "resolved_model_path": str(model_path),
+            "artifact_hash": _file_content_sha256(model_path),
+            "fingerprint_type": "content_sha256",
+        }
+
+    file_entries = []
+    for child_path in sorted(path for path in model_path.rglob("*") if path.is_file()):
+        content_hash = _file_content_sha256(child_path)
+        if not content_hash:
+            continue
+        try:
+            relative_path = str(child_path.relative_to(model_path))
+            file_size = int(child_path.stat().st_size)
+        except OSError:
+            continue
+        file_entries.append(
+            {
+                "path": relative_path,
+                "size": file_size,
+                "sha256": content_hash,
+            }
+        )
+    return {
+        "resolved_model_path": str(model_path),
+        "artifact_hash": stable_data_hash(file_entries),
+        "fingerprint_type": "content_sha256_manifest",
+    }
 
 
 def get_cached_embedding_retriever(
@@ -163,6 +191,11 @@ class EmbeddingRetriever:
 		self._backend: Optional[str] = None
 		self._tokenizer: Any = None
 		self._embed_lock = threading.Lock()
+
+	@property
+	def backend(self) -> Optional[str]:
+		"""Return the concrete loaded backend, or ``None`` before successful loading."""
+		return self._backend
 
 	def _ensure_loaded(self) -> None:
 		if self._model is not None:

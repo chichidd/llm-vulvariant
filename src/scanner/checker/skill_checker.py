@@ -19,7 +19,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from config import _path_config
 from scanner.checker.threat_model_guardrails import (
@@ -119,6 +119,18 @@ def compute_findings_signature(vulnerabilities: List[Dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def has_complete_terminal_evidence(item: Mapping[str, Any]) -> bool:
+    """终态结论必须有理由和至少一项非空静态证据。"""
+    rationale = item.get("verdict_rationale")
+    if not isinstance(rationale, str) or not rationale.strip():
+        return False
+    static_evidence = item.get("static_evidence")
+    return isinstance(static_evidence, list) and any(
+        isinstance(value, str) and bool(value.strip())
+        for value in static_evidence
+    )
+
+
 def load_findings_freshness(findings_path: Path) -> Tuple[str, Optional[int], Optional[str]]:
     """Load the current findings freshness state, count, and signature."""
     if not findings_path.exists():
@@ -152,16 +164,23 @@ def get_exploitability_output_state(exploitability_data: Optional[Dict[str, Any]
     total_vulnerabilities = metadata.get("total_vulnerabilities")
     if not isinstance(completed_at, str) or not completed_at.strip():
         return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
-    if not isinstance(total_vulnerabilities, int) or total_vulnerabilities < 0:
+    if type(total_vulnerabilities) is not int or total_vulnerabilities < 0:
         return EXPLOITABILITY_OUTPUT_STATE_INVALID
     if len(results) != total_vulnerabilities:
         return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
-    if any(
-        isinstance(item, dict)
-        and normalize_exploitability_verdict(item.get("verdict")) in RETRYABLE_RESULT_VERDICTS
-        for item in results
-    ):
-        return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
+    for item in results:
+        if not isinstance(item, dict):
+            return EXPLOITABILITY_OUTPUT_STATE_INVALID
+        verdict = normalize_exploitability_verdict(item.get("verdict"))
+        if verdict in RETRYABLE_RESULT_VERDICTS:
+            return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
+        if (
+            verdict not in VALID_EXPLOITABILITY_VERDICTS
+            or item.get("confidence") not in VALID_CONFIDENCE_VALUES
+        ):
+            return EXPLOITABILITY_OUTPUT_STATE_INVALID
+        if not has_complete_terminal_evidence(item):
+            return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
     return EXPLOITABILITY_OUTPUT_STATE_COMPLETE
 
 
@@ -176,7 +195,7 @@ def get_exploitability_output_state_for_findings(
 
     findings_state, _, current_findings_signature = load_findings_freshness(findings_path)
     if findings_state == FINDINGS_FRESHNESS_STATE_MISSING:
-        return output_state
+        return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
     if findings_state != FINDINGS_FRESHNESS_STATE_READY:
         return EXPLOITABILITY_OUTPUT_STATE_IN_PROGRESS
 
@@ -197,12 +216,12 @@ class SkillExploitabilityChecker:
         
         Args:
             timeout: Timeout in seconds for each Claude CLI call (default: 600 = 10 minutes)
-            claude_config_dir: Base Claude runtime directory (default: <repo_root>/.claude-runtime)
+            claude_config_dir: Base Claude runtime directory (default: <results_base_path>/runtime/claude)
         """
         self.timeout = timeout
         self.skill_name = "check-exploitability"
         self._default_claude_config_dir = Path(claude_config_dir) if claude_config_dir else (
-            _path_config["repo_root"] / ".claude-runtime"
+            _path_config["results_base_path"] / "runtime" / "claude"
         )
         self._active_claude_config_dir = self._default_claude_config_dir
         self._ensure_claude_runtime_dir(self._default_claude_config_dir)
@@ -232,10 +251,14 @@ class SkillExploitabilityChecker:
     def _finding_id_within_scope(cls, finding_id: Any, total_vulns: int) -> bool:
         """Return whether a persisted finding id still belongs to the current findings set."""
         normalized = cls._normalize_finding_id(finding_id)
-        match = re.fullmatch(r"vuln_(\d+)", normalized)
+        match = re.fullmatch(r"vuln_(\d{3,})", normalized)
         if match is None:
-            return True
-        return int(match.group(1)) < total_vulns
+            return False
+        index = int(match.group(1))
+        return (
+            index < total_vulns
+            and normalized == f"vuln_{index:03d}"
+        )
 
     @staticmethod
     def _finding_matches_current(saved_finding: Any, current_finding: Dict[str, Any]) -> bool:
@@ -247,30 +270,58 @@ class SkillExploitabilityChecker:
     @classmethod
     def _classify_persisted_result(
         cls,
-        item: Dict[str, Any],
+        item: Any,
         current_total_vulns: Optional[int] = None,
         current_findings: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> str:
         """Classify one persisted result row against the current findings set."""
+        if not isinstance(item, dict):
+            return "stale_changed"
         finding_id = cls._normalize_finding_id(item.get("finding_id"))
-        if finding_id:
-            if current_total_vulns is not None and not cls._finding_id_within_scope(
-                finding_id,
-                current_total_vulns,
-            ):
+        if not finding_id:
+            return "stale_scope"
+        if current_total_vulns is not None and not cls._finding_id_within_scope(
+            finding_id,
+            current_total_vulns,
+        ):
+            return "stale_scope"
+        if current_findings is not None:
+            current_finding = current_findings.get(finding_id)
+            if current_finding is None:
                 return "stale_scope"
-            if current_findings is not None:
-                current_finding = current_findings.get(finding_id)
-                if current_finding is None:
-                    return "stale_scope"
-                saved_finding = item.get("original_finding")
-                if isinstance(saved_finding, dict) and not cls._finding_matches_current(
-                    saved_finding,
-                    current_finding,
-                ):
-                    return "stale_changed"
-            if cls._is_retryable_result(item):
-                return "retryable"
+            if not cls._finding_matches_current(
+                item.get("original_finding"),
+                current_finding,
+            ):
+                return "stale_changed"
+        verdict = normalize_exploitability_verdict(item.get("verdict"))
+        confidence = item.get("confidence")
+        if (
+            verdict not in STRUCTURED_EXPLOITABILITY_VERDICTS
+            or confidence not in VALID_CONFIDENCE_VALUES
+        ):
+            return "stale_changed"
+        if cls._is_retryable_result(item):
+            return "retryable"
+        if any(
+            not isinstance(item.get(field), list)
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in item[field]
+            )
+            for field in STRUCTURED_ANALYSIS_LIST_FIELDS
+        ):
+            return "stale_changed"
+        if not has_complete_terminal_evidence(item):
+            return "stale_changed"
+        docker_verification = item.get("docker_verification")
+        if (
+            not isinstance(docker_verification, dict)
+            or not normalize_docker_verification_verdict(
+                docker_verification.get("verification_verdict")
+            )
+        ):
+            return "stale_changed"
         return "keep"
 
     @staticmethod
@@ -357,6 +408,31 @@ class SkillExploitabilityChecker:
             normalized["docker_verification"] = None
         return normalized
 
+    @classmethod
+    def _enforce_terminal_evidence_contract(
+        cls,
+        payload: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """把缺少静态证据的终态降为可重试 UNKNOWN。"""
+        normalized = cls._normalize_analysis_contract(payload)
+        if normalized is None:
+            return None
+        verdict = normalize_exploitability_verdict(normalized.get("verdict"))
+        if verdict in VALID_EXPLOITABILITY_VERDICTS and not has_complete_terminal_evidence(
+            normalized
+        ):
+            normalized["verdict"] = "UNKNOWN"
+            normalized["confidence"] = "low"
+            if not normalized.get("verdict_rationale"):
+                normalized["verdict_rationale"] = (
+                    "缺少可审计的静态代码证据，不能形成终态结论。"
+                )
+            if not normalized.get("open_questions"):
+                normalized["open_questions"] = [
+                    "补充至少一项带代码位置或调用路径的静态证据。"
+                ]
+        return normalized
+
     @staticmethod
     def _looks_like_example_payload(
         text: str,
@@ -423,6 +499,8 @@ class SkillExploitabilityChecker:
         commit_hash: str = "",
         run_id: Optional[str] = None,
         claude_config_dir: str | Path | None = None,
+        validated_findings: Optional[Mapping[str, Any]] = None,
+        scanner_output_binding: Optional[Mapping[str, str]] = None,
     ) -> Dict[str, Any]:
         """Check exploitability of vulnerabilities in a findings file.
         
@@ -442,15 +520,20 @@ class SkillExploitabilityChecker:
         Returns:
             Dictionary with analysis results and metadata
         """
-        # Validate inputs
-        if not findings_path.exists():
+        # 绑定模式直接消费校验器返回的内存快照，避免重新打开可变路径。
+        if validated_findings is None and not findings_path.exists():
             logger.error(f"Findings file not found: {findings_path}")
             return self._error_result(f"Findings file not found: {findings_path}")
 
-        # Load vulnerabilities
         try:
-            findings = json.loads(findings_path.read_text(encoding="utf-8"))
+            findings = (
+                dict(validated_findings)
+                if validated_findings is not None
+                else json.loads(findings_path.read_text(encoding="utf-8"))
+            )
             vulnerabilities = findings.get("vulnerabilities", [])
+            if not isinstance(vulnerabilities, list):
+                raise ValueError("vulnerabilities must be a list")
         except Exception as e:
             logger.error(f"Failed to load findings: {e}")
             return self._error_result(f"Failed to load findings: {e}")
@@ -480,6 +563,7 @@ class SkillExploitabilityChecker:
                     findings_signature=findings_signature,
                     run_id=run_id,
                     claude_config_dir=runtime_dir,
+                    scanner_output_binding=scanner_output_binding,
                 )
             except RuntimeError as exc:
                 logger.error(str(exc))
@@ -515,6 +599,7 @@ class SkillExploitabilityChecker:
                 findings_signature=findings_signature,
                 run_id=run_id,
                 claude_config_dir=runtime_dir,
+                scanner_output_binding=scanner_output_binding,
             )
         except RuntimeError as exc:
             logger.error(str(exc))
@@ -666,7 +751,7 @@ class SkillExploitabilityChecker:
         )
         analysis = self._normalize_analysis_contract(analysis) or analysis
         analysis = self._apply_threat_model_guardrails(analysis, vuln)
-        return self._normalize_analysis_contract(analysis) or analysis
+        return self._enforce_terminal_evidence_contract(analysis) or analysis
 
     def _build_prompt(
         self,
@@ -715,8 +800,8 @@ class SkillExploitabilityChecker:
             "",
             "Verify the code path exists and return strictly ONE JSON object on stdout.",
             "Do not emit markdown, code fences, or prose.",
-            "If any required evidence is missing, use the most conservative verdict ",
-            "and set confidence to low, with explicit unknown gaps.",
+            "If static repository evidence is missing, return UNKNOWN with low confidence;",
+            "do not substitute NOT_EXPLOITABLE or another terminal verdict.",
             "Ground every claim in the provided repository evidence.",
             "If evidence is missing, say so explicitly in the relevant field.",
             "Never invent sink/source details or verdicts not supported by code evidence.",
@@ -727,9 +812,10 @@ class SkillExploitabilityChecker:
             "- State the vulnerability claim, attacker-controlled source, trust boundary, sink semantics, protection analysis, security impact, and counterevidence.",
             "- Derive source control, boundary crossing, and false-positive considerations from the repository evidence and finding context, not from a fixed checklist.",
             "- Docker PoC success is supporting evidence only; it cannot replace source reachability, sink alignment, and an unintended security impact.",
-            "- If any required part is unknown or contradicted by counterevidence, choose a conservative verdict and list the gap explicitly.",
+            "- A terminal verdict requires at least one concrete static_evidence item tied to repository code.",
+            "- If any required part or static evidence is unknown, return UNKNOWN and list the gap explicitly.",
             "",
-            '{"verdict":"EXPLOITABLE|CONDITIONALLY_EXPLOITABLE|LIBRARY_RISK|NOT_EXPLOITABLE",',
+            '{"verdict":"EXPLOITABLE|CONDITIONALLY_EXPLOITABLE|LIBRARY_RISK|NOT_EXPLOITABLE|UNKNOWN",',
             '"confidence":"high|medium|low",',
             '"verdict_rationale":"...",',
             '"preconditions":["..."],',
@@ -764,10 +850,10 @@ class SkillExploitabilityChecker:
             "If output contains EXPLOIT_FAILED, the verification must not be marked as verified.",
             "Only treat Docker verification as VERIFIED_EXPLOITABLE when the PoC reaches the original repository",
             "entrypoint and real sink for this finding.",
-            "If Docker verification needs provider credentials, forward the host environment into the container with",
-            "`docker run -e DEEPSEEK_API_KEY -e OPENAI_API_KEY -e NY_API_KEY -e LAB_LLM_API_KEY ...` so Docker copies the current values.",
-            "Do not leave `<API_KEY>` placeholders in the command.",
-            "Do not print or copy secret values into stdout, files, or the final JSON.",
+            "Never pass host model, platform, cloud, or repository credentials into the Docker PoC.",
+            "If verification requires an external credential, report NOT_VERIFIED and identify the missing",
+            "user-approved test credential as an open question. Do not use or request host production secrets.",
+            "Do not print or copy secret values into stdout, files, commands, or the final JSON.",
             "",
             "After the static analysis (phases 1-4), if verdict is EXPLOITABLE, also run",
             "Phase 5 (Docker PoC Verification) from the skill and include the",
@@ -1099,30 +1185,18 @@ class SkillExploitabilityChecker:
                 run_text = exec_out.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 run_text = ""
-        elif structured_docker_verification:
-            run_text = str(structured_docker_verification.get("execution_output") or "")
 
         build_success = False
         if build_text:
             build_success = bool(
                 re.search(r"writing image sha256:|naming to docker\.io/library/", build_text, flags=re.IGNORECASE)
             )
-        elif structured_docker_verification:
-            build_success = bool(structured_docker_verification.get("build_success"))
 
-        # If execution output exists, docker run likely started. Keep it robust
-        # even when PoC itself reports EXPLOIT_FAILED.
+        # Only filesystem artifacts independently observed by this process count
+        # as Docker execution evidence. The structured JSON is produced by the
+        # same model and cannot attest its own build/run success.
         run_success = exec_out.exists()
-        if not run_success and structured_docker_verification:
-            run_success = bool(structured_docker_verification.get("run_success"))
         exploit_confirmed = bool(re.search(r"VULNERABILITY_CONFIRMED", run_text))
-        explicit_verdict = normalize_docker_verification_verdict(
-            structured_docker_verification.get("verification_verdict")
-            if structured_docker_verification
-            else None
-        )
-        if not exploit_confirmed and structured_docker_verification:
-            exploit_confirmed = bool(structured_docker_verification.get("exploit_confirmed"))
         failure_marker_found = bool(re.search(r"\bEXPLOIT_FAILED\b", run_text))
         simulated_marker_found = self._contains_simulated_poc_markers(run_text)
         if failure_marker_found or simulated_marker_found:
@@ -1134,13 +1208,8 @@ class SkillExploitabilityChecker:
 
         if not build_success:
             if build_log.exists():
-                if run_success:
-                    # Build was likely successful enough to run, but the log may
-                    # be truncated or lack final markers.
-                    build_success = True
-                else:
-                    error = "Docker build did not complete (likely timeout/interruption)."
-                    execution_excerpt = execution_excerpt or "Docker build did not complete."
+                error = "Docker build did not produce an independently recognized success marker."
+                execution_excerpt = execution_excerpt or "Docker build did not complete."
             else:
                 error = "Docker build log not found."
 
@@ -1154,19 +1223,26 @@ class SkillExploitabilityChecker:
         elif run_success and not exploit_confirmed:
             error = error or "PoC executed but did not confirm exploitation."
 
-        if explicit_verdict == "VERIFIED_EXPLOITABLE" and (
-            failure_marker_found or simulated_marker_found or not (build_success and run_success and exploit_confirmed)
-        ):
-            explicit_verdict = ""
-
-        if explicit_verdict and not real_activity:
-            verification_verdict = explicit_verdict
-        elif build_success and run_success and exploit_confirmed:
+        independent_evidence_complete = (
+            dockerfile.exists()
+            and build_log.exists()
+            and exec_out.exists()
+            and build_success
+            and run_success
+            and exploit_confirmed
+        )
+        if independent_evidence_complete:
             verification_verdict = "VERIFIED_EXPLOITABLE"
         elif run_success:
             verification_verdict = "VERIFICATION_FAILED"
         elif build_success:
             verification_verdict = "PARTIAL_VERIFICATION"
+        elif structured_docker_verification is not None and not real_activity:
+            verification_verdict = "NOT_VERIFIED"
+            error = (
+                "Structured Docker claims are not independent execution evidence; "
+                "no Docker artifacts were observed."
+            )
         else:
             verification_verdict = "GENERATION_FAILED"
 
@@ -1199,6 +1275,7 @@ class SkillExploitabilityChecker:
         findings_signature: str,
         run_id: Optional[str] = None,
         claude_config_dir: Optional[Path] = None,
+        scanner_output_binding: Optional[Mapping[str, str]] = None,
     ) -> Dict[str, Any]:
         """Initialize new results or load existing for resume."""
         if output_path.exists():
@@ -1211,7 +1288,21 @@ class SkillExploitabilityChecker:
                     stale_changed_count = 0
                     stale_scope_count = 0
                     retry_count = 0
+                    seen_retained_ids: set[str] = set()
                     existing_metadata = existing.setdefault("metadata", {})
+                    normalized_binding = (
+                        dict(scanner_output_binding)
+                        if scanner_output_binding is not None
+                        else None
+                    )
+                    if (
+                        normalized_binding is not None
+                        and existing_metadata.get("scanner_output_binding")
+                        != normalized_binding
+                    ):
+                        raise RuntimeError(
+                            "scanner output binding changed; discard stale exploitability results"
+                        )
                     previous_findings_signature = existing_metadata.get("findings_signature")
                     findings_signature_changed = (
                         isinstance(previous_findings_signature, str)
@@ -1233,7 +1324,18 @@ class SkillExploitabilityChecker:
                         if classification == "stale_changed":
                             stale_changed_count += 1
                             continue
+                        finding_id = self._normalize_finding_id(
+                            item.get("finding_id")
+                        )
+                        if finding_id in seen_retained_ids:
+                            stale_scope_count += 1
+                            continue
+                        seen_retained_ids.add(finding_id)
                         retained_results.append(item)
+                    retained_results.sort(
+                        key=lambda item: item["finding_id"]
+                    )
+                    existing["results"] = retained_results
 
                     metadata = existing_metadata
                     previous_total_vulns = metadata.get("total_vulnerabilities")
@@ -1284,6 +1386,8 @@ class SkillExploitabilityChecker:
                         metadata["run_id"] = run_id
                     if claude_config_dir:
                         metadata["claude_runtime_dir"] = str(claude_config_dir)
+                    if normalized_binding is not None:
+                        metadata["scanner_output_binding"] = normalized_binding
                     return existing
             except Exception as exc:
                 logger.warning(
@@ -1303,6 +1407,11 @@ class SkillExploitabilityChecker:
                 "completed_at": None,
                 "run_id": run_id,
                 "claude_runtime_dir": str(claude_config_dir) if claude_config_dir else None,
+                "scanner_output_binding": (
+                    dict(scanner_output_binding)
+                    if scanner_output_binding is not None
+                    else None
+                ),
                 "llm_usage_retried_attempts_summary": aggregate_usage_summaries([]),
                 "llm_usage_summary": aggregate_usage_summaries([]),
             },
@@ -1381,12 +1490,29 @@ class SkillExploitabilityChecker:
         seen_ids: set[str] = set()
 
         for item in current_results:
-            finding_id = SkillExploitabilityChecker._normalize_finding_id(item.get("finding_id"))
-            if finding_id:
+            classification = SkillExploitabilityChecker._classify_persisted_result(
+                item,
+                current_total_vulns=current_total_vulns,
+                current_findings=current_findings,
+            )
+            finding_id = (
+                SkillExploitabilityChecker._normalize_finding_id(
+                    item.get("finding_id")
+                )
+                if isinstance(item, dict)
+                else ""
+            )
+            if finding_id and classification in {"keep", "retryable"}:
                 current_by_id[finding_id] = item
 
         for item in existing_results:
-            finding_id = SkillExploitabilityChecker._normalize_finding_id(item.get("finding_id"))
+            finding_id = (
+                SkillExploitabilityChecker._normalize_finding_id(
+                    item.get("finding_id")
+                )
+                if isinstance(item, dict)
+                else ""
+            )
             if finding_id:
                 if finding_id in seen_ids:
                     continue
@@ -1408,17 +1534,27 @@ class SkillExploitabilityChecker:
                 merged_results.append(item)
                 seen_ids.add(finding_id)
                 continue
-            merged_results.append(item)
 
         for item in current_results:
-            finding_id = SkillExploitabilityChecker._normalize_finding_id(item.get("finding_id"))
+            finding_id = (
+                SkillExploitabilityChecker._normalize_finding_id(
+                    item.get("finding_id")
+                )
+                if isinstance(item, dict)
+                else ""
+            )
+            if finding_id not in current_by_id:
+                continue
             if finding_id and finding_id in seen_ids:
                 continue
             if finding_id:
                 seen_ids.add(finding_id)
             merged_results.append(item)
 
-        return merged_results
+        return sorted(
+            merged_results,
+            key=lambda item: item["finding_id"],
+        )
 
     def _build_results_doc_for_save(
         self,
@@ -1430,13 +1566,29 @@ class SkillExploitabilityChecker:
         merged_doc: Dict[str, Any] = dict(result_doc)
         merged_doc["metadata"] = dict(result_doc.get("metadata", {}))
         merged_doc["summary"] = dict(result_doc.get("summary", {}))
-        merged_doc["results"] = list(result_doc.get("results", []))
+        merged_doc["results"] = [
+            self._enforce_terminal_evidence_contract(item) or item
+            for item in result_doc.get("results", [])
+            if isinstance(item, dict)
+        ]
 
         if output_path.exists():
             try:
                 existing = json.loads(output_path.read_text(encoding="utf-8"))
                 existing_results = existing.get("results", [])
-                if isinstance(existing_results, list):
+                existing_metadata = existing.get("metadata", {})
+                current_metadata = merged_doc.get("metadata", {})
+                can_merge_existing = (
+                    isinstance(existing_metadata, dict)
+                    and isinstance(current_metadata, dict)
+                    and existing_metadata.get("scanner_output_binding")
+                    == current_metadata.get("scanner_output_binding")
+                    and existing_metadata.get("findings_signature")
+                    == current_metadata.get("findings_signature")
+                    and existing_metadata.get("total_vulnerabilities")
+                    == current_metadata.get("total_vulnerabilities")
+                )
+                if isinstance(existing_results, list) and can_merge_existing:
                     current_total_vulns = merged_doc.get("metadata", {}).get("total_vulnerabilities")
                     merged_doc["results"] = self._merge_results_for_save(
                         existing_results=existing_results,
@@ -1444,10 +1596,9 @@ class SkillExploitabilityChecker:
                         current_total_vulns=current_total_vulns if isinstance(current_total_vulns, int) else None,
                         current_findings=current_findings,
                     )
-                    existing_metadata = existing.get("metadata", {})
                     if (
-                        isinstance(existing_metadata, dict)
-                        and get_exploitability_output_state(existing) == EXPLOITABILITY_OUTPUT_STATE_COMPLETE
+                        get_exploitability_output_state(existing)
+                        == EXPLOITABILITY_OUTPUT_STATE_COMPLETE
                     ):
                         merged_metadata = merged_doc.setdefault("metadata", {})
                         merged_completed_at = merged_metadata.get("completed_at")
@@ -1458,6 +1609,10 @@ class SkillExploitabilityChecker:
                                 != EXPLOITABILITY_OUTPUT_STATE_COMPLETE
                             ):
                                 merged_metadata["completed_at"] = None
+                elif not can_merge_existing:
+                    logger.info(
+                        "Scanner binding or findings scope changed; skip stale save-time merge"
+                    )
             except Exception as exc:
                 logger.warning(f"Failed to merge existing exploitability results from {output_path}: {exc}")
 

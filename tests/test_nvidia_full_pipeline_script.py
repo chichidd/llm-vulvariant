@@ -1,5 +1,7 @@
 import json
+import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -30,6 +32,10 @@ def _write_fake_python(bin_dir: Path, name: str = "python") -> None:
                 "    raise SystemExit(0)",
                 "with log_path.open('a', encoding='utf-8') as handle:",
                 "    handle.write(json.dumps(args) + '\\n')",
+                "if args[:2] == ['-m', 'cli.batch_scanner']:",
+                "    scan_output = Path(args[args.index('--scan-output-dir') + 1])",
+                "    scan_output.mkdir(parents=True, exist_ok=True)",
+                "    (scan_output / 'scan-output-commit-bindings-fixture.json').write_text('{}', encoding='utf-8')",
             ]
         )
         + "\n",
@@ -55,6 +61,13 @@ def _write_fake_timeout(bin_dir: Path) -> None:
     fake_timeout.chmod(fake_timeout.stat().st_mode | stat.S_IEXEC)
 
 
+def _write_host_command_shims(bin_dir: Path, *names: str) -> None:
+    for name in names:
+        executable = shutil.which(name)
+        assert executable is not None
+        (bin_dir / name).symlink_to(executable)
+
+
 def _write_fake_conda(bin_dir: Path) -> None:
     fake_conda = bin_dir / "conda"
     fake_conda.write_text(
@@ -77,6 +90,10 @@ def _write_fake_conda(bin_dir: Path) -> None:
                 "    raise SystemExit(0)",
                 "with log_path.open('a', encoding='utf-8') as handle:",
                 "    handle.write(json.dumps(python_args) + '\\n')",
+                "if python_args[:2] == ['-m', 'cli.batch_scanner']:",
+                "    scan_output = Path(python_args[python_args.index('--scan-output-dir') + 1])",
+                "    scan_output.mkdir(parents=True, exist_ok=True)",
+                "    (scan_output / 'scan-output-commit-bindings-fixture.json').write_text('{}', encoding='utf-8')",
             ]
         )
         + "\n",
@@ -88,9 +105,10 @@ def _write_fake_conda(bin_dir: Path) -> None:
 def _prepare_pipeline_root(tmp_path: Path) -> Path:
     pipeline_root = tmp_path / "pipeline-root"
     (pipeline_root / "llm-vulvariant").mkdir(parents=True)
-    (pipeline_root / "data").mkdir(parents=True)
-    (pipeline_root / "data" / "repos-nvidia" / "demo" / ".git").mkdir(parents=True)
-    vuln_json = pipeline_root / "data" / "vuln.json"
+    (pipeline_root / "repos" / "general").mkdir(parents=True)
+    (pipeline_root / "repos" / "nvidia" / "demo" / ".git").mkdir(parents=True)
+    vuln_json = pipeline_root / "benchmark" / "input" / "vuln.json"
+    vuln_json.parent.mkdir(parents=True)
     vuln_json.write_text(
         json.dumps(
             [
@@ -164,24 +182,26 @@ def test_run_nvidia_full_pipeline_executes_expected_cli_commands(tmp_path: Path)
 
     assert "--target-version" in software_call
     assert FAKE_GIT_HEAD in software_call
+    assert software_call[software_call.index("--llm-provider") + 1] == "lab"
+    assert software_call[software_call.index("--llm-name") + 1] == "GLM-5.2"
 
     expected_batch_args = [
         "--vuln-json",
-        str(pipeline_root / "data" / "vuln.json"),
+        str(pipeline_root / "benchmark" / "input" / "vuln.json"),
         "--source-repos-root",
-        str(pipeline_root / "data" / "repos"),
+        str(pipeline_root / "repos" / "general"),
         "--source-soft-profiles-dir",
-        str(pipeline_root / "profiles" / "soft"),
+        str(pipeline_root / "evidence" / "profiles" / "soft"),
         "--target-repos-root",
-        str(pipeline_root / "data" / "repos-nvidia"),
+        str(pipeline_root / "repos" / "nvidia"),
         "--target-soft-profiles-dir",
-        str(pipeline_root / "profiles" / "soft-nvidia"),
+        str(pipeline_root / "evidence" / "profiles" / "soft-nvidia"),
         "--jobs",
         "2",
         "--llm-provider",
-        "deepseek",
+        "lab",
         "--llm-name",
-        "deepseek-chat",
+        "GLM-5.2",
     ]
     positions = [batch_call.index(arg) for arg in expected_batch_args]
     assert positions == sorted(positions)
@@ -189,11 +209,23 @@ def test_run_nvidia_full_pipeline_executes_expected_cli_commands(tmp_path: Path)
     assert "--soft-profiles-dir" not in batch_call
     assert "--critical-stop-mode" in batch_call
     assert batch_call[batch_call.index("--critical-stop-mode") + 1] == "max"
+    assert batch_call[batch_call.index("--max-iterations-cap") + 1] == "20"
+    batch_run_id = batch_call[batch_call.index("--run-id") + 1]
 
     assert "--claude-runtime-mode" in exploitability_call
     assert exploitability_call[exploitability_call.index("--claude-runtime-mode") + 1] == "folder"
     assert "--timeout" in exploitability_call
     assert exploitability_call[exploitability_call.index("--timeout") + 1] == "123"
+    assert exploitability_call[exploitability_call.index("--run-id") + 1] == batch_run_id
+    manifest_path = Path(
+        exploitability_call[
+            exploitability_call.index("--scan-output-commit-manifest") + 1
+        ]
+    )
+    assert manifest_path.name == "scan-output-commit-bindings-fixture.json"
+    assert exploitability_call[
+        exploitability_call.index("--scan-output-commit-manifest-sha256") + 1
+    ] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
 
 
 def test_run_nvidia_full_pipeline_uses_distinct_default_run_ids(tmp_path: Path) -> None:
@@ -234,7 +266,9 @@ def test_run_nvidia_full_pipeline_uses_distinct_default_run_ids(tmp_path: Path) 
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
 
-    status_logs = sorted(pipeline_root.glob("output-nvidia-status-*.log"))
+    status_logs = sorted(
+        (pipeline_root / "results" / "logs").glob("output-nvidia-status-*.log")
+    )
     assert len(status_logs) == 2
     run_ids = {path.stem.removeprefix("output-nvidia-status-") for path in status_logs}
     assert len(run_ids) == 2
@@ -247,9 +281,20 @@ def test_run_nvidia_full_pipeline_uses_python3_when_python_alias_is_missing(tmp_
     calls_log = tmp_path / "calls.log"
     _write_fake_python(bin_dir, "python3")
     _write_fake_timeout(bin_dir)
+    _write_host_command_shims(
+        bin_dir,
+        "bash",
+        "basename",
+        "date",
+        "dirname",
+        "find",
+        "mkdir",
+        "sha256sum",
+        "tee",
+    )
 
     env = os.environ.copy()
-    env["PATH"] = f"{bin_dir}:/bin"
+    env["PATH"] = str(bin_dir)
     env["CALLS_LOG"] = str(calls_log)
     env["FAKE_GIT_HEAD"] = FAKE_GIT_HEAD
     env["ROOT"] = str(pipeline_root)
@@ -257,6 +302,9 @@ def test_run_nvidia_full_pipeline_uses_python3_when_python_alias_is_missing(tmp_
     env["EXPLOITABILITY_JOBS"] = "1"
     env["EXPLOITABILITY_RUNTIME_MODE"] = "folder"
     env["LLM_PROVIDER"] = "deepseek"
+
+    assert shutil.which("python", path=env["PATH"]) is None
+    assert shutil.which("python3", path=env["PATH"]) == str(bin_dir / "python3")
 
     result = subprocess.run(
         ["bash", str(SCRIPT)],

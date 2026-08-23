@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union
 from dataclasses import dataclass, field
+
+from config import _path_config
 from profiler.fingerprint import stable_data_hash
 from utils.codeql_native import CodeQLAnalyzer, load_codeql_config, CallGraphEdge
 from utils.git_utils import get_git_commit
@@ -153,7 +155,7 @@ class RepoAnalyzer:
         
         # Set cache directory
         if cache_dir is None:
-            cache_dir = os.path.join(os.path.dirname(__file__), "..", ".cache", "repo_analyzer")
+            cache_dir = _path_config["results_base_path"] / "cache" / "repo-analyzer"
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
@@ -165,17 +167,8 @@ class RepoAnalyzer:
             self.commit_hash = str(int(time.time()))
         
         # Initialize CodeQL analyzer
-        try:
-            from config import _path_config
-        except ImportError as e:
-            logger.warning(f"Failed to import config module: {e}, using default config")
-            _path_config = None
-        
         codeql_config = load_codeql_config()
-        
-        # Only set database_dir when _path_config is successfully imported
-        if _path_config:
-            codeql_config['database_dir'] = str(_path_config['codeql_db_path'])
+        codeql_config["database_dir"] = str(_path_config["codeql_db_path"])
         
         logger.debug(f"CodeQL config queries_path before init: {codeql_config.get('queries_path')}")
         self.codeql_analyzer = CodeQLAnalyzer(codeql_config)

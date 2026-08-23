@@ -10,6 +10,7 @@ from llm import BaseLLMClient
 from config import _path_config
 from utils.logger import get_logger
 from utils.tree_utils import build_directory_structure_tree
+from profiler.rq1_trace import install_client_trace, record_stage_result, trace_stage
 from profiler.software.module_analyzer.toolkit import ModuleAnalyzerToolkit
 from profiler.software.module_analyzer.base import run_agent_analysis
 from profiler.software.prompts import (
@@ -29,7 +30,7 @@ class ModuleAnalyzer:
         llm_client: BaseLLMClient,
         max_iterations: int = 100
     ):
-        self.llm_client = llm_client
+        self.llm_client = install_client_trace(llm_client)
         self.max_iterations = max_iterations
         self.toolkit: Optional[ModuleAnalyzerToolkit] = None
         self.conversation_history: List[Dict[str, Any]] = []  # Conversation history
@@ -90,32 +91,52 @@ class ModuleAnalyzer:
         path_parts = None
         if storage_manager and repo_name:
             path_parts = (repo_name, version) if version else (repo_name,)
+        identity = {
+            "repository_id": repo_name or (repo_path.name if repo_path else "unknown"),
+            "commit": version,
+        }
         
         try:
-            # Run the agent using shared function
-            is_complete, result, llm_calls, messages = run_agent_analysis(
-                llm_client=self.llm_client,
-                system_prompt=system_prompt,
-                initial_message=initial_message,
-                tools=self.toolkit.get_available_tools(),
-                toolkit=self.toolkit,
-                max_iterations=self.max_iterations,
-                storage_manager=storage_manager,
-                conversation_name="module_analysis",
-                path_parts=path_parts,
-                resume_from_saved=resume_from_conversation,
-            )
-            
-            # Save conversation history
-            self.conversation_history = messages
-            logger.debug(f"Module analysis result: {result}")
-            if is_complete:
-                return {
-                    "modules": result.get("modules", []),
-                    "llm_calls": llm_calls,
-                    "analysis_completed": True,
-                }
-            else:
+            with trace_stage("software_profile", identity, "module_analysis"):
+                is_complete, result, llm_calls, messages = run_agent_analysis(
+                    llm_client=self.llm_client,
+                    system_prompt=system_prompt,
+                    initial_message=initial_message,
+                    tools=self.toolkit.get_available_tools(),
+                    toolkit=self.toolkit,
+                    max_iterations=self.max_iterations,
+                    storage_manager=storage_manager,
+                    conversation_name="module_analysis",
+                    path_parts=path_parts,
+                    resume_from_saved=resume_from_conversation,
+                )
+
+                self.conversation_history = messages
+                logger.debug(f"Module analysis result: {result}")
+                if is_complete:
+                    record_stage_result(
+                        kind="software_profile",
+                        identity=identity,
+                        stage="module_analysis",
+                        parser_rule_id="agent-finalize-tool-v1",
+                        result=result,
+                        usage={"llm_calls": llm_calls},
+                    )
+                    return {
+                        "modules": result.get("modules", []),
+                        "llm_calls": llm_calls,
+                        "analysis_completed": True,
+                    }
+                record_stage_result(
+                    kind="software_profile",
+                    identity=identity,
+                    stage="module_analysis",
+                    parser_rule_id="agent-finalize-tool-v1",
+                    result=result,
+                    usage={"llm_calls": llm_calls},
+                    status="failed",
+                    error="module analysis did not complete",
+                )
                 logger.warning(f"Module analysis did not complete after {llm_calls} LLM calls")
                 return {
                     "modules": [],
@@ -124,6 +145,16 @@ class ModuleAnalyzer:
                 }
                 
         except Exception as e:
+            record_stage_result(
+                kind="software_profile",
+                identity=identity,
+                stage="module_analysis",
+                parser_rule_id="agent-finalize-tool-v1",
+                result=None,
+                usage={"llm_calls": 0},
+                status="failed",
+                error=f"{type(e).__name__}: {e}",
+            )
             logger.error(f"Error during module analysis: {e}")
             return {
                 "modules": [],

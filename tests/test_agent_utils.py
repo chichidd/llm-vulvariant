@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+import pytest
+
+from llm.client import LLMResponseIdentityError
 from scanner.agent.utils import clear_reasoning_content, compress_iteration_conversation, make_serializable
 
 
@@ -62,6 +65,20 @@ def test_compress_iteration_conversation_parses_json_code_block():
     assert result["content"]["summary"] == "s"
     assert result["content"]["reasoning"]["analysis"] == "validated the relevant sink path"
     assert result["content"]["shared_memory_hits"] == ["query=os.system"]
+
+
+def test_compress_iteration_conversation_reraises_response_identity_error():
+    class _IdentityMismatchClient:
+        def chat(self, messages):
+            del messages
+            raise LLMResponseIdentityError("response.model mismatch")
+
+    with pytest.raises(LLMResponseIdentityError, match="response.model"):
+        compress_iteration_conversation(
+            _IdentityMismatchClient(),
+            1,
+            [{"role": "assistant", "content": "scan"}],
+        )
 
 
 def test_compress_iteration_conversation_returns_error_payload_on_invalid_json():

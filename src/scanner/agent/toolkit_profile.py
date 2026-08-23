@@ -23,6 +23,11 @@ class ToolkitProfileMixin:
         raw_path = str(file_path or "").strip()
         if not raw_path:
             return None, "file_path is required"
+        if getattr(self, "_file_enumeration_rank", {}):
+            available_paths = set(
+                self.order_repo_relative_paths(list(available_paths))
+            )
+
 
         normalized_path, error = self._resolve_repo_relative_path(raw_path, kind="file")
         if error and (Path(raw_path).is_absolute() or ".." in Path(raw_path).parts):
@@ -36,9 +41,15 @@ class ToolkitProfileMixin:
         if not basename:
             return None, error or f"Could not resolve file path: {raw_path}"
 
-        basename_matches = sorted(
-            cached_path for cached_path in available_paths
+        basename_candidates = [
+            cached_path
+            for cached_path in available_paths
             if Path(cached_path).name == basename
+        ]
+        basename_matches = (
+            self.order_repo_relative_paths(basename_candidates)
+            if getattr(self, "_file_enumeration_rank", {})
+            else sorted(basename_candidates)
         )
         if len(basename_matches) == 1:
             return basename_matches[0], None
@@ -147,17 +158,37 @@ class ToolkitProfileMixin:
         # Get module info
         module_info = self._module_cache.get(target_module, {})
         if not module_info:
+            error_payload = {
+                "error": f"Module {target_module!r} not found in profile",
+            }
+            if not getattr(self, "_file_enumeration_rank", {}):
+                error_payload["available_modules"] = list(
+                    self._module_cache.keys()
+                )[:20]
             return ToolResult(
                 success=True,
-                content=json.dumps({
-                    "error": f"Module '{target_module}' not found in profile",
-                    "available_modules": list(self._module_cache.keys())[:20]
-                }, indent=2)
+                content=json.dumps(error_payload, indent=2),
             )
 
         # Build relationships info
         callers = module_info.get('called_by_modules', [])
         callees = module_info.get('calls_modules', [])
+
+        if getattr(self, "_file_enumeration_rank", {}):
+            relationship_files = []
+            for related_module in [target_module, *callers, *callees]:
+                related_info = self._module_cache.get(related_module, {})
+                relationship_files.extend(related_info.get("files", []))
+            ordered_files = self.order_repo_relative_paths(relationship_files)
+            result = {
+                "schedule_scope": "frozen_global_unique",
+                "total_files": len(ordered_files),
+                "files": ordered_files,
+            }
+            return ToolResult(
+                success=True,
+                content=json.dumps(result, indent=2, ensure_ascii=False),
+            )
 
         # Get files for each related module
         caller_details = []
@@ -229,6 +260,22 @@ class ToolkitProfileMixin:
             related_files = list(self._file_callers.get(target_file, set()))
         else:  # callee
             related_files = list(self._file_callees.get(target_file, set()))
+
+        if getattr(self, "_file_enumeration_rank", {}):
+            ordered_files = self.order_repo_relative_paths(related_files)
+            return ToolResult(
+                success=True,
+                content=json.dumps(
+                    {
+                        "query_type": query_type,
+                        "schedule_scope": "frozen_global_unique",
+                        "total_files": len(ordered_files),
+                        "files": ordered_files,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+            )
 
         # Get detailed edges for context
         detailed_edges = []

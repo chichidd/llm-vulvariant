@@ -20,6 +20,8 @@ def calculate_module_priorities(
     software_profile: Any,
     vulnerability_profile: Any,
     module_similarity_config: Optional[Dict[str, Any]] = None,
+    candidate_priority_enabled: bool = True,
+    embedding_provenance: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, int], Dict[str, str]]:
     """Calculate module priorities for one scan target.
 
@@ -31,6 +33,11 @@ def calculate_module_priorities(
     Returns:
         Tuple of module priorities and file-to-module mappings.
     """
+    if not candidate_priority_enabled:
+        raise ValueError(
+            "candidate-priority ablation requires an externally frozen global file schedule"
+        )
+
     affected_module_names = _extract_affected_module_names(vulnerability_profile)
     logger.info("Affected modules from vulnerability profile: %s", sorted(affected_module_names))
 
@@ -57,6 +64,7 @@ def calculate_module_priorities(
         affected_module_names,
         direct_priority_one_modules,
         module_similarity_config=module_similarity_config,
+        embedding_provenance=embedding_provenance,
     )
     priority_one_modules = direct_priority_one_modules | promoted_priority_one_modules
 
@@ -159,6 +167,7 @@ def _find_embedding_similar_modules(
     affected_module_names: Set[str],
     direct_priority_one_modules: Set[str],
     module_similarity_config: Optional[Dict[str, Any]] = None,
+    embedding_provenance: Optional[Dict[str, Any]] = None,
 ) -> Set[str]:
     """Promote target modules whose semantic similarity exceeds the configured threshold."""
     module_similarity_config = resolve_module_similarity_config(module_similarity_config)
@@ -171,10 +180,15 @@ def _find_embedding_similar_modules(
     if threshold <= 0.0 or not affected_module_names:
         return set()
 
-    retriever = build_text_retriever(
-        model_name=str(module_similarity_config.get("model_name", "") or "").strip() or None,
-        device=str(module_similarity_config.get("device", "cpu") or "cpu").strip() or "cpu",
-    )
+    retriever_kwargs: Dict[str, Any] = {
+        "model_name": str(module_similarity_config.get("model_name", "") or "").strip() or None,
+        "device": str(module_similarity_config.get("device", "cpu") or "cpu").strip() or "cpu",
+    }
+    if bool(module_similarity_config.get("require_embedding", False)):
+        retriever_kwargs["require_embedding"] = True
+    if embedding_provenance is not None:
+        retriever_kwargs["provenance"] = embedding_provenance
+    retriever = build_text_retriever(**retriever_kwargs)
     if retriever is None:
         return set()
 
@@ -192,6 +206,8 @@ def _find_embedding_similar_modules(
                     affected_module_name,
                     module["embedding_text"],
                     text_retriever=retriever,
+                    require_embedding=bool(module_similarity_config.get("require_embedding", False)),
+                    embedding_provenance=embedding_provenance,
                 ),
             )
         if best_score >= threshold:
@@ -237,6 +253,7 @@ def resolve_module_similarity_config(
         "threshold": threshold,
         "model_name": model_name,
         "device": device,
+        "require_embedding": bool(override_config.get("require_embedding", False)),
     }
 
 

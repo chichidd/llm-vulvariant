@@ -4,6 +4,13 @@
 
 第一步建议先读 [runtime-requirements.md](runtime-requirements.md)。那里集中写了当前代码路径真正依赖的 `claude`、`.claude/skills`、`.claude-runtime`、Docker、CodeQL、`jq`、git working tree 和本地 embedding 模型要求。
 
+先显式选择这份自包含 revision：
+
+```bash
+export CCS_REVISION_ROOT=/absolute/path/to/ccs-revision
+cd "$CCS_REVISION_ROOT/code/llm-vulvariant"
+```
+
 ## 1. 最小前提
 
 ### 核心前提
@@ -22,7 +29,7 @@
 | 功能 | 额外要求 |
 |------|----------|
 | 默认 `software-profile` 模块分析 | `claude` CLI、repo-local `.claude/skills/ai-infra-module-modeler` |
-| `python -m cli.exploitability` | `claude` CLI、可写 `.claude-runtime` |
+| `python -m cli.exploitability` | `claude` CLI、可写 `results/runtime/claude` |
 | 自动目标选择 | `transformers` / `sentence-transformers` / `torch` + 本地 embedding 模型目录 |
 | CodeQL 查询 | `codeql` CLI + 可用 database / query pack |
 | Docker PoC | Docker。对 `EXPLOITABLE` finding，这一步会被 exploitability 自动触发 |
@@ -31,7 +38,7 @@
 ## 2. 安装仓库
 
 ```bash
-cd /path/to/workspace/llm-vulvariant
+# Run from the repository root.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -52,14 +59,14 @@ pip install transformers sentence-transformers torch
 |----------|------------------|------|
 | `deepseek` | `DEEPSEEK_API_KEY` | 默认模型为 `deepseek-chat` |
 | `openai` | `NY_API_KEY` | 当前配置中的 base URL 不是标准 OpenAI 官方地址，按仓库现有配置使用 |
-| `lab` | `LAB_LLM_API_KEY` | 当前配置带有重试耗尽后回退到 `deepseek` 的策略 |
+| `lab` | `LAB_LLM_API_KEY` | 使用 `LAB_LLM_API_BASE` / `LAB_LLM_MODEL` 覆盖部署；重试耗尽后不自动回退到其他 provider |
 
 示例：
 
 ```bash
-export DEEPSEEK_API_KEY=...
-export NY_API_KEY=...
-export LAB_LLM_API_KEY=...
+export DEEPSEEK_API_KEY
+export NY_API_KEY
+export LAB_LLM_API_KEY
 ```
 
 命令里可以通过 `--llm-provider` 选择 provider，通过 `--llm-name` 覆盖默认模型名。
@@ -90,7 +97,7 @@ claude -p '{"ok":true}'
 
 ```bash
 test -d .claude/skills/ai-infra-module-modeler
-ls ../models/<model-name>
+ls $CCS_REVISION_ROOT/models/<model-name>
 ```
 
 ## 5. 脚本入口变量与特殊情况

@@ -1,9 +1,14 @@
+import copy
 from pathlib import Path
 
+import pytest
+
+from profiler.fingerprint import stable_data_hash
 from profiler.software.models import ModuleInfo, SoftwareProfile
 from scanner.agent import priority as priority_module
 from scanner.agent.memory import AgentMemoryManager
 from scanner.agent.priority import calculate_module_priorities
+from scanner.agent.schedule_window import FROZEN_SCHEDULE_PAGE_SIZE
 
 
 
@@ -252,6 +257,96 @@ def test_agent_memory_manager_add_findings_batches_and_deduplicates(tmp_path):
     assert [finding["function_name"] for finding in mgr.memory.findings] == ["f", "g"]
 
 
+def test_agent_memory_batch_normalization_failure_leaves_ram_and_disk_unchanged(tmp_path):
+    mgr = AgentMemoryManager(output_dir=tmp_path)
+    mgr.initialize(
+        target_repo="repo",
+        target_commit="abcdef1234567890",
+        cve_id="CVE-2025-0001",
+        module_priorities={"api": 1},
+        file_to_module={"a.py": "api"},
+    )
+    before_disk = mgr.memory_file.read_bytes()
+    valid = {
+        "file_path": "a.py",
+        "function_name": "f",
+        "vulnerability_type": "command_injection",
+    }
+
+    with pytest.raises(AttributeError):
+        mgr.add_findings([valid, "not-a-finding"])
+
+    assert mgr.memory.findings == []
+    assert mgr.memory_file.read_bytes() == before_disk
+    reloaded = AgentMemoryManager(output_dir=tmp_path)
+    assert reloaded.initialize(
+        target_repo="repo",
+        target_commit="abcdef1234567890",
+        cve_id="CVE-2025-0001",
+        module_priorities={"api": 1},
+        file_to_module={"a.py": "api"},
+    ) is True
+    assert reloaded.memory.findings == []
+
+
+def test_atomic_finding_transition_save_failure_rolls_back_ram_and_disk(tmp_path):
+    mgr = AgentMemoryManager(output_dir=tmp_path)
+    mgr.initialize(
+        target_repo="repo",
+        target_commit="abcdef1234567890",
+        cve_id="CVE-2025-0001",
+        module_priorities={"api": 1},
+        file_to_module={"a.py": "api", "b.py": "api"},
+    )
+    before_disk = mgr.memory_file.read_bytes()
+
+    def fail_save():
+        raise RuntimeError("injected save failure")
+
+    mgr.save = fail_save
+    with pytest.raises(RuntimeError, match="injected save failure"):
+        mgr.add_findings_with_first_touches(
+            [{
+                "file_path": "a.py",
+                "function_name": "f",
+                "vulnerability_type": "command_injection",
+            }],
+            ["a.py", "b.py"],
+        )
+
+    assert mgr.memory.findings == []
+    assert mgr.memory.coverage_first_touches == []
+    assert mgr.memory_file.read_bytes() == before_disk
+    reloaded = AgentMemoryManager(output_dir=tmp_path)
+    assert reloaded.initialize(
+        target_repo="repo",
+        target_commit="abcdef1234567890",
+        cve_id="CVE-2025-0001",
+        module_priorities={"api": 1},
+        file_to_module={"a.py": "api", "b.py": "api"},
+    ) is True
+    assert reloaded.memory.findings == []
+    assert reloaded.memory.coverage_first_touches == []
+
+
+def test_atomic_finding_transition_validates_existing_findings_before_touch(tmp_path):
+    mgr = AgentMemoryManager(output_dir=tmp_path)
+    mgr.initialize(
+        target_repo="repo",
+        target_commit="abcdef1234567890",
+        cve_id="CVE-2025-0001",
+        module_priorities={"api": 1},
+        file_to_module={"a.py": "api"},
+    )
+    mgr.memory.findings = ["malformed-existing-finding"]
+
+    with pytest.raises(AttributeError):
+        mgr.add_findings_with_first_touches([], ["a.py"])
+
+    assert mgr.memory.coverage_first_touches == []
+    assert mgr.memory.findings == ["malformed-existing-finding"]
+
+
 def test_agent_memory_manager_reload_existing_state(tmp_path):
     mgr = AgentMemoryManager(output_dir=tmp_path)
     mgr.initialize(
@@ -401,7 +496,7 @@ def test_agent_memory_manager_discards_resume_when_scan_signature_changes(tmp_pa
     assert mgr3.get_scanned_files() == []
 
 
-def test_agent_memory_manager_treats_empty_priority_scope_as_critical_complete(tmp_path):
+def test_agent_memory_manager_rejects_empty_priority_scope_as_critical_complete(tmp_path):
     mgr = AgentMemoryManager(output_dir=tmp_path)
     mgr.initialize(
         target_repo="repo",
@@ -411,7 +506,7 @@ def test_agent_memory_manager_treats_empty_priority_scope_as_critical_complete(t
         file_to_module={"x.py": "other"},
     )
 
-    assert mgr.is_critical_complete() is True
+    assert mgr.is_critical_complete() is False
 
 
 def test_agent_memory_manager_treats_priority_two_as_critical_scope(tmp_path):
@@ -460,7 +555,7 @@ def test_agent_memory_manager_updates_critical_scope_when_resuming(tmp_path):
     assert mgr3.memory.critical_stop_max_priority == 1
 
 
-def test_agent_memory_manager_markdown_matches_priority_one_scope(tmp_path):
+def test_agent_memory_manager_markdown_rejects_empty_priority_one_scope(tmp_path):
     mgr = AgentMemoryManager(output_dir=tmp_path)
     mgr.initialize(
         target_repo="repo",
@@ -474,7 +569,8 @@ def test_agent_memory_manager_markdown_matches_priority_one_scope(tmp_path):
     markdown = mgr.to_markdown()
 
     assert "**Critical Scope**: priority-1 (directly affected or embedding-similar) only" in markdown
-    assert "Incomplete Critical Files" not in markdown
+    assert "Incomplete Critical Files" in markdown
+    assert "No files are bound to the configured critical scope" in markdown
 
 
 def test_agent_memory_manager_markdown_lists_pending_priority_two_files_in_scope(tmp_path):
@@ -493,3 +589,251 @@ def test_agent_memory_manager_markdown_lists_pending_priority_two_files_in_scope
     assert "**Critical Scope**: priority-1/2 (directly affected or embedding-similar + related)" in markdown
     assert "Incomplete Critical Files" in markdown
     assert "- [ ] `b.py`" in markdown
+
+
+def test_module_priority_helper_rejects_candidate_ablation_without_schedule():
+    software = SoftwareProfile(
+        name="repo",
+        modules=[
+            ModuleInfo(name="api", files=["api.py"]),
+            ModuleInfo(name="worker", files=["worker.py"]),
+            ModuleInfo(name="misc", files=["misc.py"]),
+        ],
+    )
+    vulnerability = type("V", (), {"affected_modules": {"api.py": "api"}})()
+    with pytest.raises(
+        ValueError,
+        match="requires an externally frozen global file schedule",
+    ):
+        calculate_module_priorities(
+            software,
+            vulnerability,
+            candidate_priority_enabled=False,
+        )
+
+def test_agent_memory_resume_rejects_changed_reference_profile_hash(tmp_path):
+    first_signature = {"scan_config": {"reference_profile_hash": "card-hash-1"}}
+    second_signature = {"scan_config": {"reference_profile_hash": "card-hash-2"}}
+    manager = AgentMemoryManager(output_dir=tmp_path)
+    manager.initialize(
+        target_repo="repo", target_commit="abcdef", cve_id="",
+        module_priorities={"m": 1}, file_to_module={"x.py": "m"},
+        scan_signature=first_signature,
+    )
+    manager.mark_file("x.py", "completed")
+    resumed_manager = AgentMemoryManager(output_dir=tmp_path)
+    resumed = resumed_manager.initialize(
+        target_repo="repo", target_commit="abcdef", cve_id="",
+        module_priorities={"m": 1}, file_to_module={"x.py": "m"},
+        scan_signature=second_signature,
+    )
+    assert resumed is False
+    assert resumed_manager.get_scanned_files() == []
+
+
+def test_agent_memory_schedule_history_is_exact_contiguous_and_resume_durable(tmp_path):
+    manager = AgentMemoryManager(output_dir=tmp_path)
+    manager.initialize(
+        target_repo="repo",
+        target_commit="abcdef",
+        cve_id="CVE",
+        module_priorities={"schedule": 1},
+        file_to_module={"a.py": "schedule"},
+    )
+    first_files = [f"src/file-{index}.py" for index in range(FROZEN_SCHEDULE_PAGE_SIZE)]
+    first_event = {
+        "schema_version": 1,
+        "cursor_index": 0,
+        "window_end_index_exclusive": FROZEN_SCHEDULE_PAGE_SIZE,
+        "window_file_count": FROZEN_SCHEDULE_PAGE_SIZE,
+        "active_pending_file_count": FROZEN_SCHEDULE_PAGE_SIZE,
+        "completed_window_count": 0,
+        "window_sha256": stable_data_hash(first_files),
+    }
+    final_files = ["src/final-a.py", "src/final-b.py", "src/final-c.py"]
+    final_event = {
+        "schema_version": 1,
+        "cursor_index": FROZEN_SCHEDULE_PAGE_SIZE,
+        "window_end_index_exclusive": FROZEN_SCHEDULE_PAGE_SIZE + len(final_files),
+        "window_file_count": len(final_files),
+        "active_pending_file_count": len(final_files),
+        "completed_window_count": 0,
+        "window_sha256": stable_data_hash(final_files),
+    }
+
+    with pytest.raises(ValueError, match="no matching entered-window event"):
+        manager.record_schedule_presented_page(0)
+    with pytest.raises(ValueError, match="first|exactly contiguous"):
+        manager.record_schedule_window_event(final_event)
+
+    manager.record_schedule_window_event(first_event)
+    manager.record_schedule_window_event(first_event)
+    manager.record_schedule_presented_page(0)
+    manager.record_schedule_presented_page(0)
+    manager.record_schedule_window_event(final_event)
+    manager.record_schedule_presented_page(1)
+
+    assert manager.memory.schedule_window_events == [first_event, final_event]
+    assert manager.memory.schedule_presented_page_indices == [0, 1]
+
+    malformed = dict(final_event, completed_window_count=1)
+    with pytest.raises(ValueError, match="content is invalid"):
+        manager.record_schedule_window_event(malformed)
+    skipped = dict(final_event, cursor_index=2 * FROZEN_SCHEDULE_PAGE_SIZE)
+    skipped["window_end_index_exclusive"] = skipped["cursor_index"] + len(final_files)
+    with pytest.raises(ValueError, match="exactly contiguous"):
+        manager.record_schedule_window_event(skipped)
+    with pytest.raises(ValueError, match="exact key set"):
+        manager.record_schedule_window_event({**first_event, "unexpected": True})
+
+    resumed = AgentMemoryManager(output_dir=tmp_path)
+    assert resumed.load() is True
+    assert resumed.memory.schedule_window_events == [first_event, final_event]
+    assert resumed.memory.schedule_presented_page_indices == [0, 1]
+
+
+def test_agent_memory_resume_rejects_exact_identity_and_runtime_mutations(
+    tmp_path,
+):
+    decoding = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": 1024,
+        "enable_thinking": None,
+        "reasoning_effort": None,
+        "service_tier": None,
+    }
+    decoding_sha256 = stable_data_hash(decoding)
+    endpoint_snapshot = {
+        "snapshot_id": "deployment-fixture-a",
+        "base_url": "https://api.example.invalid/v1",
+        "api_family": "openai_compatible",
+    }
+    endpoint_sha256 = stable_data_hash(endpoint_snapshot)
+    attestation_binding = {
+        "path": "rq2/inputs/model-revision-attestations/fixture.json",
+        "file_sha256": "8" * 64,
+        "payload_sha256": "9" * 64,
+    }
+    runtime_projection = {
+        "raw_reference_sha256": "1" * 64,
+        "projected_reference_sha256": "2" * 64,
+        "raw_static_input_sha256": "3" * 64,
+        "projected_static_input_sha256": "4" * 64,
+        "invariant_projected_static_input_sha256": "4" * 64,
+        "policy_visible_static_input_sha256": "5" * 64,
+        "policy_preserved_fields": [
+            "target_software.modules[].files"
+        ],
+    }
+    signature = {
+        "scan_config": {
+            "max_iterations": 10,
+            "model_visible_input_projection": {
+                "artifact_sha256": "6" * 64,
+            },
+            "model_revision_attestation": dict(attestation_binding),
+            "model_visible_input_runtime_projection": runtime_projection,
+            "endpoint_snapshot": endpoint_snapshot,
+            "endpoint_snapshot_sha256": endpoint_sha256,
+            "decoding_config_requested": decoding,
+            "decoding_config_requested_sha256": decoding_sha256,
+            "decoding_config_effective": decoding,
+            "decoding_config_effective_sha256": decoding_sha256,
+        },
+        "llm": {
+            "provider": "lab",
+            "model": "fixture-model",
+            "model_revision": "fixture-revision-a",
+            "model_revision_attestation": dict(attestation_binding),
+            "base_url": endpoint_snapshot["base_url"],
+            "endpoint_snapshot": endpoint_snapshot,
+            "endpoint_snapshot_sha256": endpoint_sha256,
+            "decoding_config_requested": decoding,
+            "decoding_config_requested_sha256": decoding_sha256,
+            "decoding_config_effective": decoding,
+            "decoding_config_effective_sha256": decoding_sha256,
+            **decoding,
+            "fallback_on_retry_exhausted": False,
+            "exact_decoding_enforced": True,
+        },
+        "config_hashes": {
+            "paths.yaml": "a" * 64,
+            "scanner_config.yaml": "b" * 64,
+            "codeql_config.yaml": "c" * 64,
+            "llm_config.yaml": "d" * 64,
+        },
+    }
+
+    def mutate_decoding(candidate):
+        effective = {
+            **candidate["llm"]["decoding_config_effective"],
+            "reasoning_effort": "high",
+        }
+        candidate["llm"]["decoding_config_effective"] = effective
+        candidate["llm"][
+            "decoding_config_effective_sha256"
+        ] = stable_data_hash(effective)
+
+    def mutate_runtime(candidate):
+        candidate["scan_config"][
+            "model_visible_input_runtime_projection"
+        ]["raw_reference_sha256"] = "7" * 64
+
+    def mutate_endpoint(candidate):
+        candidate["llm"]["endpoint_snapshot"][
+            "snapshot_id"
+        ] = "deployment-fixture-b"
+        candidate["llm"]["endpoint_snapshot_sha256"] = stable_data_hash(
+            candidate["llm"]["endpoint_snapshot"]
+        )
+
+    def mutate_llm_attestation(candidate):
+        candidate["llm"]["model_revision_attestation"][
+            "payload_sha256"
+        ] = "7" * 64
+
+    def mutate_scan_attestation(candidate):
+        candidate["scan_config"]["model_revision_attestation"][
+            "file_sha256"
+        ] = "6" * 64
+
+    def mutate_codeql_config(candidate):
+        candidate["config_hashes"]["codeql_config.yaml"] = "5" * 64
+
+    for index, mutate in enumerate(
+        (
+            mutate_decoding,
+            mutate_runtime,
+            mutate_endpoint,
+            mutate_llm_attestation,
+            mutate_scan_attestation,
+            mutate_codeql_config,
+        )
+    ):
+        output_dir = tmp_path / f"case-{index}"
+        manager = AgentMemoryManager(output_dir=output_dir)
+        manager.initialize(
+            target_repo="repo",
+            target_commit="abcdef",
+            cve_id="CVE",
+            module_priorities={"m": 1},
+            file_to_module={"x.py": "m"},
+            scan_signature=signature,
+        )
+        manager.mark_file("x.py", "completed")
+
+        changed_signature = copy.deepcopy(signature)
+        mutate(changed_signature)
+        resumed_manager = AgentMemoryManager(output_dir=output_dir)
+        resumed = resumed_manager.initialize(
+            target_repo="repo",
+            target_commit="abcdef",
+            cve_id="CVE",
+            module_priorities={"m": 1},
+            file_to_module={"x.py": "m"},
+            scan_signature=changed_signature,
+        )
+
+        assert resumed is False
+        assert resumed_manager.get_scanned_files() == []

@@ -768,13 +768,17 @@ Raw output:
 {raw_text[:20000]}
 ```"""
 
-    response = llm_client.chat(
-        messages=[
+    request = {
+        "messages": [
             {"role": "system", "content": "You are a strict JSON repair assistant."},
             {"role": "user", "content": prompt},
-        ],
-        temperature=0.0,
-    )
+        ]
+    }
+    if not bool(
+        getattr(getattr(llm_client, "config", None), "enforce_exact_decoding", False)
+    ):
+        request["temperature"] = 0.0
+    response = llm_client.chat(**request)
     return extract_message_content(response)
 
 

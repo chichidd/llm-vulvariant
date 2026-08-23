@@ -3,17 +3,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT="${ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
-APP_DIR="$ROOT/llm-vulvariant"
-PROFILES_ROOT="${PROFILES_ROOT:-$ROOT/profiles}"
-VULN_JSON="${VULN_JSON:-$ROOT/data/vuln.json}"
-REPOS_NVIDIA="${REPOS_NVIDIA:-$ROOT/data/repos-nvidia}"
-SOURCE_REPOS_ROOT="${SOURCE_REPOS_ROOT:-$ROOT/data/repos}"
+REVISION_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+ROOT="${ROOT:-$REVISION_ROOT}"
+APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+PROFILES_ROOT="${PROFILES_ROOT:-$ROOT/evidence/profiles}"
+VULN_JSON="${VULN_JSON:-$ROOT/benchmark/input/vuln.json}"
+REPOS_NVIDIA="${REPOS_NVIDIA:-$ROOT/repos/nvidia}"
+SOURCE_REPOS_ROOT="${SOURCE_REPOS_ROOT:-$ROOT/repos/general}"
 REPO_PROFILES_NVIDIA="${REPO_PROFILES_NVIDIA:-$PROFILES_ROOT/soft-nvidia}"
 SOURCE_REPO_PROFILES="${SOURCE_REPO_PROFILES:-$PROFILES_ROOT/soft}"
 VULN_PROFILES_DIR="${VULN_PROFILES_DIR:-$PROFILES_ROOT/vuln}"
-SCAN_OUTPUT_DIR="${SCAN_OUTPUT_DIR:-$ROOT/results/nvidia-batch-scan}"
-EXP_OUTPUT_DIR="${EXP_OUTPUT_DIR:-$ROOT/results/nvidia-batch-exploitability}"
+RUN_ID="${RUN_ID:-nvidia-full-$(date +%Y%m%d-%H%M%S)-$$}"
+SCAN_OUTPUT_DIR="${SCAN_OUTPUT_DIR:-$ROOT/results/nvidia-batch-scan-$RUN_ID}"
+EXP_OUTPUT_DIR="${EXP_OUTPUT_DIR:-$ROOT/results/nvidia-batch-exploitability-$RUN_ID}"
 RUNTIME_ROOT="${RUNTIME_ROOT:-$ROOT/results/claude-runtime}"
 MAX_ITERATIONS_CAP="${MAX_ITERATIONS_CAP:-20}"
 SIMILARITY_THRESHOLD="${SIMILARITY_THRESHOLD:-0.7}"
@@ -25,9 +28,11 @@ EXPLOITABILITY_TIMEOUT="${EXPLOITABILITY_TIMEOUT:-1800}"
 SCAN_JOBS="${SCAN_JOBS:-1}"
 EXPLOITABILITY_JOBS="${EXPLOITABILITY_JOBS:-1}"
 EXPLOITABILITY_RUNTIME_MODE="${EXPLOITABILITY_RUNTIME_MODE:-run}"
-LLM_PROVIDER="${LLM_PROVIDER:-deepseek}"
-LLM_NAME="${LLM_NAME:-}"
-RUN_ID="${RUN_ID:-nvidia-full-$(date +%Y%m%d-%H%M%S)-$$}"
+LLM_PROVIDER="lab"
+LLM_NAME="GLM-5.2"
+LAB_LLM_API_BASE="https://llm.shtech.org/v1"
+LAB_LLM_MODEL="GLM-5.2"
+export LAB_LLM_API_BASE LAB_LLM_MODEL
 PYTHON_BIN="${PYTHON_BIN:-}"
 
 if [[ -z "$PYTHON_BIN" ]]; then
@@ -41,14 +46,12 @@ if [[ -z "$PYTHON_BIN" ]]; then
   fi
 fi
 read -r -a PYTHON_CMD <<<"$PYTHON_BIN"
-
-LOG_DIR="$ROOT"
+LOG_DIR="$ROOT/results/logs"
 PROFILE_LOG="$LOG_DIR/output-nvidia-profile-$RUN_ID.log"
 SCAN_LOG="$LOG_DIR/output-nvidia-scan-$RUN_ID.log"
 EXP_LOG="$LOG_DIR/output-nvidia-exploitability-$RUN_ID.log"
 STATUS_LOG="$LOG_DIR/output-nvidia-status-$RUN_ID.log"
-
-mkdir -p "$REPO_PROFILES_NVIDIA" "$SCAN_OUTPUT_DIR" "$EXP_OUTPUT_DIR" "$RUNTIME_ROOT"
+mkdir -p "$REPO_PROFILES_NVIDIA" "$SCAN_OUTPUT_DIR" "$EXP_OUTPUT_DIR" "$RUNTIME_ROOT" "$LOG_DIR"
 
 cleanup_codeql_temp_artifacts() {
   local repo_dir="$1"
@@ -67,7 +70,6 @@ sys.path.insert(0, str(app_dir / "src"))
 from config import _path_config
 from utils import repo_lock as repo_lock_module
 
-_path_config["repo_root"] = app_dir
 
 cleaned = False
 with repo_lock_module.hold_repo_lock(repo_dir, purpose="cleanup_codeql_temp_artifacts"):
@@ -101,7 +103,6 @@ from config import _path_config
 from utils import git_utils as git_utils_module
 from utils import repo_lock as repo_lock_module
 
-_path_config["repo_root"] = app_dir
 git_utils_module.logger.disabled = True
 repo_lock_module.logger.disabled = True
 
@@ -148,6 +149,8 @@ print(f"vuln_entries={len(entries)}")
 print(f"vuln_profiles_missing={len(missing)}")
 for i, repo, cve, p in missing:
     print(f"  missing [{i}] {repo} {cve} -> {p}")
+if missing:
+    raise SystemExit(1)
 PY
 
 echo "[$(date -Iseconds)] Stage 2/5: link source software profiles for vuln entries into soft-nvidia" | tee -a "$STATUS_LOG"
@@ -180,7 +183,7 @@ for repo, commit in need:
         if dst_dir.exists() or dst_dir.is_symlink():
             skipped += 1
             continue
-        if not src_dir.exists():
+        if not (src_dir / "software_profile.json").is_file():
             missing_src += 1
             continue
 
@@ -214,6 +217,8 @@ print(f"source_profiles_linked={linked}")
 print(f"source_profiles_copied={copied}")
 print(f"source_profiles_skipped={skipped}")
 print(f"source_profiles_missing_in_source_dir={missing_src}")
+if missing_src:
+    raise SystemExit(1)
 PY
 
 echo "[$(date -Iseconds)] Stage 3/5: build missing software profiles for repos-nvidia (timeout=${SOFTWARE_PROFILE_TIMEOUT}s each)" | tee -a "$STATUS_LOG"
@@ -273,6 +278,10 @@ for d in "$REPOS_NVIDIA"/*; do
   fi
 done
 echo "[$(date -Iseconds)] Stage 3 summary: total=$total ok=$ok skip=$skip fail=$fail" | tee -a "$STATUS_LOG"
+if (( fail != 0 )); then
+  echo "[$(date -Iseconds)] Refusing batch scan because target profile generation had $fail failure(s)" | tee -a "$STATUS_LOG"
+  exit 1
+fi
 
 echo "[$(date -Iseconds)] Stage 4/5: run batch scanner" | tee -a "$STATUS_LOG"
 scan_cmd=(
@@ -284,6 +293,7 @@ scan_cmd=(
   --target-soft-profiles-dir "$REPO_PROFILES_NVIDIA"
   --vuln-profiles-dir "$VULN_PROFILES_DIR"
   --scan-output-dir "$SCAN_OUTPUT_DIR"
+  --run-id "$RUN_ID"
   --similarity-threshold "$SIMILARITY_THRESHOLD"
   --fallback-top-n "$FALLBACK_TOP_N"
   --max-targets "$MAX_TARGETS"
@@ -298,9 +308,21 @@ fi
 "${scan_cmd[@]}" >> "$SCAN_LOG" 2>&1
 echo "[$(date -Iseconds)] Stage 4 completed" | tee -a "$STATUS_LOG"
 
+mapfile -t SCAN_COMMIT_MANIFESTS < <(
+  find "$SCAN_OUTPUT_DIR" -maxdepth 1 -type f -name 'scan-output-commit-bindings-*.json' -print
+)
+if (( ${#SCAN_COMMIT_MANIFESTS[@]} != 1 )); then
+  echo "[$(date -Iseconds)] Expected exactly one scanner terminal binding manifest, found ${#SCAN_COMMIT_MANIFESTS[@]}" | tee -a "$STATUS_LOG"
+  exit 1
+fi
+SCAN_COMMIT_MANIFEST="${SCAN_COMMIT_MANIFESTS[0]}"
+read -r SCAN_COMMIT_MANIFEST_SHA256 _ < <(sha256sum "$SCAN_COMMIT_MANIFEST")
+
 echo "[$(date -Iseconds)] Stage 5/5: run exploitability and generate reports" | tee -a "$STATUS_LOG"
 "${PYTHON_CMD[@]}" -m cli.exploitability \
   --scan-results-dir "$SCAN_OUTPUT_DIR" \
+  --scan-output-commit-manifest "$SCAN_COMMIT_MANIFEST" \
+  --scan-output-commit-manifest-sha256 "$SCAN_COMMIT_MANIFEST_SHA256" \
   --soft-profile-dir "$REPO_PROFILES_NVIDIA" \
   --repo-base-path "$REPOS_NVIDIA" \
   --generate-report \

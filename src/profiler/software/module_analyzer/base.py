@@ -9,6 +9,7 @@ from llm import (
     capture_llm_usage_snapshot,
 )
 from llm.tool_arguments import normalize_tool_arguments
+from profiler.rq1_trace import trace_enabled
 from utils.claude_cli import coerce_aggregated_usage_summary, merge_aggregated_usage_summaries
 from utils.logger import get_logger
 from utils.number_utils import to_int
@@ -66,6 +67,9 @@ def run_agent_analysis(
             - llm_calls: Number of LLM calls.
             - messages: Full conversation history.
     """
+    if trace_enabled():
+        resume_from_saved = False
+
     # Try to resume from a checkpointed conversation (loaded from module_analysis)
     messages = None
     start_iteration = 0
@@ -184,6 +188,9 @@ def run_agent_analysis(
         logger.debug(f"[LLM call {llm_call_count}] content={content[:200] if content else None}... tool_calls={tool_calls}")
         
         if not tool_calls:
+            if trace_enabled():
+                logger.error("RQ1 trace 模式只接受 finalize 工具结果")
+                return False, {}, llm_call_count, messages
             # No tool calls: try parsing the result from the content
             if content:
                 try:
@@ -206,6 +213,17 @@ def run_agent_analysis(
             logger.debug(f"No tool calls in response, analysis may be incomplete (call {llm_call_count})")
             return False, {}, llm_call_count, messages
         
+        if trace_enabled():
+            finalize_count = sum(
+                getattr(getattr(tool, "function", None), "name", None) == "finalize"
+                for tool in tool_calls
+            )
+            if finalize_count > 1 or (
+                finalize_count == 1 and len(tool_calls) != 1
+            ):
+                logger.error("RQ1 trace 模式要求终态只含一个 finalize 工具调用")
+                return False, {}, llm_call_count, messages
+
         # Handle tool calls
         has_finalize = False
         for tool in tool_calls:

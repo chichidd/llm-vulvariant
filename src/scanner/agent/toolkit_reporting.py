@@ -29,6 +29,14 @@ class ToolkitReportingMixin:
             "attack_scenario",
         )
 
+        verifier_enabled = bool(getattr(self, "_verifier_enabled", True))
+        if not verifier_enabled:
+            required_string_fields = tuple(
+                field_name
+                for field_name in required_string_fields
+                if field_name != "attack_scenario"
+            )
+
         normalized_file_path, error = self._resolve_repo_relative_path(
             finding.get("file_path", ""),
             kind="file",
@@ -46,6 +54,10 @@ class ToolkitReportingMixin:
             if not field_value:
                 return None, f"{field_name} is required"
             normalized[field_name] = field_value
+        if not verifier_enabled:
+            optional_attack_scenario = str(finding.get("attack_scenario", "") or "").strip()
+            if optional_attack_scenario:
+                normalized["attack_scenario"] = optional_attack_scenario
 
         raw_line_number = finding.get("line_number")
         if raw_line_number is not None:
@@ -68,6 +80,15 @@ class ToolkitReportingMixin:
             content=json.dumps(normalized_finding, indent=2, ensure_ascii=False),
         )
 
+    def _order_status_files(self, statuses: Dict[str, str]) -> Dict[str, str]:
+        """Order scheduled status rows globally; preserve default behavior otherwise."""
+        if not getattr(self, "_file_enumeration_rank", {}):
+            return statuses
+        return {
+            path: statuses[path]
+            for path in self.order_repo_relative_paths(list(statuses))
+        }
+
     def _check_file_status(self, file_paths: List[str]) -> ToolResult:
         """Check the scan status of files from memory."""
         if not self._memory_manager:
@@ -75,30 +96,36 @@ class ToolkitReportingMixin:
             for fp in file_paths:
                 normalized_path, _ = self._resolve_repo_relative_path(fp, kind="file")
                 normalized_files[normalized_path if normalized_path else fp] = "pending"
+            normalized_files = self._order_status_files(normalized_files)
             return ToolResult(
                 success=True,
-                content=json.dumps({
-                    "note": "Memory not available. All files are considered pending.",
-                    "files": normalized_files
-                }, indent=2)
+                content=json.dumps(
+                    {
+                        "note": "Memory not available. All files are considered pending.",
+                        "files": normalized_files,
+                    },
+                    indent=2,
+                ),
             )
 
         result = {}
         for fp in file_paths:
             normalized_path, error = self._resolve_repo_relative_path(fp, kind="file")
             lookup_path = normalized_path if normalized_path else fp
-            status = self._memory_manager.memory.file_status.get(lookup_path, "not_tracked")
+            status = self._memory_manager.memory.file_status.get(
+                lookup_path, "not_tracked"
+            )
             result[lookup_path] = status if not error else "not_tracked"
-
-        # Add summary
+        result = self._order_status_files(result)
         summary_text = self._memory_manager.summarize_statuses(result)
 
         return ToolResult(
             success=True,
-            content=json.dumps({
-                "summary": summary_text,
-                "files": result
-            }, indent=2, ensure_ascii=False)
+            content=json.dumps(
+                {"summary": summary_text, "files": result},
+                indent=2,
+                ensure_ascii=False,
+            ),
         )
 
     def _mark_file_completed(self, file_path: str, reason: str = "") -> ToolResult:
@@ -144,6 +171,25 @@ class ToolkitReportingMixin:
                 error=f"File is not tracked in scan memory: {normalized_path}"
             )
 
+        retire_completed_file = None
+        if getattr(self, "_scheduled_mode", False):
+            if normalized_path not in getattr(self, "_active_file_window_rank", {}):
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error=(
+                        "File is unavailable in the active frozen schedule window: "
+                        f"{normalized_path}"
+                    ),
+                )
+            retire_completed_file = getattr(self, "retire_completed_file", None)
+            if not callable(retire_completed_file):
+                return ToolResult(
+                    success=False,
+                    content="",
+                    error="Scheduled completion gate is unavailable.",
+                )
+
         mark_completed_fn = getattr(self._memory_manager, "mark_file_completed", None)
         if callable(mark_completed_fn):
             mark_completed_fn(normalized_path, reason=reason)
@@ -160,6 +206,8 @@ class ToolkitReportingMixin:
                 content="",
                 error=f"Failed to persist completed status for tracked file: {normalized_path}"
             )
+        if retire_completed_file is not None:
+            retire_completed_file(normalized_path)
         if reason:
             logger.info(f"File marked completed: {normalized_path} - {reason}")
         else:

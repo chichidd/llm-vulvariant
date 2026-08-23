@@ -1,5 +1,7 @@
 import copy
 import inspect
+import json
+import math
 import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set
@@ -9,6 +11,11 @@ import yaml
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from config_snapshot import (
+    consume_scanner_config_bytes,
+    read_config_file_bytes,
+    scanner_config_path,
+)
 from utils.claude_cli import aggregate_usage_summaries
 from utils.llm_usage import (
     _first_present,
@@ -129,25 +136,46 @@ def load_llm_config_from_yaml(config_path: Optional[Path] = None) -> Dict[str, A
     Returns:
         A dict containing LLM configuration.
     """
-    if config_path is None:
-        config_path = Path(__file__).parent.parent.parent / "config" / "llm_config.yaml"
-    config_path = Path(config_path)
-
-    if not config_path.exists():
-        return _default_llm_config()
+    default_path = config_path is None
+    config_path = (
+        scanner_config_path("llm_config.yaml")
+        if default_path
+        else Path(config_path).expanduser().absolute()
+    )
 
     try:
-        raw_text = config_path.read_text(encoding='utf-8')
+        raw_bytes = (
+            consume_scanner_config_bytes("llm_config.yaml")
+            if default_path
+            else read_config_file_bytes(
+                config_path,
+                label="LLM config",
+            )
+        )
+        raw_text = raw_bytes.decode("utf-8")
     except Exception as exc:
         raise RuntimeError(f"Failed to read LLM config: {config_path}: {exc}") from exc
 
     if not raw_text.strip():
-        return _default_llm_config()
-
-    try:
-        config = yaml.safe_load(raw_text)
-    except yaml.YAMLError as exc:
-        raise RuntimeError(f"Failed to parse LLM config: {config_path}: {exc}") from exc
+        config = None
+    else:
+        try:
+            config = yaml.safe_load(raw_text)
+        except yaml.YAMLError as exc:
+            raise RuntimeError(f"Failed to parse LLM config: {config_path}: {exc}") from exc
+    if default_path:
+        try:
+            verified_bytes = consume_scanner_config_bytes(
+                "llm_config.yaml"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to verify LLM config after parsing: {config_path}: {exc}"
+            ) from exc
+        if verified_bytes != raw_bytes:
+            raise RuntimeError(
+                f"LLM config changed while parsing: {config_path}"
+            )
     if config is None:
         return _default_llm_config()
     if isinstance(config, dict):
@@ -160,6 +188,7 @@ class LLMConfig:
     """LLM configuration."""
     provider: str = ""  # openai, deepseek, lab
     model: str = ""
+    model_revision: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     fallback_provider: Optional[str] = None
@@ -178,6 +207,9 @@ class LLMConfig:
     
 
     enable_thinking: Optional[bool] = None  # DeepSeek thinking parameter
+    reasoning_effort: Optional[str] = None
+    service_tier: Optional[str] = None
+    enforce_exact_decoding: bool = False
 
     def __init__(
         self,
@@ -197,9 +229,16 @@ class LLMConfig:
         max_delay: Any = _UNSET,
         backoff_factor: Any = _UNSET,
         enable_thinking: Any = _UNSET,
+        reasoning_effort: Any = _UNSET,
+        service_tier: Any = _UNSET,
+        enforce_exact_decoding: Any = _UNSET,
+        model_revision: Any = _UNSET,
     ) -> None:
         self.provider = provider
         self.model = model
+        self.model_revision = (
+            None if model_revision is _UNSET else model_revision
+        )
         self.api_key = api_key
         self.base_url = base_url
         self.fallback_provider = None if fallback_provider is _UNSET else fallback_provider
@@ -214,9 +253,19 @@ class LLMConfig:
         self.max_delay = 60.0 if max_delay is _UNSET else max_delay
         self.backoff_factor = 2.0 if backoff_factor is _UNSET else backoff_factor
         self.enable_thinking = None if enable_thinking is _UNSET else enable_thinking
+        self.reasoning_effort = (
+            None if reasoning_effort is _UNSET else reasoning_effort
+        )
+        self.service_tier = None if service_tier is _UNSET else service_tier
+        self.enforce_exact_decoding = (
+            False
+            if enforce_exact_decoding is _UNSET
+            else bool(enforce_exact_decoding)
+        )
         self._explicit_config_fields: Set[str] = {
             field_name
             for field_name, value in (
+                ("model_revision", model_revision),
                 ("temperature", temperature),
                 ("top_p", top_p),
                 ("max_tokens", max_tokens),
@@ -229,6 +278,9 @@ class LLMConfig:
                 ("max_delay", max_delay),
                 ("backoff_factor", backoff_factor),
                 ("enable_thinking", enable_thinking),
+                ("reasoning_effort", reasoning_effort),
+                ("service_tier", service_tier),
+                ("enforce_exact_decoding", enforce_exact_decoding),
             )
             if value is not _UNSET
         }
@@ -236,7 +288,17 @@ class LLMConfig:
 
     def __post_init__(self) -> None:
         """Auto-populate api_key/base_url based on provider, preferring YAML config."""
+        if self.model_revision is not None and (
+            not isinstance(self.model_revision, str)
+            or not self.model_revision
+            or self.model_revision != self.model_revision.strip()
+        ):
+            raise ValueError(
+                "model_revision must be a non-empty exact string"
+            )
         explicit_fields = getattr(self, "_explicit_config_fields", set())
+        caller_set_base_url = bool(self.base_url)
+        caller_set_model = bool(self.model)
         # First try to load from YAML.
         yaml_config = load_llm_config_from_yaml()
         llm_config = yaml_config.get('llm', {})
@@ -274,6 +336,15 @@ class LLMConfig:
                 self.base_url = provider_config['base_url']
             if not self.model and 'model' in provider_config:
                 self.model = provider_config['model']
+            # 非敏感部署信息允许命名环境变量覆盖；调用方显式值优先。
+            if not caller_set_base_url and 'base_url_env' in provider_config:
+                env_base_url = os.getenv(provider_config['base_url_env'])
+                if env_base_url:
+                    self.base_url = env_base_url
+            if not caller_set_model and 'model_env' in provider_config:
+                env_model = os.getenv(provider_config['model_env'])
+                if env_model:
+                    self.model = env_model
             if "fallback_provider" not in explicit_fields and not self.fallback_provider and 'fallback_provider' in provider_config:
                 self.fallback_provider = provider_config['fallback_provider']
             if (
@@ -316,7 +387,10 @@ class LLMConfig:
             if "context_limit" not in explicit_fields and self.context_limit == 0:
                 self.context_limit = 65536
 
-        if self.enable_thinking is None:
+        if (
+            self.enable_thinking is None
+            and "enable_thinking" not in explicit_fields
+        ):
             self.enable_thinking = True
 
 
@@ -329,6 +403,10 @@ class LLMRetryExhaustedError(Exception):
 
 class LLMNoResultError(Exception):
     """Raised when a provider returns no usable response payload."""
+
+
+class LLMResponseIdentityError(LLMNoResultError):
+    """响应模型身份缺失或不匹配；正式运行不得重试。"""
 
 
 class BaseLLMClient(ABC):
@@ -350,12 +428,18 @@ class BaseLLMClient(ABC):
         self.initial_delay = config.initial_delay
         self.max_delay = config.max_delay
         self.backoff_factor = config.backoff_factor
+        # This class already owns retry budgets, backoff, fallback decisions,
+        # and usage accounting. Disable SDK retries so one configured attempt
+        # always means one HTTP request attempt.
+        self.sdk_max_retries = 0
         try:
             from openai import OpenAI
-            self.client = OpenAI(
-                api_key=config.api_key,
-                base_url=config.base_url
-            )
+            client_kwargs = {
+                "api_key": config.api_key,
+                "base_url": config.base_url,
+            }
+            client_kwargs["max_retries"] = self.sdk_max_retries
+            self.client = OpenAI(**client_kwargs)
         except ImportError:
             raise ImportError("Please install openai: pip install openai")
 
@@ -379,6 +463,64 @@ class BaseLLMClient(ABC):
             self._last_usage_summary = copy.deepcopy(summary)
             self._usage_history.append(copy.deepcopy(summary))
             return copy.deepcopy(summary)
+
+    def _validate_response_model_identity(self, response: Any) -> None:
+        """正式精确模式拒绝缺失或不匹配的响应模型身份。"""
+        identity_required = bool(
+            getattr(self.config, "enforce_exact_decoding", False)
+        ) or (
+            self.config.provider == "lab"
+            and self.config.model == "GLM-5.2"
+        )
+        if not identity_required:
+            return
+        response_model = getattr(response, "model", None)
+        if (
+            type(response_model) is not str
+            or response_model != self.config.model
+        ):
+            raise LLMResponseIdentityError(
+                "response.model does not exactly match the selected model"
+            )
+
+    def _record_validated_response_usage(self, response: Any) -> None:
+        """先记录实际响应用量，再决定是否放行响应内容。"""
+        response_model = getattr(response, "model", None)
+        identity_enforced = bool(
+            getattr(self.config, "enforce_exact_decoding", False)
+        ) or (
+            self.config.provider == "lab"
+            and self.config.model == "GLM-5.2"
+        )
+        usage_summary = summarize_chat_completion_usage(
+            response,
+            requested_model=self.config.model,
+            provider=self.config.provider,
+        )
+        usage_summary.update(
+            {
+                "api_family": "openai_compatible",
+                "request_model_id": self.config.model,
+                "expected_response_model_id": self.config.model,
+                "observed_response_model_id": (
+                    response_model
+                    if isinstance(response_model, str)
+                    else None
+                ),
+                "response_identity_enforced": identity_enforced,
+                "response_identity_matched": (
+                    isinstance(response_model, str)
+                    and response_model == self.config.model
+                ),
+            }
+        )
+        try:
+            self._validate_response_model_identity(response)
+        except LLMNoResultError:
+            usage_summary["is_error"] = True
+            self._record_usage_summary(usage_summary)
+            raise
+        self._record_usage_summary(usage_summary)
 
     def _set_last_usage_summary(self, usage_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         summary = self._normalize_usage_summary(usage_summary)
@@ -481,6 +623,9 @@ class BaseLLMClient(ABC):
         if isinstance(exception, (TypeError, ValueError)):
             return False
 
+        if isinstance(exception, LLMResponseIdentityError):
+            return False
+
         if self._is_no_result_error(exception):
             return True
 
@@ -510,7 +655,29 @@ class BaseLLMClient(ABC):
 
         return False
     
-    def _calculate_delay(self, attempt: int) -> float:
+    @staticmethod
+    def _retry_after_seconds(exception: Exception) -> Optional[float]:
+        """Read a numeric Retry-After value from an SDK exception."""
+        response = getattr(exception, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        try:
+            raw_value = headers.get("Retry-After")
+            if raw_value is None:
+                raw_value = headers.get("retry-after")
+            retry_after = float(raw_value)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not math.isfinite(retry_after) or retry_after < 0:
+            return None
+        return retry_after
+
+    def _calculate_delay(
+        self,
+        attempt: int,
+        exception: Optional[Exception] = None,
+    ) -> float:
         """
         Compute retry delay using exponential backoff.
 
@@ -525,7 +692,13 @@ class BaseLLMClient(ABC):
         import random
         jitter = delay * 0.1 * (2 * random.random() - 1)
         delay = delay + jitter
-        return min(delay, self.max_delay)
+        delay = min(delay, self.max_delay)
+        retry_after = (
+            self._retry_after_seconds(exception)
+            if exception is not None
+            else None
+        )
+        return max(delay, retry_after) if retry_after is not None else delay
 
     def _get_normalized_fallback_provider(self) -> str:
         return str(self.config.fallback_provider or "").strip().lower()
@@ -536,6 +709,9 @@ class BaseLLMClient(ABC):
     def _should_use_provider_fallback(self, exception: Exception, *, retries_exhausted: bool) -> bool:
         return (
             self.config.provider == "lab"
+            and not bool(
+                getattr(self.config, "enforce_exact_decoding", False)
+            )
             and retries_exhausted
             and self._get_normalized_fallback_provider() == "deepseek"
             and bool(self.config.fallback_on_retry_exhausted)
@@ -617,6 +793,87 @@ class BaseLLMClient(ABC):
         )
         return updated_kwargs
 
+    def _decoding_request_parameters(
+        self,
+        kwargs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """构造 chat 请求实际消费的非空解码参数。"""
+        if bool(
+            getattr(self.config, "enforce_exact_decoding", False)
+        ):
+            for field in (
+                "temperature",
+                "top_p",
+                "max_tokens",
+                "enable_thinking",
+                "reasoning_effort",
+                "service_tier",
+            ):
+                if field not in kwargs:
+                    continue
+                try:
+                    override_json = json.dumps(
+                        kwargs[field],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                    configured_json = json.dumps(
+                        getattr(self.config, field, None),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "exact decoding mode rejects invalid per-call decoding values"
+                    ) from exc
+                if override_json != configured_json:
+                    raise ValueError(
+                        "exact decoding mode rejects per-call decoding overrides"
+                    )
+        request_parameters: Dict[str, Any] = {
+            "temperature": kwargs.get("temperature", self.config.temperature),
+            "top_p": kwargs.get("top_p", self.config.top_p),
+            "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
+        }
+        for field in ("reasoning_effort", "service_tier"):
+            value = (
+                kwargs[field]
+                if field in kwargs
+                else getattr(self.config, field, None)
+            )
+            if value is not None:
+                request_parameters[field] = value
+        return request_parameters
+
+    def _thinking_extra_body(
+        self,
+        kwargs: Dict[str, Any],
+        *,
+        require_explicit: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """映射显式 thinking 意图；null 表示不发送扩展字段。"""
+        explicit_fields = getattr(self.config, "_explicit_config_fields", set())
+        if (
+            require_explicit
+            and "enable_thinking" not in kwargs
+            and "enable_thinking" not in explicit_fields
+        ):
+            return None
+        value = (
+            kwargs["enable_thinking"]
+            if "enable_thinking" in kwargs
+            else getattr(self.config, "enable_thinking", None)
+        )
+        if value is None:
+            return None
+        return {
+            "thinking": {
+                "type": "enabled" if value else "disabled",
+            }
+        }
+
     def _extract_chat_message(self, response: Any) -> Any:
         choices = getattr(response, "choices", None)
         if choices is None and isinstance(response, dict):
@@ -671,6 +928,9 @@ class BaseLLMClient(ABC):
                 max_delay=self.max_delay,
                 backoff_factor=self.backoff_factor,
                 enable_thinking=self.config.enable_thinking,
+                reasoning_effort=self.config.reasoning_effort,
+                service_tier=self.config.service_tier,
+                enforce_exact_decoding=self.config.enforce_exact_decoding,
                 fallback_on_retry_exhausted=False,
             )
             fallback_client = create_llm_client(fallback_config)
@@ -774,6 +1034,21 @@ class BaseLLMClient(ABC):
                     error_summary["is_error"] = True
                 self._set_last_usage_summary(error_summary)
 
+                if (
+                    bool(
+                        getattr(
+                            self.config,
+                            "enforce_exact_decoding",
+                            False,
+                        )
+                    )
+                    and self._is_context_limit_error(e)
+                ):
+                    logger.error(
+                        "Exact decoding mode rejects context-limit parameter adaptation"
+                    )
+                    raise
+
                 context_limit_retry_kwargs = self._build_context_limit_retry_kwargs(e, kwargs)
                 if context_limit_retry_kwargs is not None:
                     kwargs = context_limit_retry_kwargs
@@ -786,7 +1061,7 @@ class BaseLLMClient(ABC):
                 
                 # Check whether we have remaining retries
                 if attempt < self.max_retries - 1:
-                    delay = self._calculate_delay(attempt)
+                    delay = self._calculate_delay(attempt, e)
                     logger.warning(
                         f"LLM API error (attempt {attempt + 1}/{self.max_retries}): "
                         f"{type(e).__name__}: {e}. Retrying in {delay:.2f}s..."
@@ -846,12 +1121,16 @@ class OpenAIClient(BaseLLMClient):
         request_params = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": kwargs.get("temperature", self.config.temperature),
-            "top_p": kwargs.get("top_p", self.config.top_p),
+            **self._decoding_request_parameters(kwargs),
             "timeout": kwargs.get("timeout", self.config.timeout),
             "stream": False,
-            "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
         }
+        thinking_extra_body = self._thinking_extra_body(
+            kwargs,
+            require_explicit=True,
+        )
+        if thinking_extra_body is not None:
+            request_params["extra_body"] = thinking_extra_body
         response_format = kwargs.get("response_format")
         if response_format is not None:
             request_params["response_format"] = response_format
@@ -861,13 +1140,7 @@ class OpenAIClient(BaseLLMClient):
             request_params["tools"] = tools
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
         response = self.client.chat.completions.create(**request_params)
-        self._record_usage_summary(
-            summarize_chat_completion_usage(
-                response,
-                requested_model=self.config.model,
-                provider=self.config.provider,
-            )
-        )
+        self._record_validated_response_usage(response)
         return self._extract_chat_message(response)
     
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
@@ -889,12 +1162,13 @@ class DeepSeekClient(BaseLLMClient):
             self.context_limit = 131072
 
     def _process_extra_body(self, kwargs) -> Dict[str, Any]:
-        if self.config.enable_thinking:
-
-            if self.config.provider == "deepseek":
-                return {"thinking": {"type": "enabled"}}
-            
-        return {}
+        return (
+            self._thinking_extra_body(
+                kwargs,
+                require_explicit=False,
+            )
+            or {}
+        )
 
     def _make_chat_request(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
         """Execute the underlying chat request (internal helper).
@@ -919,17 +1193,17 @@ class DeepSeekClient(BaseLLMClient):
         request_params = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": kwargs.get("temperature", self.config.temperature),
-            "top_p": kwargs.get("top_p", self.config.top_p),
+            **self._decoding_request_parameters(kwargs),
             "timeout": kwargs.get("timeout", self.config.timeout),
             "stream": False,
-            "max_tokens": kwargs.get("max_tokens", self.config.max_tokens),
         }
         response_format = kwargs.get("response_format")
         if response_format is not None:
             request_params["response_format"] = response_format
         
-        request_params["extra_body"] = self._process_extra_body(kwargs)
+        extra_body = self._process_extra_body(kwargs)
+        if extra_body:
+            request_params["extra_body"] = extra_body
 
         # Add tools parameters
         if tools is not None:
@@ -937,13 +1211,7 @@ class DeepSeekClient(BaseLLMClient):
             request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
         # Send request
         response = self.client.chat.completions.create(**request_params)
-        self._record_usage_summary(
-            summarize_chat_completion_usage(
-                response,
-                requested_model=self.config.model,
-                provider=self.config.provider,
-            )
-        )
+        self._record_validated_response_usage(response)
         return self._extract_chat_message(response)
 
     def chat(self, messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None, **kwargs) -> Any:
