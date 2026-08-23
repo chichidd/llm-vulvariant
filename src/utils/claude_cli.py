@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -1119,45 +1118,6 @@ def _is_sensitive_key_name(key_name: Optional[str]) -> bool:
     )
 
 
-def _is_sensitive_environment_name(name: str) -> bool:
-    """Return whether a host environment entry carries reusable credentials."""
-    normalized = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
-    return (
-        _is_sensitive_key_name(name)
-        or normalized in {
-            "AUTH_TOKEN",
-            "ACCESS_TOKEN",
-            "CLIENT_SECRET",
-            "PASSWORD",
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            "SSH_AUTH_SOCK",
-        }
-        or normalized.endswith(
-            (
-                "_AUTH_TOKEN",
-                "_ACCESS_TOKEN",
-                "_CLIENT_SECRET",
-                "_PASSWORD",
-                "_PRIVATE_KEY",
-                "_SECRET_ACCESS_KEY",
-                "_SESSION_TOKEN",
-            )
-        )
-    )
-
-
-def _claude_subprocess_environment(
-    env: Optional[Dict[str, str]],
-) -> Dict[str, str]:
-    """Build the Claude process environment without unrelated host credentials."""
-    source = os.environ if env is None else env
-    return {
-        name: value
-        for name, value in source.items()
-        if not _is_sensitive_environment_name(name)
-    }
-
-
 def _sanitize_record_value(value: Any, key_name: Optional[str] = None) -> Any:
     if _is_sensitive_key_name(key_name):
         return "[REDACTED]"
@@ -1236,7 +1196,6 @@ def run_claude_cli(
     if json_output:
         command.extend(["--output-format", "json"])
     requested_model = selected_model or _extract_requested_model_from_args(extra_args)
-    subprocess_env = _claude_subprocess_environment(env)
 
     try:
         result = subprocess.run(
@@ -1246,7 +1205,7 @@ def run_claude_cli(
             text=True,
             input=prompt,
             cwd=cwd,
-            env=subprocess_env,
+            env=env,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:

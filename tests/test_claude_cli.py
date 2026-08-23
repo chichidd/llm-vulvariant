@@ -1035,43 +1035,6 @@ def test_run_claude_cli_preserves_json_stdout_after_redaction(monkeypatch, tmp_p
     assert sanitized_stdout["modelUsage"]["deepseek-chat"]["outputTokens"] == 4
 
 
-def test_run_claude_cli_strips_host_credentials_from_subprocess(monkeypatch, tmp_path):
-    captured_env = None
-
-    class _Result:
-        returncode = 0
-        stdout = '{"type":"result","subtype":"success","result":"ok"}'
-        stderr = ""
-
-    def _fake_run(*args, **kwargs):
-        nonlocal captured_env
-        captured_env = kwargs["env"]
-        return _Result()
-
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-profile"))
-    monkeypatch.setenv("LAB_LLM_API_KEY", "lab-secret")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-secret")
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-secret")
-    monkeypatch.setenv("SSH_AUTH_SOCK", str(tmp_path / "ssh-agent.sock"))
-    monkeypatch.setattr("utils.claude_cli.subprocess.run", _fake_run)
-
-    response = run_claude_cli(prompt="safe env", cwd=str(tmp_path))
-
-    assert response.success is True
-    assert captured_env is not None
-    assert captured_env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-profile")
-    assert "PATH" in captured_env
-    for name in (
-        "LAB_LLM_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "SSH_AUTH_SOCK",
-    ):
-        assert name not in captured_env
-
-
 def test_run_claude_cli_redacts_structured_api_key_fields(monkeypatch, tmp_path):
     record_path = tmp_path / "claude_cli_invocation.json"
 
