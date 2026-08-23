@@ -332,7 +332,7 @@ def test_run_all_vuln_software_profile_uses_repo_relative_defaults(tmp_path: Pat
     repos_root = tmp_path / "repos" / "general"
     profiles_root = tmp_path / "evidence" / "profiles"
     (repos_root / "demo").mkdir(parents=True)
-    vuln_json = tmp_path / "benchmark" / "input" / "vuln.json"
+    vuln_json = tmp_path / "exp-glm-0823" / "input" / "vuln.json"
     vuln_json.parent.mkdir(parents=True)
     vuln_json.write_text(
         '[{"repo_name":"demo","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]\n',

@@ -78,7 +78,7 @@ software-profile \
 # 2) 生成漏洞画像
 vuln-profile \
   --vuln-index 0 \
-  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --vuln-json $CCS_REVISION_ROOT/exp-glm-0823/input/vuln.json \
   --llm-provider lab \
   --llm-name GLM-5.2
 
@@ -126,7 +126,7 @@ python -m cli.exploitability \
 
 ```text
 $CCS_REVISION_ROOT/
-├── benchmark/input/vuln.json
+├── exp-glm-0823/input/vuln.json
 ├── code/llm-vulvariant/
 ├── evidence/profiles/
 │   ├── soft/
@@ -137,6 +137,9 @@ $CCS_REVISION_ROOT/
 ├── models/
 └── results/
 ```
+
+当前默认 `vuln.json` 只包含 `exp-glm-0823` 冻结的 8 个 reference，不再包含旧输入中的
+两条 `cve-tencent-nemo*` 和 `CVE-2025-41419`。
 
 常见输出物：
 

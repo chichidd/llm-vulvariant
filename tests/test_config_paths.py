@@ -59,7 +59,9 @@ def test_default_paths_are_canonical_and_revision_local():
     assert loaded["results_base_path"] == revision_root / "results"
     assert loaded["repo_root"] == repo_root
     assert loaded["profile_base_path"] == revision_root / "evidence" / "profiles"
-    assert loaded["vuln_data_path"] == revision_root / "benchmark" / "input" / "vuln.json"
+    assert loaded["vuln_data_path"] == (
+        revision_root / "exp-glm-0823" / "input" / "vuln.json"
+    )
     assert loaded["repo_base_path"] == revision_root / "repos" / "general"
     for name, path in loaded.items():
         if name == "project_root":
@@ -130,8 +132,8 @@ def test_default_paths_cannot_be_rebound_after_registry_freeze(
         "repo_root": "..",
         "results_base_path": "results",
         "profile_base_path": "evidence/profiles",
-        "data_base_path": "benchmark/input",
-        "vuln_data_path": "benchmark/input/vuln.json",
+        "data_base_path": "exp-glm-0823/input",
+        "vuln_data_path": "exp-glm-0823/input/vuln.json",
         "repo_base_path": "repos/general",
         "codeql_db_path": "results/codeql-dbs",
         "embedding_model_path": "./models",

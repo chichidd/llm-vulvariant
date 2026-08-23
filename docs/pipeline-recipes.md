@@ -52,7 +52,7 @@ software-profile \
 ```bash
 vuln-profile \
   --vuln-index 0 \
-  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --vuln-json $CCS_REVISION_ROOT/exp-glm-0823/input/vuln.json \
   --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --software-profile-dirname soft \
   --vuln-profile-dirname vuln \
@@ -135,7 +135,7 @@ scanner \
 
 ```bash
 batch-scanner \
-  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --vuln-json $CCS_REVISION_ROOT/exp-glm-0823/input/vuln.json \
   --source-repos-root $CCS_REVISION_ROOT/repos/general \
   --target-repos-root $CCS_REVISION_ROOT/repos/nvidia \
   --source-soft-profiles-dir $CCS_REVISION_ROOT/evidence/profiles/soft \

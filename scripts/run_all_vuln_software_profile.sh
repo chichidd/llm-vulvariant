@@ -9,7 +9,7 @@ REVISION_ROOT="${REVISION_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd -P)}"
 export PYTHONPATH="$APP_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 source "$SCRIPT_DIR/profile_paths.sh"
 
-VULN_JSON="${VULN_JSON:-$REVISION_ROOT/benchmark/input/vuln.json}"
+VULN_JSON="${VULN_JSON:-$REVISION_ROOT/exp-glm-0823/input/vuln.json}"
 REPO_BASE_PATH="${REPO_BASE_PATH:-$REVISION_ROOT/repos/general}"
 PROFILE_BASE_PATH="${PROFILE_BASE_PATH:-$REVISION_ROOT/evidence/profiles}"
 SOFT_PROFILE_DIRNAME="${SOFT_PROFILE_DIRNAME:-soft}"

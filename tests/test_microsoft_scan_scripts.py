@@ -79,7 +79,7 @@ def _prepare_pipeline_root(tmp_path: Path) -> Path:
     (pipeline_root / "repos" / "general").mkdir(parents=True)
     (pipeline_root / "repos" / "microsoft").mkdir(parents=True)
     (pipeline_root / "evidence" / "profiles").mkdir(parents=True)
-    vuln_json = pipeline_root / "benchmark" / "input" / "vuln.json"
+    vuln_json = pipeline_root / "exp-glm-0823" / "input" / "vuln.json"
     vuln_json.parent.mkdir(parents=True)
     vuln_json.write_text("[]", encoding="utf-8")
     return pipeline_root
@@ -90,7 +90,7 @@ def _prepare_repo_root(tmp_path: Path) -> Path:
     (repo_root / "repos" / "general").mkdir(parents=True)
     (repo_root / "repos" / "microsoft").mkdir(parents=True)
     (repo_root / "evidence" / "profiles").mkdir(parents=True)
-    vuln_json = repo_root / "benchmark" / "input" / "vuln.json"
+    vuln_json = repo_root / "exp-glm-0823" / "input" / "vuln.json"
     vuln_json.parent.mkdir(parents=True)
     vuln_json.write_text("[]", encoding="utf-8")
     return repo_root

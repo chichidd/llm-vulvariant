@@ -20,7 +20,7 @@ cd "$CCS_REVISION_ROOT/code/llm-vulvariant"
 
 ```text
 $CCS_REVISION_ROOT/
-├── benchmark/input/vuln.json
+├── exp-glm-0823/input/vuln.json
 ├── code/llm-vulvariant/
 ├── evidence/profiles/
 │   ├── soft/
@@ -37,7 +37,7 @@ $CCS_REVISION_ROOT/
 
 | 路径 | 用途 |
 |------|------|
-| `benchmark/input/vuln.json` | 漏洞条目输入 |
+| `exp-glm-0823/input/vuln.json` | GLM-5.2 实验冻结的 8 条漏洞输入；不包含旧范围额外的 3 条记录 |
 | `repos/general/` | 默认 source repo 根目录，也可以同时作为 target repo 根目录 |
 | `evidence/profiles/soft/` | 软件画像输出目录 |
 | `evidence/profiles/vuln/` | 漏洞画像输出目录 |
@@ -187,7 +187,7 @@ ROOT=$CCS_REVISION_ROOT/repos/nvidia bash scripts/update_repos.sh
 
 ```bash
 bash scripts/run_all_vuln_software_profile.sh \
-  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --vuln-json $CCS_REVISION_ROOT/exp-glm-0823/input/vuln.json \
   --repo-base-path $CCS_REVISION_ROOT/repos/general \
   --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --soft-profile-dirname soft \
@@ -208,7 +208,7 @@ bash scripts/run_all_vuln_software_profile.sh \
 
 ```bash
 bash scripts/run_all_vulnerability_profiles.sh \
-  --vuln-json $CCS_REVISION_ROOT/benchmark/input/vuln.json \
+  --vuln-json $CCS_REVISION_ROOT/exp-glm-0823/input/vuln.json \
   --profile-base-path $CCS_REVISION_ROOT/evidence/profiles \
   --soft-profile-dirname soft \
   --vuln-profile-dirname vuln \

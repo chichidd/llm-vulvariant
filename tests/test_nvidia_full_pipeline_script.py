@@ -107,7 +107,7 @@ def _prepare_pipeline_root(tmp_path: Path) -> Path:
     (pipeline_root / "llm-vulvariant").mkdir(parents=True)
     (pipeline_root / "repos" / "general").mkdir(parents=True)
     (pipeline_root / "repos" / "nvidia" / "demo" / ".git").mkdir(parents=True)
-    vuln_json = pipeline_root / "benchmark" / "input" / "vuln.json"
+    vuln_json = pipeline_root / "exp-glm-0823" / "input" / "vuln.json"
     vuln_json.parent.mkdir(parents=True)
     vuln_json.write_text(
         json.dumps(
@@ -187,7 +187,7 @@ def test_run_nvidia_full_pipeline_executes_expected_cli_commands(tmp_path: Path)
 
     expected_batch_args = [
         "--vuln-json",
-        str(pipeline_root / "benchmark" / "input" / "vuln.json"),
+        str(pipeline_root / "exp-glm-0823" / "input" / "vuln.json"),
         "--source-repos-root",
         str(pipeline_root / "repos" / "general"),
         "--source-soft-profiles-dir",
